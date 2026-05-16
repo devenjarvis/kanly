@@ -6,9 +6,10 @@ import (
 	"go/types"
 )
 
+
 type Candidate struct {
 	Node     ast.Node
-	Pos      token.Position
+	Pos      token.Pos // raw position; resolve with the package FileSet
 	Original string
 	Mutant   string
 }
