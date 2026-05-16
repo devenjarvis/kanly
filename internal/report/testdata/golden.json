@@ -1,0 +1,59 @@
+{
+  "summary": {
+    "total": 3,
+    "killed": 2,
+    "survived": 1,
+    "timeout": 0,
+    "not_viable": 0,
+    "not_covered": 0,
+    "score": 0.6666666666666666
+  },
+  "mutants": [
+    {
+      "mutation": {
+        "mutation_id": 1,
+        "file": "foo.go",
+        "line": 5,
+        "column": 10,
+        "operator": "int_arith",
+        "original": "+",
+        "mutant": "-"
+      },
+      "status": "killed",
+      "killing_tests": [
+        "TestAdd"
+      ],
+      "duration_ns": 0
+    },
+    {
+      "mutation": {
+        "mutation_id": 2,
+        "file": "foo.go",
+        "line": 10,
+        "column": 3,
+        "operator": "int_arith",
+        "original": "-",
+        "mutant": "+"
+      },
+      "status": "killed",
+      "killing_tests": [
+        "TestSub"
+      ],
+      "duration_ns": 0
+    },
+    {
+      "mutation": {
+        "mutation_id": 3,
+        "file": "bar.go",
+        "line": 3,
+        "column": 15,
+        "operator": "int_arith",
+        "original": "*",
+        "mutant": "/"
+      },
+      "status": "survived",
+      "killing_tests": null,
+      "duration_ns": 0
+    }
+  ]
+}
