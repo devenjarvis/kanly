@@ -10,14 +10,22 @@ import (
 	"github.com/devenjarvis/cauldron/internal/source"
 )
 
-func testdataDir(t *testing.T, sub string) string {
+// relDir returns the absolute path of sub relative to this test file's directory.
+func relDir(t *testing.T, sub string) string {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "testdata", sub)
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	abs, err := filepath.Abs(filepath.Join(filepath.Dir(file), sub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
 }
 
 func TestLoadParsesPackageWithTypeInfo(t *testing.T) {
-	dir := testdataDir(t, "simple")
+	dir := relDir(t, "testdata/simple")
 	pkg, err := source.Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -27,12 +35,10 @@ func TestLoadParsesPackageWithTypeInfo(t *testing.T) {
 		t.Fatalf("expected 1 file, got %d", len(pkg.Files))
 	}
 
-	// Verify the + expression is typed as int.
+	// Verify at least one int-typed expression is in TypesInfo.
 	found := false
-	for expr, tv := range pkg.TypesInfo.Types {
-		// Look for a binary expression typed int
+	for _, tv := range pkg.TypesInfo.Types {
 		if tv.Type == types.Typ[types.Int] {
-			_ = expr
 			found = true
 			break
 		}
@@ -41,7 +47,6 @@ func TestLoadParsesPackageWithTypeInfo(t *testing.T) {
 		t.Error("no int-typed expression found in TypesInfo.Types")
 	}
 
-	// Verify FileSet is populated
 	if pkg.Fset == nil {
 		t.Error("Fset is nil")
 	}

@@ -9,14 +9,22 @@ import (
 	"github.com/devenjarvis/cauldron/internal/source"
 )
 
-func testdataDir(t *testing.T, sub string) string {
+// relDir returns the absolute path of sub relative to this test file's directory.
+func relDir(t *testing.T, sub string) string {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "testdata", sub)
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	abs, err := filepath.Abs(filepath.Join(filepath.Dir(file), sub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
 }
 
 func TestIntArithFindsAddOnly(t *testing.T) {
-	pkg, err := source.Load(testdataDir(t, "../../source/testdata/simple"))
+	pkg, err := source.Load(relDir(t, "../source/testdata/simple"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -42,7 +50,7 @@ func TestIntArithFindsAddOnly(t *testing.T) {
 }
 
 func TestIntArithSkipsFloat64(t *testing.T) {
-	pkg, err := source.Load(testdataDir(t, "floatpkg"))
+	pkg, err := source.Load(relDir(t, "testdata/floatpkg"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
