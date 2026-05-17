@@ -88,11 +88,12 @@ func TestEndToEndSamplePackage(t *testing.T) {
 		t.Errorf("Survived: want %d, got %d", wantSurvived, result.Summary.Survived)
 	}
 
-	// Verify the killed mutant is Add's +→- and the killing test is TestAdd.
+	// Pinned ledger: verify each mutant's details.
 	for _, m := range result.Mutants {
-		if m.Status == "killed" {
+		switch m.Status {
+		case "killed":
 			if m.Mutation.Original != "+" || m.Mutation.Mutant != "-" {
-				t.Errorf("expected killed mutant +→-, got %s→%s", m.Mutation.Original, m.Mutation.Mutant)
+				t.Errorf("killed mutant: expected +→-, got %s→%s", m.Mutation.Original, m.Mutation.Mutant)
 			}
 			found := false
 			for _, kt := range m.KillingTests {
@@ -103,6 +104,19 @@ func TestEndToEndSamplePackage(t *testing.T) {
 			if !found {
 				t.Errorf("expected TestAdd in killing tests, got %v", m.KillingTests)
 			}
+		case "survived":
+			if m.Mutation.Original != "-" || m.Mutation.Mutant != "+" {
+				t.Errorf("survived mutant: expected -→+, got %s→%s", m.Mutation.Original, m.Mutation.Mutant)
+			}
+			if len(m.KillingTests) != 0 {
+				t.Errorf("survived mutant should have no killing tests, got %v", m.KillingTests)
+			}
 		}
+	}
+
+	// Score must reflect 1 killed out of 2 total (= 0.5).
+	wantScore := 0.5
+	if result.Summary.Score != wantScore {
+		t.Errorf("Score: want %v, got %v", wantScore, result.Summary.Score)
 	}
 }
