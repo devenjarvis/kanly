@@ -66,6 +66,46 @@ func (BoolLogic) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	return &ast.CallExpr{Fun: &ast.Ident{Name: "__cMutBool"}, Args: args}
 }
 
+// BoolNot finds unary ! expressions on bool operands and proposes removal of the !.
+type BoolNot struct{}
+
+func (BoolNot) Name() string          { return "bool_not" }
+func (BoolNot) DispatcherKey() string { return "bool_not" }
+
+func (BoolNot) Find(file *ast.File, info *types.Info) []mutation.Candidate {
+	var candidates []mutation.Candidate
+	ast.Inspect(file, func(n ast.Node) bool {
+		expr, ok := n.(*ast.UnaryExpr)
+		if !ok {
+			return true
+		}
+		if expr.Op != token.NOT {
+			return true
+		}
+		if !boolOperand(info, expr.X) {
+			return true
+		}
+		candidates = append(candidates, mutation.Candidate{
+			Node:     expr,
+			Pos:      expr.OpPos,
+			Original: "!",
+			Mutant:   "",
+		})
+		return true
+	})
+	return candidates
+}
+
+// Rewrite replaces !x with __cMutNot(x, mutIDs...) — no closure needed since ! doesn't short-circuit.
+func (BoolNot) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
+	expr := c.Node.(*ast.UnaryExpr)
+	args := []ast.Expr{expr.X}
+	for _, id := range mutIDs {
+		args = append(args, &ast.BasicLit{Kind: token.INT, Value: fmt.Sprintf("%d", id)})
+	}
+	return &ast.CallExpr{Fun: &ast.Ident{Name: "__cMutNot"}, Args: args}
+}
+
 // boolFuncLit wraps expr in func() bool { return expr } preserving the original node pointer
 // so astutil.Apply can recurse into nested bool expressions and rewrite them too.
 func boolFuncLit(expr ast.Expr) *ast.FuncLit {

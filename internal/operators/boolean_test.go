@@ -51,6 +51,46 @@ func TestBoolLogicFindsBothSwaps(t *testing.T) {
 	}
 }
 
+func TestBoolNotFindsOneRemoval(t *testing.T) {
+	pkg, err := source.Load(relDirBool(t, "testdata/boolpkg"))
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+
+	var candidates []mutation.Candidate
+	for _, f := range pkg.Files {
+		candidates = append(candidates, BoolNot{}.Find(f, pkg.TypesInfo)...)
+	}
+
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d: %v", len(candidates), candidates)
+	}
+	if candidates[0].Original != "!" || candidates[0].Mutant != "" {
+		t.Errorf("expected !→\"\", got %q→%q", candidates[0].Original, candidates[0].Mutant)
+	}
+}
+
+func TestBoolNotRewriteEmitsMutNot(t *testing.T) {
+	pkg, err := source.Load(relDirBool(t, "testdata/boolpkg"))
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{BoolNot{}})
+	if err != nil {
+		t.Fatalf("schema.Rewrite: %v", err)
+	}
+
+	for path, src := range rew.Files {
+		if !strings.Contains(src, "__cMutNot(") {
+			t.Errorf("%s: expected __cMutNot call:\n%s", path, src)
+		}
+		if strings.Contains(src, "!b1") {
+			t.Errorf("%s: expected !b1 to be rewritten, but still present:\n%s", path, src)
+		}
+	}
+}
+
 func TestBoolLogicRewriteWrapsInClosures(t *testing.T) {
 	pkg, err := source.Load(relDirBool(t, "testdata/boolpkg"))
 	if err != nil {
