@@ -258,6 +258,52 @@ func TestRunMutantKillsBooleanMutants(t *testing.T) {
 	}
 }
 
+func TestRunMutantBoolSurvivesWeakTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	boolWeakDir := relDir(t, "testdata/boolweaksample")
+	pkg, err := source.Load(boolWeakDir)
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+
+	ops := []mutation.Operator{operators.BoolLogic{}}
+	rew, err := schema.Rewrite(pkg, ops)
+	if err != nil {
+		t.Fatalf("schema.Rewrite: %v", err)
+	}
+
+	// Weak() has one && — exactly one &&→|| mutation.
+	if len(rew.Mutations) != 1 {
+		t.Fatalf("expected 1 mutation, got %d: %v", len(rew.Mutations), rew.Mutations)
+	}
+
+	overlayPath, cleanup, err := runner.BuildOverlay(rew, boolWeakDir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanup()
+
+	ctx := context.Background()
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	if err != nil {
+		t.Fatalf("CompileTestBinary: %v", err)
+	}
+	defer cleanBin()
+
+	timeout := 30 * time.Second
+	m := rew.Mutations[0]
+	status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, boolWeakDir, timeout)
+	if err != nil {
+		t.Fatalf("RunMutant(%d, %s→%s): %v", m.ID, m.Original, m.Mutant, err)
+	}
+	if status != mutation.StatusSurvived {
+		t.Errorf("mutation %d (&&→||) with weak test: expected Survived, got %s", m.ID, status)
+	}
+}
+
 func TestRunMutantKillsComparisonMutants(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
