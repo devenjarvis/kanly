@@ -21,16 +21,16 @@ jobs:
       - name: Build cauldron
         run: go build -o cauldron ./cmd/cauldron
 
-      - name: Run cauldron on ./internal/report
+      - name: Run cauldron on internal packages
         id: run
         continue-on-error: true
-        run: ./cauldron --format=text ./internal/report 2>&1 | tee cauldron-report.txt
+        run: ./cauldron --format=text ./internal/report ./internal/mutation 2>&1 | tee cauldron-report.txt
 
       - name: Build comment body
         run: |
           {
             echo "<!-- cauldron-report -->"
-            echo "### 🧪 Cauldron mutation report — ./internal/report"
+            echo "### 🧪 Cauldron mutation report — internal/report, internal/mutation"
             echo ""
             echo '```text'
             cat cauldron-report.txt
