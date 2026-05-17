@@ -197,3 +197,63 @@ func TestEndToEndMultiPackage(t *testing.T) {
 		}
 	}
 }
+
+func TestEndToEndBooleanPackage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+
+	binPath := buildBinary(t)
+	boolDir := relDir(t, "../runner/testdata/boolsample")
+
+	runCmd := exec.Command(binPath, "--format=json", boolDir)
+	out, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cauldron run: %v\n%s", err, out)
+	}
+
+	var result struct {
+		Summary struct {
+			Total    int `json:"total"`
+			Killed   int `json:"killed"`
+			Survived int `json:"survived"`
+		} `json:"summary"`
+		Mutants []struct {
+			Mutation struct {
+				Operator string `json:"operator"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+	}
+
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, out)
+	}
+
+	// Pinned ledger: boolsample has exactly 3 bool mutations, all killed.
+	if result.Summary.Total != 3 {
+		t.Errorf("Total: want 3, got %d", result.Summary.Total)
+	}
+	if result.Summary.Killed != 3 {
+		t.Errorf("Killed: want 3, got %d", result.Summary.Killed)
+	}
+	if result.Summary.Survived != 0 {
+		t.Errorf("Survived: want 0, got %d", result.Summary.Survived)
+	}
+
+	logicCount := 0
+	notCount := 0
+	for _, m := range result.Mutants {
+		switch m.Mutation.Operator {
+		case "bool_logic":
+			logicCount++
+		case "bool_not":
+			notCount++
+		}
+	}
+	if logicCount != 2 {
+		t.Errorf("bool_logic mutant count: want 2, got %d", logicCount)
+	}
+	if notCount != 1 {
+		t.Errorf("bool_not mutant count: want 1, got %d", notCount)
+	}
+}
