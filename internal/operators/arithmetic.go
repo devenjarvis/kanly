@@ -21,6 +21,7 @@ var sibling = map[token.Token]token.Token{
 	token.SUB: token.ADD,
 	token.MUL: token.QUO,
 	token.QUO: token.MUL,
+	token.REM: token.MUL,
 }
 
 // opcodeConst maps each arithmetic op to the opcode constant name used in the dispatcher.
@@ -29,6 +30,7 @@ var opcodeConst = map[token.Token]string{
 	token.SUB: "__cSub",
 	token.MUL: "__cMul",
 	token.QUO: "__cQuo",
+	token.REM: "__cRem",
 }
 
 // Rewrite returns the __cMutInt dispatcher call that replaces the original BinaryExpr.

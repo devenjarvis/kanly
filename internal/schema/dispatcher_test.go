@@ -51,6 +51,36 @@ func TestRenderDispatcherVariadicSignature(t *testing.T) {
 	}
 }
 
+func TestRenderDispatcherIncludesRemCase(t *testing.T) {
+	muts := []mutation.Mutation{
+		{ID: 3, OperatorName: "int_arith", Original: "%", Mutant: "*"},
+	}
+	src, err := schema.RenderDispatcher("rempkg", muts)
+	if err != nil {
+		t.Fatalf("RenderDispatcher: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	_, err = parser.ParseFile(fset, "cauldron_schema.go", src, 0)
+	if err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, src)
+	}
+
+	if !strings.Contains(src, "case __cRem:") {
+		t.Errorf("missing 'case __cRem:' in original-op switch:\n%s", src)
+	}
+	if !strings.Contains(src, "return a % b") {
+		t.Errorf("missing 'return a %% b' in original-op switch:\n%s", src)
+	}
+	// case 3 fires the mutant (* instead of %)
+	if !strings.Contains(src, "case 3:") {
+		t.Errorf("missing 'case 3:' for rem→mul mutant:\n%s", src)
+	}
+	if !strings.Contains(src, "return a * b") {
+		t.Errorf("missing 'return a * b' for rem→mul mutant:\n%s", src)
+	}
+}
+
 func TestRenderDispatcherEmitsIntCmpFunc(t *testing.T) {
 	muts := []mutation.Mutation{
 		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
