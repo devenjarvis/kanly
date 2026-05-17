@@ -133,6 +133,38 @@ func TestRenderDispatcherOmitsBoolFuncsWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestRenderDispatcherBoolSectionsAreIndependent(t *testing.T) {
+	intArith := mutation.Mutation{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"}
+
+	t.Run("bool_logic only emits __cMutBool not __cMutNot", func(t *testing.T) {
+		muts := []mutation.Mutation{intArith, {ID: 21, OperatorName: "bool_logic", Original: "&&", Mutant: "||"}}
+		src, err := schema.RenderDispatcher("mypkg", muts)
+		if err != nil {
+			t.Fatalf("RenderDispatcher: %v", err)
+		}
+		if !strings.Contains(src, "__cMutBool") {
+			t.Errorf("expected __cMutBool when bool_logic mutations present:\n%s", src)
+		}
+		if strings.Contains(src, "__cMutNot") {
+			t.Errorf("expected no __cMutNot when only bool_logic mutations present:\n%s", src)
+		}
+	})
+
+	t.Run("bool_not only emits __cMutNot not __cMutBool", func(t *testing.T) {
+		muts := []mutation.Mutation{intArith, {ID: 22, OperatorName: "bool_not", Original: "!", Mutant: ""}}
+		src, err := schema.RenderDispatcher("mypkg", muts)
+		if err != nil {
+			t.Fatalf("RenderDispatcher: %v", err)
+		}
+		if strings.Contains(src, "__cMutBool") {
+			t.Errorf("expected no __cMutBool when only bool_not mutations present:\n%s", src)
+		}
+		if !strings.Contains(src, "__cMutNot") {
+			t.Errorf("expected __cMutNot when bool_not mutations present:\n%s", src)
+		}
+	})
+}
+
 func TestRenderDispatcherEmitsIntCmpFunc(t *testing.T) {
 	muts := []mutation.Mutation{
 		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
