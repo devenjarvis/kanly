@@ -11,15 +11,15 @@ import (
 
 func buildBinary(t *testing.T) string {
 	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "cauldron-e2e-*")
+	tmpDir, err := os.MkdirTemp("", "kanly-e2e-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(tmpDir) })
 
-	binPath := filepath.Join(tmpDir, "cauldron")
+	binPath := filepath.Join(tmpDir, "kanly")
 	moduleRoot := relDir(t, "../..")
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/cauldron")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/kanly")
 	buildCmd.Dir = moduleRoot
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
@@ -52,7 +52,7 @@ func TestEndToEndSamplePackage(t *testing.T) {
 	runCmd := exec.Command(binPath, "--format=json", sampleDir)
 	out, err := runCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("cauldron run: %v\n%s", err, out)
+		t.Fatalf("kanly run: %v\n%s", err, out)
 	}
 
 	var result struct {
@@ -138,7 +138,7 @@ func TestEndToEndMultiPackage(t *testing.T) {
 	runCmd.Dir = multipkgDir
 	out, err := runCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("cauldron run: %v\n%s", err, out)
+		t.Fatalf("kanly run: %v\n%s", err, out)
 	}
 
 	var result struct {
@@ -209,7 +209,7 @@ func TestEndToEndBooleanPackage(t *testing.T) {
 	runCmd := exec.Command(binPath, "--format=json", boolDir)
 	out, err := runCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("cauldron run: %v\n%s", err, out)
+		t.Fatalf("kanly run: %v\n%s", err, out)
 	}
 
 	var result struct {

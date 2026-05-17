@@ -5,7 +5,7 @@ import (
 	"go/types"
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
 type fakeOp struct{ name string }

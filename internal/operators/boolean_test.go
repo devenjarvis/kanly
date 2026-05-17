@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
-	"github.com/devenjarvis/cauldron/internal/schema"
-	"github.com/devenjarvis/cauldron/internal/source"
+	"github.com/devenjarvis/kanly/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/schema"
+	"github.com/devenjarvis/kanly/internal/source"
 )
 
 func TestBoolLogicRejectsNamedBool(t *testing.T) {

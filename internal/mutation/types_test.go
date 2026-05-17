@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
 func TestResultJSONFieldNames(t *testing.T) {

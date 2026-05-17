@@ -23,27 +23,27 @@ const (
 	__cOr  = 22
 )
 
-var __cauldronActiveMutant int
+var __kanlyActiveMutant int
 
 func init() {
-	s := os.Getenv("CAULDRON_MUTANT")
+	s := os.Getenv("KANLY_MUTANT")
 	if s == "" {
-		__cauldronActiveMutant = -1
+		__kanlyActiveMutant = -1
 		return
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil || v < 1 {
-		__cauldronActiveMutant = -1
+		__kanlyActiveMutant = -1
 		return
 	}
-	__cauldronActiveMutant = v
+	__kanlyActiveMutant = v
 }
 
 // __cMutInt executes either the mutant or the original integer binary operation.
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
 func __cMutInt(a, b int, op int, mutIDs ...int) int {
 	for _, id := range mutIDs {
-		if id == __cauldronActiveMutant {
+		if id == __kanlyActiveMutant {
 			switch id {
 {{- range .IntArithMuts}}
 			case {{.ID}}: return {{mutantExpr .}}
@@ -70,7 +70,7 @@ func __cMutInt(a, b int, op int, mutIDs ...int) int {
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
 func __cMutIntCmp(a, b int, op int, mutIDs ...int) bool {
 	for _, id := range mutIDs {
-		if id == __cauldronActiveMutant {
+		if id == __kanlyActiveMutant {
 			switch id {
 {{- range .IntCmpMuts}}
 			case {{.ID}}: return {{intCmpExpr .}}
@@ -100,7 +100,7 @@ func __cMutIntCmp(a, b int, op int, mutIDs ...int) bool {
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
 func __cMutBool(a, b func() bool, op int, mutIDs ...int) bool {
 	for _, id := range mutIDs {
-		if id == __cauldronActiveMutant {
+		if id == __kanlyActiveMutant {
 			switch id {
 {{- range .BoolLogicMuts}}
 			case {{.ID}}: return {{boolLogicExpr .}}
@@ -120,7 +120,7 @@ func __cMutBool(a, b func() bool, op int, mutIDs ...int) bool {
 // __cMutNot executes either the mutant or the original boolean negation.
 func __cMutNot(x bool, mutIDs ...int) bool {
 	for _, id := range mutIDs {
-		if id == __cauldronActiveMutant {
+		if id == __kanlyActiveMutant {
 			switch id {
 {{- range .BoolNotMuts}}
 			case {{.ID}}: return x

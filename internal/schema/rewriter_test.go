@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
-	"github.com/devenjarvis/cauldron/internal/operators"
-	"github.com/devenjarvis/cauldron/internal/schema"
-	"github.com/devenjarvis/cauldron/internal/source"
+	"github.com/devenjarvis/kanly/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/operators"
+	"github.com/devenjarvis/kanly/internal/schema"
+	"github.com/devenjarvis/kanly/internal/source"
 )
 
 // relDir returns the absolute path of sub relative to this test file's directory.
@@ -111,7 +111,7 @@ func TestRewriteSetsPackageOnMutations(t *testing.T) {
 	if len(rew.Mutations) == 0 {
 		t.Fatal("expected at least one mutation")
 	}
-	wantPkg := "github.com/devenjarvis/cauldron/internal/runner/testdata/sample"
+	wantPkg := "github.com/devenjarvis/kanly/internal/runner/testdata/sample"
 	for i, m := range rew.Mutations {
 		if m.Package != wantPkg {
 			t.Errorf("Mutations[%d].Package: want %q, got %q", i, wantPkg, m.Package)

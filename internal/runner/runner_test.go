@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
-	"github.com/devenjarvis/cauldron/internal/operators"
-	"github.com/devenjarvis/cauldron/internal/runner"
-	"github.com/devenjarvis/cauldron/internal/schema"
-	"github.com/devenjarvis/cauldron/internal/source"
+	"github.com/devenjarvis/kanly/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/operators"
+	"github.com/devenjarvis/kanly/internal/runner"
+	"github.com/devenjarvis/kanly/internal/schema"
+	"github.com/devenjarvis/kanly/internal/source"
 )
 
 func relDir(t *testing.T, sub string) string {
@@ -36,7 +36,7 @@ func TestCompileTestBinaryErrorDoesNotPanic(t *testing.T) {
 	}
 	ctx := context.Background()
 	// Pass a nonexistent overlay — go test -c will fail immediately.
-	_, cleanup, err := runner.CompileTestBinary(ctx, "github.com/devenjarvis/cauldron/internal/runner", "/nonexistent/overlay.json")
+	_, cleanup, err := runner.CompileTestBinary(ctx, "github.com/devenjarvis/kanly/internal/runner", "/nonexistent/overlay.json")
 	if err == nil {
 		t.Fatal("expected error for bad overlay, got nil")
 	}
@@ -91,8 +91,8 @@ func TestBuildOverlay(t *testing.T) {
 		}
 	}
 
-	// Dispatcher entry: key is pkgDir/cauldron_schema.go.
-	dispKey := filepath.Join(pkgDir, "cauldron_schema.go")
+	// Dispatcher entry: key is pkgDir/kanly_schema.go.
+	dispKey := filepath.Join(pkgDir, "kanly_schema.go")
 	tmpDisp, ok := overlay.Replace[dispKey]
 	if !ok {
 		t.Errorf("overlay missing dispatcher entry for %s; keys: %v", dispKey, overlay.Replace)

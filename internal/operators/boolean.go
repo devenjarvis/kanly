@@ -6,7 +6,7 @@ import (
 	"go/token"
 	"go/types"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
 // BoolLogic finds boolean binary expressions and swaps && ↔ ||.

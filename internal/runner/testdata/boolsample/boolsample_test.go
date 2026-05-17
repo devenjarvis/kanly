@@ -3,7 +3,7 @@ package boolsample_test
 import (
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/runner/testdata/boolsample"
+	"github.com/devenjarvis/kanly/internal/runner/testdata/boolsample"
 )
 
 func TestBoth(t *testing.T) {

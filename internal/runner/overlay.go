@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/devenjarvis/cauldron/internal/schema"
+	"github.com/devenjarvis/kanly/internal/schema"
 )
 
 type overlayJSON struct {
@@ -16,7 +16,7 @@ type overlayJSON struct {
 // BuildOverlay writes rewritten files and the dispatcher to a temp dir, creates an overlay JSON,
 // and returns the path to that JSON plus a cleanup function.
 func BuildOverlay(rew *schema.Rewritten, pkgDir string) (overlayPath string, cleanup func(), err error) {
-	tmpDir, err := os.MkdirTemp("", "cauldron-overlay-*")
+	tmpDir, err := os.MkdirTemp("", "kanly-overlay-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp dir: %w", err)
 	}
@@ -47,15 +47,15 @@ func BuildOverlay(rew *schema.Rewritten, pkgDir string) (overlayPath string, cle
 		i++
 	}
 
-	// Write the dispatcher file (cauldron_schema.go) into the package directory overlay slot.
-	dispatcherDst := filepath.Join(tmpDir, "cauldron_schema.go")
+	// Write the dispatcher file (kanly_schema.go) into the package directory overlay slot.
+	dispatcherDst := filepath.Join(tmpDir, "kanly_schema.go")
 	if err := os.WriteFile(dispatcherDst, []byte(rew.Dispatcher), 0644); err != nil {
 		return "", nil, fmt.Errorf("write dispatcher: %w", err)
 	}
 
 	// The dispatcher is a new file that doesn't exist in the original package.
 	// The overlay key must be the absolute path it would have if it were in the package dir.
-	absDispatcher := filepath.Join(pkgDir, "cauldron_schema.go")
+	absDispatcher := filepath.Join(pkgDir, "kanly_schema.go")
 	replace[absDispatcher] = dispatcherDst
 
 	overlay := overlayJSON{Replace: replace}

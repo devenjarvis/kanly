@@ -3,7 +3,7 @@ package boolweaksample_test
 import (
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/runner/testdata/boolweaksample"
+	"github.com/devenjarvis/kanly/internal/runner/testdata/boolweaksample"
 )
 
 func TestWeak(t *testing.T) {

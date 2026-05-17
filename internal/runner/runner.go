@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
 // CompileTestBinary compiles a test binary for pkgPath using the given overlay file.
 // Returns the binary path and a cleanup function.
 func CompileTestBinary(ctx context.Context, pkgPath, overlayPath string) (binaryPath string, cleanup func(), err error) {
-	tmpDir, err := os.MkdirTemp("", "cauldron-bin-*")
+	tmpDir, err := os.MkdirTemp("", "kanly-bin-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp dir: %w", err)
 	}
@@ -48,7 +48,7 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath string) (binary
 	return binPath, cleanup, nil
 }
 
-// RunBaseline executes the compiled test binary with no active mutant (CAULDRON_MUTANT unset).
+// RunBaseline executes the compiled test binary with no active mutant (KANLY_MUTANT unset).
 // Returns an error if the baseline tests fail, indicating the package is already broken.
 func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration) error {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
@@ -68,7 +68,7 @@ func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Du
 	return nil
 }
 
-// RunMutant executes the compiled test binary with CAULDRON_MUTANT=mutID.
+// RunMutant executes the compiled test binary with KANLY_MUTANT=mutID.
 // Returns the status, names of killing tests, elapsed duration, and any exec error.
 func RunMutant(ctx context.Context, binaryPath string, mutID int, pkgDir string, timeout time.Duration) (mutation.Status, []string, time.Duration, error) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
@@ -76,7 +76,7 @@ func RunMutant(ctx context.Context, binaryPath string, mutID int, pkgDir string,
 
 	cmd := exec.CommandContext(tctx, binaryPath, "-test.v")
 	cmd.Dir = pkgDir
-	cmd.Env = append(os.Environ(), fmt.Sprintf("CAULDRON_MUTANT=%d", mutID))
+	cmd.Env = append(os.Environ(), fmt.Sprintf("KANLY_MUTANT=%d", mutID))
 
 	start := time.Now()
 	out, err := cmd.CombinedOutput()

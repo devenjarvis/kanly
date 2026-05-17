@@ -2,11 +2,11 @@
 
 ## Overview
 
-Cauldron is a Go mutation tester that uses Mutant Schema Generation (MSG): all mutants for a package are encoded into a single rewritten source tree, compiled once into a test binary, and then each mutant is activated at runtime via the `CAULDRON_MUTANT` environment variable — one compile, many test runs.
+Kanly is a Go mutation tester that uses Mutant Schema Generation (MSG): all mutants for a package are encoded into a single rewritten source tree, compiled once into a test binary, and then each mutant is activated at runtime via the `KANLY_MUTANT` environment variable — one compile, many test runs.
 
 ## Package map
 
-- **`cmd/cauldron`** — CLI entry point; parses `--format` and `--timeout` flags, expands `./...` or multiple positional args via `source.LoadAll`, then orchestrates per-package: rewrite → compile → run → aggregate → report.
+- **`cmd/kanly`** — CLI entry point; parses `--format` and `--timeout` flags, expands `./...` or multiple positional args via `source.LoadAll`, then orchestrates per-package: rewrite → compile → run → aggregate → report.
 - **`internal/source`** — thin wrapper around `golang.org/x/tools/go/packages.Load`; returns a `Package` with typed AST and type-checker info. `Load(dir)` loads a single directory; `LoadAll(workDir, patterns...)` supports Go-style patterns including `./...`. See `internal/source/loader.go:21`.
 - **`internal/mutation`** — core types: `Operator` interface, `Candidate`, `Mutation`, `Result`, and the global operator registry (`Register`/`Operators`). See `internal/mutation/operator.go:17` and `internal/mutation/types.go:17`.
 - **`internal/operators`** — concrete operator implementations; each file registers itself via `init()` in `internal/operators/register.go:5`. Currently contains `IntArith` (`int_arith`: `+↔-`, `*↔/`, `%→*`), `IntCmpBoundary` (`int_cmp_boundary`: `<↔<=`, `>↔>=`), and `IntCmpNegate` (`int_cmp_negate`: six comparison flips). Shared type guard lives in `internal/operators/typecheck.go`.
@@ -19,7 +19,7 @@ Cauldron is a Go mutation tester that uses Mutant Schema Generation (MSG): all m
 
 ```bash
 # Build the CLI
-go build ./cmd/cauldron
+go build ./cmd/kanly
 
 # Run everything (slow — includes the e2e binary build)
 go test ./...
@@ -34,7 +34,7 @@ GOLDEN_UPDATE=1 go test ./internal/report
 ## Conventions
 
 - **Table-driven tests** using the stdlib `testing` package only — no testify or other assertion libraries.
-- **`relDir` helper** converts a path relative to the test file's source location to an absolute path. Used in `cmd/cauldron/main_test.go:12`, `internal/e2e/e2e_test.go:12`, and `internal/report/report_test.go:17`.
+- **`relDir` helper** converts a path relative to the test file's source location to an absolute path. Used in `cmd/kanly/main_test.go:12`, `internal/e2e/e2e_test.go:12`, and `internal/report/report_test.go:17`.
 - **Golden JSON files** live under `testdata/` next to the test file that owns them (e.g. `internal/report/testdata/golden.json`). Regenerate with `GOLDEN_UPDATE=1`.
 - **Commit prefix:** `[task N]` where N is the 1-based line index of the task in `.claude/plan.md` (counting all task lines across the whole file). When no plan file exists, use `task: `.
 

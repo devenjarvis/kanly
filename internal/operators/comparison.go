@@ -6,7 +6,7 @@ import (
 	"go/token"
 	"go/types"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
 // boundarySibling maps each boundary-swappable comparison op to its counterpart.
