@@ -75,6 +75,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer cleanBin()
 
+	if err := runner.RunBaseline(ctx, binaryPath, *timeoutFlag); err != nil {
+		fmt.Fprintf(stderr, "baseline failed: %v\n", err)
+		return 1
+	}
+
 	var results []mutation.Result
 	for _, mut := range rew.Mutations {
 		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, mut.ID, *timeoutFlag)

@@ -31,17 +31,20 @@ func BuildOverlay(rew *schema.Rewritten, pkgDir string) (overlayPath string, cle
 	replace := make(map[string]string)
 
 	// Write each rewritten source file to the temp dir.
+	// Use an index prefix to avoid collisions when multiple files share the same base name.
+	i := 0
 	for origPath, content := range rew.Files {
 		absOrig, err := filepath.Abs(origPath)
 		if err != nil {
 			return "", nil, fmt.Errorf("abs path for %s: %w", origPath, err)
 		}
 
-		tmpFile := filepath.Join(tmpDir, filepath.Base(origPath))
+		tmpFile := filepath.Join(tmpDir, fmt.Sprintf("%04d_%s", i, filepath.Base(origPath)))
 		if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
 			return "", nil, fmt.Errorf("write rewritten file: %w", err)
 		}
 		replace[absOrig] = tmpFile
+		i++
 	}
 
 	// Write the dispatcher file (cauldron_schema.go) into the package directory overlay slot.

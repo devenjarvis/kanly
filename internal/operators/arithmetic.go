@@ -46,10 +46,8 @@ func (IntArith) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 		}
 
 		// Only mutate when both operands are exactly types.Int (not int32, int64, named-int types).
-		if lv.Type == nil || rv.Type == nil {
-			return true
-		}
-		if lv.Type.Underlying() != types.Typ[types.Int] || rv.Type.Underlying() != types.Typ[types.Int] {
+		// Do NOT use .Underlying() — named types like "type MyInt int" must be excluded.
+		if lv.Type != types.Typ[types.Int] || rv.Type != types.Typ[types.Int] {
 			return true
 		}
 
@@ -65,6 +63,3 @@ func (IntArith) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 	return candidates
 }
 
-func (IntArith) Rewrite(c mutation.Candidate, _ int) ast.Node {
-	return c.Node
-}

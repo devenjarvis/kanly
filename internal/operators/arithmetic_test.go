@@ -63,3 +63,21 @@ func TestIntArithSkipsFloat64(t *testing.T) {
 		}
 	}
 }
+
+func TestIntArithSkipsConstantOnlyExpressions(t *testing.T) {
+	// constpkg has "const x = 1 + 2" (both constant, skip) and "Add(a,b int)" (non-constant, find).
+	pkg, err := source.Load(relDir(t, "testdata/constpkg"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	op := operators.IntArith{}
+	var total int
+	for _, f := range pkg.Files {
+		total += len(op.Find(f, pkg.TypesInfo))
+	}
+	// Only the Add function's + should be found; the const 1+2 must be skipped.
+	if total != 1 {
+		t.Errorf("expected 1 candidate (Add's +), got %d", total)
+	}
+}

@@ -40,7 +40,7 @@ func Build(results []mutation.Result) Report {
 			s.NotCovered++
 		}
 	}
-	denominator := s.Total - s.NotCovered
+	denominator := s.Total - s.NotCovered - s.NotViable
 	if denominator > 0 {
 		s.Score = float64(s.Killed) / float64(denominator)
 	}

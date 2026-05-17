@@ -17,7 +17,6 @@ type Candidate struct {
 type Operator interface {
 	Name() string
 	Find(file *ast.File, info *types.Info) []Candidate
-	Rewrite(c Candidate, mutID int) ast.Node
 }
 
 var registry []Operator

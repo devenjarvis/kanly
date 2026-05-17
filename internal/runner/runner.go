@@ -47,6 +47,25 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath string) (binary
 	return binPath, cleanup, nil
 }
 
+// RunBaseline executes the compiled test binary with no active mutant (CAULDRON_MUTANT unset).
+// Returns an error if the baseline tests fail, indicating the package is already broken.
+func RunBaseline(ctx context.Context, binaryPath string, timeout time.Duration) error {
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(tctx, binaryPath)
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+
+	if tctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("baseline run timed out after %v", timeout)
+	}
+	if err != nil {
+		return fmt.Errorf("baseline tests fail (package is already broken):\n%s", out)
+	}
+	return nil
+}
+
 // RunMutant executes the compiled test binary with CAULDRON_MUTANT=mutID.
 // Returns the status, names of killing tests, elapsed duration, and any exec error.
 func RunMutant(ctx context.Context, binaryPath string, mutID int, timeout time.Duration) (mutation.Status, []string, time.Duration, error) {
