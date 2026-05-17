@@ -24,6 +24,42 @@ func relDir(t *testing.T, sub string) string {
 	return abs
 }
 
+func TestLoadAllExpandsDotDotDot(t *testing.T) {
+	pkgs, err := source.LoadAll(relDir(t, "testdata/multipkg"), "./...")
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(pkgs) != 2 {
+		t.Fatalf("expected 2 packages, got %d", len(pkgs))
+	}
+	want := map[string]bool{
+		"example.com/multipkg/foo": true,
+		"example.com/multipkg/bar": true,
+	}
+	for _, pkg := range pkgs {
+		if !want[pkg.ImportPath] {
+			t.Errorf("unexpected package %q", pkg.ImportPath)
+		}
+		delete(want, pkg.ImportPath)
+	}
+	for path := range want {
+		t.Errorf("missing expected package %q", path)
+	}
+}
+
+func TestLoadAllSingleDirPath(t *testing.T) {
+	pkgs, err := source.LoadAll("", relDir(t, "testdata/simple"))
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("expected 1 package, got %d", len(pkgs))
+	}
+	if pkgs[0].ImportPath == "" {
+		t.Error("ImportPath is empty")
+	}
+}
+
 func TestLoadReturnsAbsoluteDir(t *testing.T) {
 	// Relative path — Dir must still be absolute so overlay keys are valid.
 	pkg, err := source.Load("testdata/simple")
