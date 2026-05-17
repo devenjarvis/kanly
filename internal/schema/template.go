@@ -179,4 +179,17 @@ func __cMutIdx(i int, mutIDs ...int) int {
 	}
 	return i
 }
+{{end}}{{if .StmtSwapMuts}}
+// __cMutStmt runs mut() if any of mutIDs is the active mutant, otherwise orig().
+// Used to swap a whole statement (e.g. x++ ↔ x--, x += y ↔ x -= y) without
+// re-evaluating the LHS — both branches are pre-built closures.
+func __cMutStmt(orig, mut func(), mutIDs ...int) {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			mut()
+			return
+		}
+	}
+	orig()
+}
 {{end}}`
