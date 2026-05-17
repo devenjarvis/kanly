@@ -2,8 +2,11 @@ package runner_test
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +28,113 @@ func relDir(t *testing.T, sub string) string {
 		t.Fatal(err)
 	}
 	return abs
+}
+
+func TestBuildOverlay(t *testing.T) {
+	pkgDir := t.TempDir()
+	srcFile := filepath.Join(pkgDir, "foo.go")
+	fakeContent := "package foo\nfunc Foo() {}\n"
+
+	rew := &schema.Rewritten{
+		Files:      map[string]string{srcFile: fakeContent},
+		Dispatcher: "package foo\n",
+	}
+
+	overlayPath, cleanup, err := runner.BuildOverlay(rew, pkgDir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(overlayPath)
+	if err != nil {
+		t.Fatalf("read overlay JSON: %v", err)
+	}
+	var overlay struct {
+		Replace map[string]string `json:"Replace"`
+	}
+	if err := json.Unmarshal(data, &overlay); err != nil {
+		t.Fatalf("parse overlay JSON: %v", err)
+	}
+
+	// Expect 2 entries: rewritten source file + dispatcher.
+	if len(overlay.Replace) != 2 {
+		t.Errorf("expected 2 overlay entries, got %d: %v", len(overlay.Replace), overlay.Replace)
+	}
+
+	// Source file entry: key is absolute original path, value is a readable tmp file.
+	tmpSrc, ok := overlay.Replace[srcFile]
+	if !ok {
+		t.Errorf("overlay missing entry for %s; keys: %v", srcFile, overlay.Replace)
+	} else {
+		got, err := os.ReadFile(tmpSrc)
+		if err != nil {
+			t.Fatalf("read rewritten file: %v", err)
+		}
+		if string(got) != fakeContent {
+			t.Errorf("rewritten content: want %q, got %q", fakeContent, string(got))
+		}
+	}
+
+	// Dispatcher entry: key is pkgDir/cauldron_schema.go.
+	dispKey := filepath.Join(pkgDir, "cauldron_schema.go")
+	tmpDisp, ok := overlay.Replace[dispKey]
+	if !ok {
+		t.Errorf("overlay missing dispatcher entry for %s; keys: %v", dispKey, overlay.Replace)
+	} else {
+		got, err := os.ReadFile(tmpDisp)
+		if err != nil {
+			t.Fatalf("read dispatcher file: %v", err)
+		}
+		if string(got) != rew.Dispatcher {
+			t.Errorf("dispatcher content mismatch")
+		}
+	}
+}
+
+func TestBuildOverlayCollisionSafe(t *testing.T) {
+	// Two source files in different directories but with the same base name.
+	pkgDir := t.TempDir()
+	file1 := filepath.Join(pkgDir, "a", "foo.go")
+	file2 := filepath.Join(pkgDir, "b", "foo.go")
+
+	rew := &schema.Rewritten{
+		Files: map[string]string{
+			file1: "package a\n",
+			file2: "package b\n",
+		},
+		Dispatcher: "package x\n",
+	}
+
+	overlayPath, cleanup, err := runner.BuildOverlay(rew, pkgDir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanup()
+
+	data, _ := os.ReadFile(overlayPath)
+	var overlay struct {
+		Replace map[string]string `json:"Replace"`
+	}
+	if err := json.Unmarshal(data, &overlay); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3 entries: 2 source files + dispatcher.
+	if len(overlay.Replace) != 3 {
+		t.Errorf("expected 3 overlay entries, got %d", len(overlay.Replace))
+	}
+
+	// The temp paths for same-named source files must be distinct.
+	var tmpPaths []string
+	for k, v := range overlay.Replace {
+		if strings.HasSuffix(k, "foo.go") {
+			tmpPaths = append(tmpPaths, v)
+		}
+	}
+	if len(tmpPaths) == 2 && tmpPaths[0] == tmpPaths[1] {
+		t.Error("same-basename files collide in overlay temp dir")
+	}
 }
 
 func TestRunMutantKillsAndSurvives(t *testing.T) {
