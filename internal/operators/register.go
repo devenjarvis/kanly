@@ -10,4 +10,6 @@ func init() {
 	mutation.Register(BoolNot{})
 	mutation.Register(ErrReturnNil{})
 	mutation.Register(CallDelete{})
+	mutation.Register(StringLiteral{})
+	mutation.Register(SliceIndex{})
 }

@@ -155,4 +155,28 @@ func __cMutCallSkip(fn func(), mutIDs ...int) {
 	}
 	fn()
 }
+{{end}}{{if .StringLitMuts}}
+// __cMutString returns "" for an active mutant, or orig otherwise.
+func __cMutString(orig string, mutIDs ...int) string {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			return ""
+		}
+	}
+	return orig
+}
+{{end}}{{if .SliceIdxMuts}}
+// __cMutIdx returns i offset by +1 or -1 when one of mutIDs is active, otherwise i.
+func __cMutIdx(i int, mutIDs ...int) int {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			switch id {
+{{- range .SliceIdxMuts}}
+			case {{.ID}}: return {{sliceIdxExpr .}}
+{{- end}}
+			}
+		}
+	}
+	return i
+}
 {{end}}`

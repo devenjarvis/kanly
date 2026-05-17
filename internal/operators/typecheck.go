@@ -49,6 +49,20 @@ func boolOperand(info *types.Info, x ast.Expr) bool {
 	return lv.Type == types.Typ[types.Bool]
 }
 
+// intOperand reports whether x is exactly types.Int (not named or sized variants)
+// and is not a compile-time constant.
+// Do NOT use .Underlying() — named types like "type MyInt int" must be excluded.
+func intOperand(info *types.Info, x ast.Expr) bool {
+	lv, lok := info.Types[x]
+	if !lok {
+		return false
+	}
+	if lv.Value != nil {
+		return false
+	}
+	return lv.Type == types.Typ[types.Int]
+}
+
 // errorType is the universe "error" interface, captured once.
 var errorType = types.Universe.Lookup("error").Type()
 

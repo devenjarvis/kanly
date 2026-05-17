@@ -31,6 +31,16 @@ func mutantExpr(m mutation.Mutation) string {
 	return "a + b"
 }
 
+func sliceIdxExpr(m mutation.Mutation) string {
+	switch m.Mutant {
+	case "+1":
+		return "i + 1"
+	case "-1":
+		return "i - 1"
+	}
+	return "i"
+}
+
 func intCmpExpr(m mutation.Mutation) string {
 	switch m.Mutant {
 	case "<":
@@ -66,9 +76,10 @@ func byOperator(muts []mutation.Mutation, names ...string) []mutation.Mutation {
 // RenderDispatcher renders the schema dispatcher source for the given package and mutations.
 func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) {
 	tmpl, err := template.New("dispatcher").Funcs(template.FuncMap{
-		"mutantExpr":   mutantExpr,
-		"intCmpExpr":   intCmpExpr,
+		"mutantExpr":    mutantExpr,
+		"intCmpExpr":    intCmpExpr,
 		"boolLogicExpr": boolLogicExpr,
+		"sliceIdxExpr":  sliceIdxExpr,
 	}).Parse(dispatcherSrc)
 	if err != nil {
 		return "", err
@@ -83,6 +94,8 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 		"BoolNotMuts":   byOperator(muts, "bool_not"),
 		"ErrReturnMuts":  byOperator(muts, "err_return_nil"),
 		"CallDeleteMuts": byOperator(muts, "call_delete"),
+		"StringLitMuts":  byOperator(muts, "string_literal"),
+		"SliceIdxMuts":   byOperator(muts, "slice_index"),
 	}); err != nil {
 		return "", err
 	}
