@@ -46,6 +46,46 @@ func makeResults() []mutation.Result {
 	}
 }
 
+func TestBuildAggregatesPerPackage(t *testing.T) {
+	r := report.Build(makeResults())
+
+	if len(r.Packages) != 2 {
+		t.Fatalf("Packages: want 2, got %d", len(r.Packages))
+	}
+
+	// Packages must be sorted by import path: bar before foo.
+	if r.Packages[0].Package != "example.com/pkg/bar" {
+		t.Errorf("Packages[0].Package: want %q, got %q", "example.com/pkg/bar", r.Packages[0].Package)
+	}
+	if r.Packages[1].Package != "example.com/pkg/foo" {
+		t.Errorf("Packages[1].Package: want %q, got %q", "example.com/pkg/foo", r.Packages[1].Package)
+	}
+
+	bar := r.Packages[0]
+	if bar.Total != 1 {
+		t.Errorf("bar Total: want 1, got %d", bar.Total)
+	}
+	if bar.Survived != 1 {
+		t.Errorf("bar Survived: want 1, got %d", bar.Survived)
+	}
+	if bar.Score != 0 {
+		t.Errorf("bar Score: want 0, got %v", bar.Score)
+	}
+
+	foo := r.Packages[1]
+	if foo.Total != 2 {
+		t.Errorf("foo Total: want 2, got %d", foo.Total)
+	}
+	if foo.Killed != 2 {
+		t.Errorf("foo Killed: want 2, got %d", foo.Killed)
+	}
+
+	// Top-level summary unchanged.
+	if r.Summary.Total != 3 {
+		t.Errorf("Summary.Total: want 3, got %d", r.Summary.Total)
+	}
+}
+
 func TestBuildComputesScore(t *testing.T) {
 	results := makeResults()
 	r := report.Build(results)
