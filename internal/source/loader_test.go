@@ -25,12 +25,15 @@ func relDir(t *testing.T, sub string) string {
 }
 
 func TestLoadAllExpandsDotDotDot(t *testing.T) {
+	// testdata/multipkg has foo/, bar/, and testonly/ (only _test.go files).
+	// LoadAll must skip testonly/ — it has no non-test source files — and
+	// return exactly 2 packages.
 	pkgs, err := source.LoadAll(relDir(t, "testdata/multipkg"), "./...")
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
 	}
 	if len(pkgs) != 2 {
-		t.Fatalf("expected 2 packages, got %d", len(pkgs))
+		t.Fatalf("expected 2 packages (testonly dir must be skipped), got %d", len(pkgs))
 	}
 	want := map[string]bool{
 		"example.com/multipkg/foo": true,

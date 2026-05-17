@@ -67,8 +67,9 @@ func TestRunEndToEndOnSamplePackage(t *testing.T) {
 	if len(result.Packages) != 1 {
 		t.Errorf("expected 1 package entry, got %d", len(result.Packages))
 	}
-	if len(result.Packages) > 0 && result.Packages[0].Package == "" {
-		t.Error("Packages[0].Package is empty")
+	const wantPkg = "github.com/devenjarvis/cauldron/internal/runner/testdata/sample"
+	if len(result.Packages) > 0 && result.Packages[0].Package != wantPkg {
+		t.Errorf("Packages[0].Package: want %q, got %q", wantPkg, result.Packages[0].Package)
 	}
 }
 

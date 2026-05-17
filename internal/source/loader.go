@@ -34,6 +34,12 @@ func fromPackage(raw *packages.Package) (*Package, error) {
 	if len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("package errors: %v", raw.Errors[0])
 	}
+	// Packages with no non-test source files (e.g. directories that contain
+	// only _test.go files with an external test package name) appear in ./...
+	// expansion but have nothing to mutate — skip them silently.
+	if len(raw.Syntax) == 0 {
+		return nil, nil
+	}
 	absDir := filepath.Dir(raw.Fset.File(raw.Syntax[0].Pos()).Name())
 	files := make(map[string]*ast.File, len(raw.Syntax))
 	for _, f := range raw.Syntax {
@@ -107,6 +113,9 @@ func LoadAll(workDir string, patterns ...string) ([]*Package, error) {
 		pkg, err := fromPackage(raw)
 		if err != nil {
 			return nil, err
+		}
+		if pkg == nil {
+			continue // test-only package, nothing to mutate
 		}
 		result = append(result, pkg)
 	}
