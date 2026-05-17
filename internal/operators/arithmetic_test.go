@@ -64,6 +64,32 @@ func TestIntArithSkipsFloat64(t *testing.T) {
 	}
 }
 
+func TestIntArithMutatesRem(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "testdata/rempkg"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	op := operators.IntArith{}
+	var candidates []interface{}
+	for _, f := range pkg.Files {
+		cs := op.Find(f, pkg.TypesInfo)
+		for _, c := range cs {
+			candidates = append(candidates, c)
+			if c.Original != "%" {
+				t.Errorf("expected Original=%%, got %q", c.Original)
+			}
+			if c.Mutant != "*" {
+				t.Errorf("expected Mutant=*, got %q", c.Mutant)
+			}
+		}
+	}
+
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+}
+
 func TestIntArithSkipsConstantOnlyExpressions(t *testing.T) {
 	// constpkg has "const x = 1 + 2" (both constant, skip) and "Add(a,b int)" (non-constant, find).
 	pkg, err := source.Load(relDir(t, "testdata/constpkg"))

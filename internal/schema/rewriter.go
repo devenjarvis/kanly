@@ -26,9 +26,8 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 	rewrittenFiles := make(map[string]string)
 
 	for filePath, file := range pkg.Files {
-		// Collect all candidates for this file across all operators.
 		type entry struct {
-			node *ast.BinaryExpr
+			node ast.Node
 			cand mutation.Candidate
 			id   int
 			op   mutation.Operator
@@ -48,12 +47,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 					Original:     c.Original,
 					Mutant:       c.Mutant,
 				})
-				entries = append(entries, entry{
-					node: c.Node.(*ast.BinaryExpr),
-					cand: c,
-					id:   mutID,
-					op:   op,
-				})
+				entries = append(entries, entry{node: c.Node, cand: c, id: mutID, op: op})
 			}
 		}
 
@@ -61,28 +55,39 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 			continue
 		}
 
-		// Build a lookup map: *ast.BinaryExpr → rewrite details.
-		type rewriteInfo struct {
-			mutID int
-			op    mutation.Operator
-			cand  mutation.Candidate
+		// Group candidates by (node, dispatcherKey) so co-located mutations share one call site.
+		type groupKey struct {
+			node          ast.Node
+			dispatcherKey string
 		}
-		nodeMap := make(map[*ast.BinaryExpr]rewriteInfo, len(entries))
+		type rewriteGroup struct {
+			mutIDs []int
+			op     mutation.Operator
+			cand   mutation.Candidate
+		}
+		groups := make(map[groupKey]*rewriteGroup)
 		for _, e := range entries {
-			nodeMap[e.node] = rewriteInfo{mutID: e.id, op: e.op, cand: e.cand}
+			key := groupKey{node: e.node, dispatcherKey: e.op.DispatcherKey()}
+			g, ok := groups[key]
+			if !ok {
+				g = &rewriteGroup{op: e.op, cand: e.cand}
+				groups[key] = g
+			}
+			g.mutIDs = append(g.mutIDs, e.id)
 		}
 
-		// Clone the file AST by applying a cursor that replaces matching BinaryExprs.
+		// Build a flat node→group lookup for the Apply callback.
+		nodeMap := make(map[ast.Node]*rewriteGroup, len(groups))
+		for key, g := range groups {
+			nodeMap[key.node] = g
+		}
+
 		newFile := astutil.Apply(file, func(cursor *astutil.Cursor) bool {
-			expr, ok := cursor.Node().(*ast.BinaryExpr)
+			g, ok := nodeMap[cursor.Node()]
 			if !ok {
 				return true
 			}
-			info, ok := nodeMap[expr]
-			if !ok {
-				return true
-			}
-			cursor.Replace(info.op.Rewrite(info.cand, info.mutID))
+			cursor.Replace(g.op.Rewrite(g.cand, g.mutIDs))
 			return true
 		}, nil)
 

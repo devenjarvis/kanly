@@ -9,7 +9,7 @@ Cauldron is a Go mutation tester that uses Mutant Schema Generation (MSG): all m
 - **`cmd/cauldron`** — CLI entry point; parses `--format` and `--timeout` flags then orchestrates load → rewrite → compile → run → report.
 - **`internal/source`** — thin wrapper around `golang.org/x/tools/go/packages.Load`; returns a `Package` with typed AST and type-checker info. See `internal/source/loader.go:21`.
 - **`internal/mutation`** — core types: `Operator` interface, `Candidate`, `Mutation`, `Result`, and the global operator registry (`Register`/`Operators`). See `internal/mutation/operator.go:17` and `internal/mutation/types.go:17`.
-- **`internal/operators`** — concrete operator implementations; each file registers itself via `init()` in `internal/operators/register.go:5`. Currently contains only `IntArith`.
+- **`internal/operators`** — concrete operator implementations; each file registers itself via `init()` in `internal/operators/register.go:5`. Currently contains `IntArith` (`int_arith`: `+↔-`, `*↔/`, `%→*`), `IntCmpBoundary` (`int_cmp_boundary`: `<↔<=`, `>↔>=`), and `IntCmpNegate` (`int_cmp_negate`: six comparison flips). Shared type guard lives in `internal/operators/typecheck.go`.
 - **`internal/schema`** — AST rewriter that produces the mutant schema (one file per source file, plus a dispatcher `init()` file). See `internal/schema/rewriter.go:23` and `internal/schema/template.go:3`.
 - **`internal/runner`** — assembles the overlay JSON, calls `go test -c` to compile the schema binary, and executes it once per mutant ID. See `internal/runner/runner.go:18`.
 - **`internal/report`** — aggregates `[]mutation.Result` into a `Report` + `Summary`, then renders as plain text or JSON. See `internal/report/report.go:26`.
@@ -50,4 +50,4 @@ if _, ok := lv.Type.Underlying().(*types.Basic); ok { ... }
 if lv.Type != types.Typ[types.Int] { return true }
 ```
 
-Named types like `type MyInt int` must be excluded. The arithmetic operator intentionally restricts to `types.Typ[types.Int]` (the untyped plain `int`). See `internal/operators/arithmetic.go:72-74`.
+Named types like `type MyInt int` must be excluded. All three operators share the `intOperands` helper in `internal/operators/typecheck.go` which performs this exact identity check. See `internal/operators/arithmetic.go` and `internal/operators/comparison.go`.

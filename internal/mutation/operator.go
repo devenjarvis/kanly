@@ -16,10 +16,15 @@ type Candidate struct {
 
 type Operator interface {
 	Name() string
+	// DispatcherKey returns the name of the generated dispatcher function family
+	// (e.g. "int_arith" → __cMutInt, "int_cmp" → __cMutIntCmp).
+	// Candidates from operators with the same DispatcherKey on the same AST node
+	// are merged into a single call site.
+	DispatcherKey() string
 	Find(file *ast.File, info *types.Info) []Candidate
-	// Rewrite returns the replacement AST node for the given candidate at mutID.
-	// The schema rewriter calls this to construct the dispatcher call expression.
-	Rewrite(c Candidate, mutID int) ast.Node
+	// Rewrite returns the replacement AST node for the given candidate.
+	// mutIDs contains all mutation IDs assigned to this call site (≥1).
+	Rewrite(c Candidate, mutIDs []int) ast.Node
 }
 
 var registry []Operator
