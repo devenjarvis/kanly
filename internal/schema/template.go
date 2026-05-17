@@ -19,6 +19,8 @@ const (
 	__cGE  = 14
 	__cEQ  = 15
 	__cNE  = 16
+	__cAnd = 21
+	__cOr  = 22
 )
 
 var __cauldronActiveMutant int
@@ -91,5 +93,41 @@ func __cMutIntCmp(a, b int, op int, mutIDs ...int) bool {
 		return a != b
 	}
 	panic("__cMutIntCmp: unknown op")
+}
+{{end}}{{if .BoolLogicMuts}}
+// __cMutBool executes either the mutant or the original boolean binary operation.
+// Operands are passed as closures to preserve short-circuit semantics.
+// op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
+func __cMutBool(a, b func() bool, op int, mutIDs ...int) bool {
+	for _, id := range mutIDs {
+		if id == __cauldronActiveMutant {
+			switch id {
+{{- range .BoolLogicMuts}}
+			case {{.ID}}: return {{boolLogicExpr .}}
+{{- end}}
+			}
+		}
+	}
+	switch op {
+	case __cAnd:
+		return a() && b()
+	case __cOr:
+		return a() || b()
+	}
+	panic("__cMutBool: unknown op")
+}
+{{end}}{{if .BoolNotMuts}}
+// __cMutNot executes either the mutant or the original boolean negation.
+func __cMutNot(x bool, mutIDs ...int) bool {
+	for _, id := range mutIDs {
+		if id == __cauldronActiveMutant {
+			switch id {
+{{- range .BoolNotMuts}}
+			case {{.ID}}: return x
+{{- end}}
+			}
+		}
+	}
+	return !x
 }
 {{end}}`

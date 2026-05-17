@@ -7,6 +7,14 @@ import (
 	"github.com/devenjarvis/cauldron/internal/mutation"
 )
 
+func boolLogicExpr(m mutation.Mutation) string {
+	switch m.Mutant {
+	case "&&":
+		return "a() && b()"
+	}
+	return "a() || b()"
+}
+
 func mutantExpr(m mutation.Mutation) string {
 	switch m.Mutant {
 	case "+":
@@ -58,8 +66,9 @@ func byOperator(muts []mutation.Mutation, names ...string) []mutation.Mutation {
 // RenderDispatcher renders the schema dispatcher source for the given package and mutations.
 func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) {
 	tmpl, err := template.New("dispatcher").Funcs(template.FuncMap{
-		"mutantExpr": mutantExpr,
-		"intCmpExpr": intCmpExpr,
+		"mutantExpr":   mutantExpr,
+		"intCmpExpr":   intCmpExpr,
+		"boolLogicExpr": boolLogicExpr,
 	}).Parse(dispatcherSrc)
 	if err != nil {
 		return "", err
@@ -67,9 +76,11 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, map[string]interface{}{
-		"PkgName":     pkgName,
+		"PkgName":      pkgName,
 		"IntArithMuts": byOperator(muts, "int_arith"),
-		"IntCmpMuts":  byOperator(muts, "int_cmp_boundary", "int_cmp_negate"),
+		"IntCmpMuts":   byOperator(muts, "int_cmp_boundary", "int_cmp_negate"),
+		"BoolLogicMuts": byOperator(muts, "bool_logic"),
+		"BoolNotMuts":  byOperator(muts, "bool_not"),
 	}); err != nil {
 		return "", err
 	}

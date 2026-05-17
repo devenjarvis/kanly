@@ -59,13 +59,14 @@ Cauldron implements the Mutant Schema Generation (MSG) technique: instead of rec
 | `int_arith` | `+↔-`, `*↔/`, `%→*` | AOR (Arithmetic Operator Replacement); PIT MATH mutator |
 | `int_cmp_boundary` | `<↔<=`, `>↔>=` | PIT CONDITIONALS\_BOUNDARY mutator |
 | `int_cmp_negate` | `<→>=`, `>→<=`, `<=→>`, `>=→<`, `==→!=`, `!=→==` | PIT NEGATE\_CONDITIONALS mutator |
+| `bool_logic` | `&&↔\|\|` | PIT CONDITIONALS\_NEGATION (logical) |
+| `bool_not` | `!→⌀` | PIT NEGATE\_CONDITIONALS (unary) |
 
-All operators restrict to operands whose type is exactly `int` (not `int32`, `int64`, or named types like `type MyInt int`).
+Arithmetic and comparison operators restrict to operands whose type is exactly `int` (not `int32`, `int64`, or named types like `type MyInt int`); boolean operators restrict to operands whose type is exactly `bool` (not named types like `type MyBool bool`).
 
 ## Limitations
 
 - **Plain `int` only.** Named int types (`type MyInt int`) and sized types (`int32`, `int64`) are not mutated. See `internal/operators/typecheck.go`.
-- **No boolean operators.** `&&`, `||`, and `!` require closure-wrapping to preserve short-circuit semantics; tracked for a future release.
 - **No statement-level mutators.** Statement deletion and return-value replacement need a different operator shape; tracked for a future release.
 - **Sequential multi-package only.** `./...` and multiple positional args are supported; packages run sequentially. Package-level parallelism is tracked for a future release.
 

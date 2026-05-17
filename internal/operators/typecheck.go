@@ -19,3 +19,32 @@ func intOperands(info *types.Info, x, y ast.Expr) bool {
 	}
 	return lv.Type == types.Typ[types.Int] && rv.Type == types.Typ[types.Int]
 }
+
+// boolOperands reports whether both x and y are exactly types.Bool (not named types or untyped bool)
+// and at least one is not a compile-time constant.
+// Do NOT use .Underlying() — named types like "type MyBool bool" must be excluded.
+func boolOperands(info *types.Info, x, y ast.Expr) bool {
+	lv, lok := info.Types[x]
+	rv, rok := info.Types[y]
+	if !lok || !rok {
+		return false
+	}
+	if lv.Value != nil && rv.Value != nil {
+		return false
+	}
+	return lv.Type == types.Typ[types.Bool] && rv.Type == types.Typ[types.Bool]
+}
+
+// boolOperand reports whether x is exactly types.Bool (not named types or untyped bool)
+// and is not a compile-time constant.
+// Do NOT use .Underlying() — named types like "type MyBool bool" must be excluded.
+func boolOperand(info *types.Info, x ast.Expr) bool {
+	lv, lok := info.Types[x]
+	if !lok {
+		return false
+	}
+	if lv.Value != nil {
+		return false
+	}
+	return lv.Type == types.Typ[types.Bool]
+}
