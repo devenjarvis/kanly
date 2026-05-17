@@ -12,7 +12,8 @@ import (
 // IntArith finds integer binary arithmetic expressions and proposes canonical sibling mutations.
 type IntArith struct{}
 
-func (IntArith) Name() string { return "int_arith" }
+func (IntArith) Name() string          { return "int_arith" }
+func (IntArith) DispatcherKey() string { return "int_arith" }
 
 // sibling maps each arithmetic op to its canonical mutation counterpart.
 var sibling = map[token.Token]token.Token{
@@ -31,18 +32,15 @@ var opcodeConst = map[token.Token]string{
 }
 
 // Rewrite returns the __cMutInt dispatcher call that replaces the original BinaryExpr.
-func (IntArith) Rewrite(c mutation.Candidate, mutID int) ast.Node {
+// Each element of mutIDs becomes a successive BasicLit argument after the opcode.
+func (IntArith) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	expr := c.Node.(*ast.BinaryExpr)
 	opcode := opcodeConst[expr.Op]
-	return &ast.CallExpr{
-		Fun: &ast.Ident{Name: "__cMutInt"},
-		Args: []ast.Expr{
-			expr.X,
-			expr.Y,
-			&ast.Ident{Name: opcode},
-			&ast.BasicLit{Kind: token.INT, Value: fmt.Sprintf("%d", mutID)},
-		},
+	args := []ast.Expr{expr.X, expr.Y, &ast.Ident{Name: opcode}}
+	for _, id := range mutIDs {
+		args = append(args, &ast.BasicLit{Kind: token.INT, Value: fmt.Sprintf("%d", id)})
 	}
+	return &ast.CallExpr{Fun: &ast.Ident{Name: "__cMutInt"}, Args: args}
 }
 
 func (IntArith) Find(file *ast.File, info *types.Info) []mutation.Candidate {
