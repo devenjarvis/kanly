@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -189,7 +190,7 @@ func TestRunMutantKillsAndSurvives(t *testing.T) {
 	timeout := 30 * time.Second
 
 	// Mutation 1: Add +→-. TestAdd expects Add(2,3)==5; with mutant Add returns -1. Killed.
-	status1, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[0].ID, sampleDir, timeout)
+	status1, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[0].ID, sampleDir, nil, timeout)
 	if err != nil {
 		t.Fatalf("RunMutant(1): %v", err)
 	}
@@ -199,7 +200,7 @@ func TestRunMutantKillsAndSurvives(t *testing.T) {
 	}
 
 	// Mutation 2: Sub -→+. TestSub only checks non-zero; with mutant Sub(5,3)=8!=0. Survived.
-	status2, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[1].ID, sampleDir, timeout)
+	status2, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[1].ID, sampleDir, nil, timeout)
 	if err != nil {
 		t.Fatalf("RunMutant(2): %v", err)
 	}
@@ -247,7 +248,7 @@ func TestRunMutantKillsBooleanMutants(t *testing.T) {
 	timeout := 30 * time.Second
 
 	for _, m := range rew.Mutations {
-		status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, boolDir, timeout)
+		status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, boolDir, nil, timeout)
 		if err != nil {
 			t.Fatalf("RunMutant(%d, %s→%s): %v", m.ID, m.Original, m.Mutant, err)
 		}
@@ -295,7 +296,7 @@ func TestRunMutantBoolSurvivesWeakTest(t *testing.T) {
 
 	timeout := 30 * time.Second
 	m := rew.Mutations[0]
-	status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, boolWeakDir, timeout)
+	status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, boolWeakDir, nil, timeout)
 	if err != nil {
 		t.Fatalf("RunMutant(%d, %s→%s): %v", m.ID, m.Original, m.Mutant, err)
 	}
@@ -342,7 +343,7 @@ func TestRunMutantKillsComparisonMutants(t *testing.T) {
 	timeout := 30 * time.Second
 
 	for _, m := range rew.Mutations {
-		status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, cmpDir, timeout)
+		status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, cmpDir, nil, timeout)
 		if err != nil {
 			t.Fatalf("RunMutant(%d, %s→%s): %v", m.ID, m.Original, m.Mutant, err)
 		}
@@ -350,5 +351,89 @@ func TestRunMutantKillsComparisonMutants(t *testing.T) {
 			t.Errorf("mutation %d (%s %s→%s): expected Killed, got %s",
 				m.ID, m.OperatorName, m.Original, m.Mutant, status)
 		}
+	}
+}
+
+// TestCollectPerTestCoverageAttributesTests verifies that each test only
+// shows up against the lines its body executes. On the sample fixture,
+// TestAdd covers Add (line 3) and TestSub covers Sub (line 5); neither
+// bleeds into the other's function.
+func TestCollectPerTestCoverageAttributesTests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	sampleDir := relDir(t, "testdata/sample")
+	pkg, err := source.Load(sampleDir)
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+
+	ctx := context.Background()
+	covBin, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath)
+	if err != nil {
+		t.Fatalf("CompileCoverageBinary: %v", err)
+	}
+	defer cleanCovBin()
+
+	inventory := []string{"TestAdd", "TestSub"}
+	covMap, err := runner.CollectPerTestCoverage(ctx, covBin, sampleDir, inventory, 30*time.Second)
+	if err != nil {
+		t.Fatalf("CollectPerTestCoverage: %v", err)
+	}
+
+	sampleFile := filepath.Join(sampleDir, "sample.go")
+	addCovers := covMap[runner.FileLine{File: sampleFile, Line: 3}]
+	subCovers := covMap[runner.FileLine{File: sampleFile, Line: 5}]
+
+	if !reflect.DeepEqual(addCovers, []string{"TestAdd"}) {
+		t.Errorf("Add line covers: want [TestAdd], got %v", addCovers)
+	}
+	if !reflect.DeepEqual(subCovers, []string{"TestSub"}) {
+		t.Errorf("Sub line covers: want [TestSub], got %v", subCovers)
+	}
+}
+
+// TestRunMutantHonorsTestFilter passes a filter that excludes the killing
+// test; the mutant must come back Survived even though running the full
+// suite would have killed it.
+func TestRunMutantHonorsTestFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	sampleDir := relDir(t, "testdata/sample")
+	pkg, err := source.Load(sampleDir)
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}}, nil)
+	if err != nil {
+		t.Fatalf("schema.Rewrite: %v", err)
+	}
+
+	overlayPath, cleanOverlay, err := runner.BuildOverlay(rew, sampleDir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanOverlay()
+
+	ctx := context.Background()
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	if err != nil {
+		t.Fatalf("CompileTestBinary: %v", err)
+	}
+	defer cleanBin()
+
+	// Mutation 0 is Add(+→-); without a filter TestAdd kills it. Filter to
+	// TestSub only — that test never calls Add so the mutant must survive.
+	addMut := rew.Mutations[0]
+	status, _, _, err := runner.RunMutant(ctx, binaryPath, addMut.ID, sampleDir, []string{"TestSub"}, 30*time.Second)
+	if err != nil {
+		t.Fatalf("RunMutant: %v", err)
+	}
+	if status != mutation.StatusSurvived {
+		t.Errorf("Add mutant filtered to TestSub: want Survived, got %s", status)
 	}
 }

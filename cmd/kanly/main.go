@@ -44,14 +44,38 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanBin()
 
+	// Separate cover-instrumented binary built without overlay; used only
+	// for per-test coverage collection. See CompileCoverageBinary for why.
+	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("compile coverage binary: %w", err)
+	}
+	defer cleanCovBin()
+
 	inventory, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, timeout)
 	if err != nil {
 		return nil, nil, fmt.Errorf("baseline failed: %w", err)
 	}
 
+	// Collect per-test coverage once; pays off across all mutants.
+	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, timeout)
+	if err != nil {
+		return nil, nil, fmt.Errorf("collect coverage: %w", err)
+	}
+
 	var results []mutation.Result
 	for _, mut := range rew.Mutations {
-		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, mut.ID, pkg.Dir, timeout)
+		tests := covMap[runner.FileLine{File: mut.File, Line: mut.Line}]
+		if len(tests) == 0 {
+			// No test covers this line — the mutant cannot be killed,
+			// so skip the run and mark it not-covered.
+			results = append(results, mutation.Result{
+				Mutation: mut,
+				Status:   mutation.StatusNotCovered,
+			})
+			continue
+		}
+		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, mut.ID, pkg.Dir, tests, timeout)
 		if err != nil {
 			return nil, nil, fmt.Errorf("run mutant %d: %w", mut.ID, err)
 		}
