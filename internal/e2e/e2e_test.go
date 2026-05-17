@@ -363,6 +363,72 @@ func TestEndToEndDiffEmpty(t *testing.T) {
 	}
 }
 
+// TestEndToEndUncovered verifies that mutants on lines with no test coverage
+// are emitted as not_covered (no test run) and excluded from the mutation
+// score's denominator, while covered mutants on the same package run normally.
+func TestEndToEndUncovered(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+
+	binPath := buildBinary(t)
+	uncoveredDir := relDir(t, "../runner/testdata/uncoveredsample")
+
+	runCmd := exec.Command(binPath, "--format=json", uncoveredDir)
+	out, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kanly run: %v\n%s", err, out)
+	}
+
+	var result struct {
+		Summary struct {
+			Total      int     `json:"total"`
+			Killed     int     `json:"killed"`
+			Survived   int     `json:"survived"`
+			NotCovered int     `json:"not_covered"`
+			Score      float64 `json:"score"`
+		} `json:"summary"`
+		Mutants []struct {
+			Mutation struct {
+				Function string `json:"function"`
+			} `json:"mutation"`
+			Status string `json:"status"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, out)
+	}
+
+	// Live has one + mutant (covered by TestLive, killed).
+	// Dead has one - mutant (no covering test, not_covered).
+	if result.Summary.Total != 2 {
+		t.Errorf("Total: want 2, got %d", result.Summary.Total)
+	}
+	if result.Summary.NotCovered != 1 {
+		t.Errorf("NotCovered: want 1, got %d", result.Summary.NotCovered)
+	}
+	if result.Summary.Killed != 1 {
+		t.Errorf("Killed: want 1, got %d", result.Summary.Killed)
+	}
+	// Score must be killed / (total - not_covered - not_viable) = 1 / 1 = 1.0.
+	if result.Summary.Score != 1.0 {
+		t.Errorf("Score: want 1.0, got %v", result.Summary.Score)
+	}
+
+	for _, m := range result.Mutants {
+		switch m.Mutation.Function {
+		case "Live":
+			if m.Status != "killed" {
+				t.Errorf("Live mutant: want killed, got %s", m.Status)
+			}
+		case "Dead":
+			if m.Status != "not_covered" {
+				t.Errorf("Dead mutant: want not_covered, got %s", m.Status)
+			}
+		}
+	}
+}
+
 func TestEndToEndBooleanPackage(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping e2e test in short mode")
