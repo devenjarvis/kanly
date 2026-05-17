@@ -81,7 +81,8 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 		"IntCmpMuts":    byOperator(muts, "int_cmp_boundary", "int_cmp_negate"),
 		"BoolLogicMuts": byOperator(muts, "bool_logic"),
 		"BoolNotMuts":   byOperator(muts, "bool_not"),
-		"ErrReturnMuts": byOperator(muts, "err_return_nil"),
+		"ErrReturnMuts":  byOperator(muts, "err_return_nil"),
+		"CallDeleteMuts": byOperator(muts, "call_delete"),
 	}); err != nil {
 		return "", err
 	}

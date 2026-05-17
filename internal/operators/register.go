@@ -9,4 +9,5 @@ func init() {
 	mutation.Register(BoolLogic{})
 	mutation.Register(BoolNot{})
 	mutation.Register(ErrReturnNil{})
+	mutation.Register(CallDelete{})
 }

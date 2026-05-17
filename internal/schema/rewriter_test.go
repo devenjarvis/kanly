@@ -177,3 +177,49 @@ func TestRewriteAggregatesMutIDsPerNode(t *testing.T) {
 		}
 	}
 }
+
+// TestRewriteCallDeleteAndIntArithCoexist verifies that two operators with
+// different DispatcherKeys can target distinct nodes in the same file without
+// stomping on each other in the rewriter's node→group flattening.
+func TestRewriteCallDeleteAndIntArithCoexist(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "../operators/testdata/calldelete"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}, operators.CallDelete{}})
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+
+	var sawArith, sawCallDelete bool
+	for _, m := range rew.Mutations {
+		switch m.OperatorName {
+		case "int_arith":
+			sawArith = true
+		case "call_delete":
+			sawCallDelete = true
+		}
+	}
+	if !sawArith {
+		t.Errorf("expected at least one int_arith mutation (MixedOps `a + b`), got none")
+	}
+	if !sawCallDelete {
+		t.Errorf("expected at least one call_delete mutation, got none")
+	}
+
+	for path, src := range rew.Files {
+		if !strings.Contains(src, "__cMutInt(") {
+			t.Errorf("%s: expected __cMutInt( in rewritten source:\n%s", path, src)
+		}
+		if !strings.Contains(src, "__cMutCallSkip(") {
+			t.Errorf("%s: expected __cMutCallSkip( in rewritten source:\n%s", path, src)
+		}
+	}
+	if !strings.Contains(rew.Dispatcher, "__cMutInt") {
+		t.Errorf("expected __cMutInt in dispatcher")
+	}
+	if !strings.Contains(rew.Dispatcher, "__cMutCallSkip") {
+		t.Errorf("expected __cMutCallSkip in dispatcher")
+	}
+}
