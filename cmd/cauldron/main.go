@@ -43,13 +43,13 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanBin()
 
-	if err := runner.RunBaseline(ctx, binaryPath, timeout); err != nil {
+	if err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, timeout); err != nil {
 		return nil, fmt.Errorf("baseline failed: %w", err)
 	}
 
 	var results []mutation.Result
 	for _, mut := range rew.Mutations {
-		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, mut.ID, timeout)
+		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, mut.ID, pkg.Dir, timeout)
 		if err != nil {
 			return nil, fmt.Errorf("run mutant %d: %w", mut.ID, err)
 		}

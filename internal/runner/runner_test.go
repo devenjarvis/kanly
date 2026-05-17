@@ -189,7 +189,7 @@ func TestRunMutantKillsAndSurvives(t *testing.T) {
 	timeout := 30 * time.Second
 
 	// Mutation 1: Add +→-. TestAdd expects Add(2,3)==5; with mutant Add returns -1. Killed.
-	status1, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[0].ID, timeout)
+	status1, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[0].ID, sampleDir, timeout)
 	if err != nil {
 		t.Fatalf("RunMutant(1): %v", err)
 	}
@@ -199,7 +199,7 @@ func TestRunMutantKillsAndSurvives(t *testing.T) {
 	}
 
 	// Mutation 2: Sub -→+. TestSub only checks non-zero; with mutant Sub(5,3)=8!=0. Survived.
-	status2, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[1].ID, timeout)
+	status2, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[1].ID, sampleDir, timeout)
 	if err != nil {
 		t.Fatalf("RunMutant(2): %v", err)
 	}
@@ -247,7 +247,7 @@ func TestRunMutantKillsComparisonMutants(t *testing.T) {
 	timeout := 30 * time.Second
 
 	for _, m := range rew.Mutations {
-		status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, timeout)
+		status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, cmpDir, timeout)
 		if err != nil {
 			t.Fatalf("RunMutant(%d, %s→%s): %v", m.ID, m.Original, m.Mutant, err)
 		}
