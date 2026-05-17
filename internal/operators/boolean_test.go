@@ -52,6 +52,22 @@ func TestBoolLogicFindsBothSwaps(t *testing.T) {
 	}
 }
 
+func TestBoolNotRejectsNamedBool(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "testdata/namedboolpkg"))
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+
+	var candidates []mutation.Candidate
+	for _, f := range pkg.Files {
+		candidates = append(candidates, BoolNot{}.Find(f, pkg.TypesInfo)...)
+	}
+
+	if len(candidates) != 0 {
+		t.Errorf("BoolNot.Find: expected 0 candidates for named bool type, got %d: %v", len(candidates), candidates)
+	}
+}
+
 func TestBoolNotFindsOneRemoval(t *testing.T) {
 	pkg, err := source.Load(relDir(t, "testdata/boolpkg"))
 	if err != nil {
