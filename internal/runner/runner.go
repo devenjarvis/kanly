@@ -30,6 +30,7 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath string) (binary
 	binPath := filepath.Join(tmpDir, "testbin")
 	cmd := exec.CommandContext(ctx,
 		"go", "test", "-c",
+		"-vet=off",
 		"-overlay="+overlayPath,
 		"-o", binPath,
 		pkgPath,
