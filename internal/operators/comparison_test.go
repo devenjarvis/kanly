@@ -94,7 +94,7 @@ func TestIntCmpCoLocatedAggregates(t *testing.T) {
 	pkg := cmpPkg(t)
 
 	ops := []mutation.Operator{operators.IntCmpBoundary{}, operators.IntCmpNegate{}}
-	rew, err := schema.Rewrite(pkg, ops)
+	rew, err := schema.Rewrite(pkg, ops, nil)
 	if err != nil {
 		t.Fatalf("Rewrite: %v", err)
 	}

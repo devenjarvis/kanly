@@ -82,7 +82,9 @@ type Rewritten struct {
 }
 
 // Rewrite transforms pkg's source files into a mutant schema using the provided operators.
-func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
+// If filter is non-nil, only candidates whose (absolute file path, line number)
+// satisfy filter are emitted; passing nil disables filtering.
+func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file string, line int) bool) (*Rewritten, error) {
 	mutID := 0
 	var mutations []mutation.Mutation
 	rewrittenFiles := make(map[string]string)
@@ -100,8 +102,11 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 
 		for _, op := range ops {
 			for _, c := range op.Find(file, pkg.TypesInfo) {
-				mutID++
 				pos := pkg.Fset.Position(c.Pos)
+				if filter != nil && !filter(filePath, pos.Line) {
+					continue
+				}
+				mutID++
 				mutations = append(mutations, mutation.Mutation{
 					ID:           mutID,
 					Package:      pkg.ImportPath,

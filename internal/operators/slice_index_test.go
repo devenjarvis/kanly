@@ -47,7 +47,7 @@ func TestSliceIndexSkipsExcludedKeys(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{SliceIndex{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{SliceIndex{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestSliceIndexRewriteEmitsMutIdx(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{SliceIndex{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{SliceIndex{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -195,6 +196,170 @@ func TestEndToEndMultiPackage(t *testing.T) {
 		if !wantPkgs[m.Mutation.Package] {
 			t.Errorf("Mutants[%d].Mutation.Package %q is not one of the expected packages", i, m.Mutation.Package)
 		}
+	}
+}
+
+// TestEndToEndDiff verifies that `kanly --diff` filters mutations to only those
+// on lines touched by the diff. A tmp git repo holds a two-function sample;
+// only the `Sub` line is modified, so only the Sub mutation should run.
+func TestEndToEndDiff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+
+	binPath := buildBinary(t)
+	repo := t.TempDir()
+
+	goMod := "module diffsample\n\ngo 1.23.0\n"
+	sampleGo := `package diffsample
+
+func Add(a, b int) int { return a + b }
+
+func Sub(a, b int) int { return a - b }
+`
+	sampleTest := `package diffsample
+
+import "testing"
+
+func TestAdd(t *testing.T) {
+	if Add(2, 3) != 5 {
+		t.Fatal("Add(2,3) != 5")
+	}
+}
+
+func TestSub(t *testing.T) {
+	if Sub(5, 3) != 2 {
+		t.Fatal("Sub(5,3) != 2")
+	}
+}
+`
+	mustWrite := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("go.mod", goMod)
+	mustWrite("sample.go", sampleGo)
+	mustWrite("sample_test.go", sampleTest)
+
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@e.x",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@e.x",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "commit.gpgsign", "false")
+	runGit("add", ".")
+	runGit("commit", "-q", "-m", "init")
+
+	// Modify only the line containing `Sub`. The change keeps the function
+	// behaviour identical but the diff covers line 5.
+	modified := strings.Replace(sampleGo, "return a - b", "return (a - b)", 1)
+	mustWrite("sample.go", modified)
+
+	runCmd := exec.Command(binPath, "--diff", "--format=json")
+	runCmd.Dir = repo
+	out, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kanly --diff: %v\n%s", err, out)
+	}
+
+	var result struct {
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+		Mutants []struct {
+			Mutation struct {
+				Line     int    `json:"line"`
+				Original string `json:"original"`
+				Mutant   string `json:"mutant"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, out)
+	}
+
+	// Only the Sub mutation (line 5, - → +) should be present; Add (line 3) is
+	// outside the diff.
+	if result.Summary.Total != 1 {
+		t.Fatalf("Total: want 1, got %d\noutput:\n%s", result.Summary.Total, out)
+	}
+	m := result.Mutants[0].Mutation
+	if m.Line != 5 {
+		t.Errorf("mutant line: want 5, got %d", m.Line)
+	}
+	if m.Original != "-" || m.Mutant != "+" {
+		t.Errorf("mutant op: want -→+, got %s→%s", m.Original, m.Mutant)
+	}
+}
+
+// TestEndToEndDiffEmpty verifies that `kanly --diff` with no changes exits 0
+// and produces an empty report.
+func TestEndToEndDiffEmpty(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+
+	binPath := buildBinary(t)
+	repo := t.TempDir()
+
+	mustWrite := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("go.mod", "module emptysample\n\ngo 1.23.0\n")
+	mustWrite("sample.go", "package emptysample\n\nfunc Add(a, b int) int { return a + b }\n")
+	mustWrite("sample_test.go", "package emptysample\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) { _ = Add(1, 2) }\n")
+
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@e.x",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@e.x",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "commit.gpgsign", "false")
+	runGit("add", ".")
+	runGit("commit", "-q", "-m", "init")
+
+	runCmd := exec.Command(binPath, "--diff", "--format=json")
+	runCmd.Dir = repo
+	out, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kanly --diff: %v\n%s", err, out)
+	}
+
+	var result struct {
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, out)
+	}
+	if result.Summary.Total != 0 {
+		t.Errorf("Total: want 0, got %d", result.Summary.Total)
 	}
 }
 
