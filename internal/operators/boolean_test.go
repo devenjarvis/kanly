@@ -1,8 +1,6 @@
 package operators
 
 import (
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -11,21 +9,8 @@ import (
 	"github.com/devenjarvis/cauldron/internal/source"
 )
 
-func relDirBool(t *testing.T, sub string) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	abs, err := filepath.Abs(filepath.Join(filepath.Dir(file), sub))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return abs
-}
-
 func TestBoolLogicFindsBothSwaps(t *testing.T) {
-	pkg, err := source.Load(relDirBool(t, "testdata/boolpkg"))
+	pkg, err := source.Load(relDir(t, "testdata/boolpkg"))
 	if err != nil {
 		t.Fatalf("source.Load: %v", err)
 	}
@@ -52,7 +37,7 @@ func TestBoolLogicFindsBothSwaps(t *testing.T) {
 }
 
 func TestBoolNotFindsOneRemoval(t *testing.T) {
-	pkg, err := source.Load(relDirBool(t, "testdata/boolpkg"))
+	pkg, err := source.Load(relDir(t, "testdata/boolpkg"))
 	if err != nil {
 		t.Fatalf("source.Load: %v", err)
 	}
@@ -71,7 +56,7 @@ func TestBoolNotFindsOneRemoval(t *testing.T) {
 }
 
 func TestBoolNotRewriteEmitsMutNot(t *testing.T) {
-	pkg, err := source.Load(relDirBool(t, "testdata/boolpkg"))
+	pkg, err := source.Load(relDir(t, "testdata/boolpkg"))
 	if err != nil {
 		t.Fatalf("source.Load: %v", err)
 	}
@@ -92,7 +77,7 @@ func TestBoolNotRewriteEmitsMutNot(t *testing.T) {
 }
 
 func TestBoolLogicRewriteWrapsInClosures(t *testing.T) {
-	pkg, err := source.Load(relDirBool(t, "testdata/boolpkg"))
+	pkg, err := source.Load(relDir(t, "testdata/boolpkg"))
 	if err != nil {
 		t.Fatalf("source.Load: %v", err)
 	}
