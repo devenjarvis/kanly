@@ -16,6 +16,7 @@ const (
 
 type Mutation struct {
 	ID           int    `json:"mutation_id"`
+	Package      string `json:"package"`
 	File         string `json:"file"`
 	Line         int    `json:"line"`
 	Column       int    `json:"column"`

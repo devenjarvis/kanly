@@ -8,10 +8,33 @@
     "not_covered": 0,
     "score": 0.6666666666666666
   },
+  "packages": [
+    {
+      "package": "example.com/pkg/bar",
+      "total": 1,
+      "killed": 0,
+      "survived": 1,
+      "timeout": 0,
+      "not_viable": 0,
+      "not_covered": 0,
+      "score": 0
+    },
+    {
+      "package": "example.com/pkg/foo",
+      "total": 2,
+      "killed": 2,
+      "survived": 0,
+      "timeout": 0,
+      "not_viable": 0,
+      "not_covered": 0,
+      "score": 1
+    }
+  ],
   "mutants": [
     {
       "mutation": {
         "mutation_id": 1,
+        "package": "example.com/pkg/foo",
         "file": "foo.go",
         "line": 5,
         "column": 10,
@@ -28,6 +51,7 @@
     {
       "mutation": {
         "mutation_id": 2,
+        "package": "example.com/pkg/foo",
         "file": "foo.go",
         "line": 10,
         "column": 3,
@@ -44,6 +68,7 @@
     {
       "mutation": {
         "mutation_id": 3,
+        "package": "example.com/pkg/bar",
         "file": "bar.go",
         "line": 3,
         "column": 15,

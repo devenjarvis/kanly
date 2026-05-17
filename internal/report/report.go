@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/devenjarvis/cauldron/internal/mutation"
 )
@@ -18,9 +19,15 @@ type Summary struct {
 	Score      float64 `json:"score"`
 }
 
+type PackageSummary struct {
+	Package string `json:"package"`
+	Summary
+}
+
 type Report struct {
-	Summary Summary          `json:"summary"`
-	Mutants []mutation.Result `json:"mutants"`
+	Summary  Summary          `json:"summary"`
+	Packages []PackageSummary `json:"packages"`
+	Mutants  []mutation.Result `json:"mutants"`
 }
 
 func Build(results []mutation.Result) Report {
@@ -44,7 +51,49 @@ func Build(results []mutation.Result) Report {
 	if denominator > 0 {
 		s.Score = float64(s.Killed) / float64(denominator)
 	}
-	return Report{Summary: s, Mutants: results}
+
+	// Build per-package summaries.
+	pkgMap := make(map[string]*Summary)
+	pkgOrder := make(map[string]struct{})
+	for _, r := range results {
+		pkg := r.Mutation.Package
+		if _, ok := pkgMap[pkg]; !ok {
+			pkgMap[pkg] = &Summary{}
+			pkgOrder[pkg] = struct{}{}
+		}
+		ps := pkgMap[pkg]
+		ps.Total++
+		switch r.Status {
+		case mutation.StatusKilled:
+			ps.Killed++
+		case mutation.StatusSurvived:
+			ps.Survived++
+		case mutation.StatusTimeout:
+			ps.Timeout++
+		case mutation.StatusNotViable:
+			ps.NotViable++
+		case mutation.StatusNotCovered:
+			ps.NotCovered++
+		}
+	}
+
+	pkgNames := make([]string, 0, len(pkgMap))
+	for name := range pkgOrder {
+		pkgNames = append(pkgNames, name)
+	}
+	sort.Strings(pkgNames)
+
+	pkgSummaries := make([]PackageSummary, 0, len(pkgNames))
+	for _, name := range pkgNames {
+		ps := pkgMap[name]
+		denom := ps.Total - ps.NotCovered - ps.NotViable
+		if denom > 0 {
+			ps.Score = float64(ps.Killed) / float64(denom)
+		}
+		pkgSummaries = append(pkgSummaries, PackageSummary{Package: name, Summary: *ps})
+	}
+
+	return Report{Summary: s, Packages: pkgSummaries, Mutants: results}
 }
 
 func WriteJSON(w io.Writer, r Report) error {
@@ -63,6 +112,13 @@ func WriteText(w io.Writer, r Report) error {
 			); err != nil {
 				return err
 			}
+		}
+	}
+	for _, ps := range r.Packages {
+		if _, err := fmt.Fprintf(w, "Package: %s | Total: %d | Killed: %d | Survived: %d | Score: %.1f%%\n",
+			ps.Package, ps.Total, ps.Killed, ps.Survived, ps.Score*100,
+		); err != nil {
+			return err
 		}
 	}
 	_, err := fmt.Fprintf(w, "\nTotal: %d | Killed: %d | Survived: %d | Timeout: %d | Score: %.1f%%\n",

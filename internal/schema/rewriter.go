@@ -40,6 +40,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 				pos := pkg.Fset.Position(c.Pos)
 				mutations = append(mutations, mutation.Mutation{
 					ID:           mutID,
+					Package:      pkg.ImportPath,
 					File:         filePath,
 					Line:         pos.Line,
 					Column:       pos.Column,

@@ -9,6 +9,24 @@ import (
 	"testing"
 )
 
+func buildBinary(t *testing.T) string {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "cauldron-e2e-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	binPath := filepath.Join(tmpDir, "cauldron")
+	moduleRoot := relDir(t, "../..")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/cauldron")
+	buildCmd.Dir = moduleRoot
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	return binPath
+}
+
 func relDir(t *testing.T, sub string) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -27,21 +45,7 @@ func TestEndToEndSamplePackage(t *testing.T) {
 		t.Skip("skipping e2e test in short mode")
 	}
 
-	// Build the CLI binary.
-	tmpDir, err := os.MkdirTemp("", "cauldron-e2e-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	binPath := filepath.Join(tmpDir, "cauldron")
-	moduleRoot := relDir(t, "../..")
-
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/cauldron")
-	buildCmd.Dir = moduleRoot
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
+	binPath := buildBinary(t)
 
 	sampleDir := relDir(t, "../runner/testdata/sample")
 
@@ -118,5 +122,78 @@ func TestEndToEndSamplePackage(t *testing.T) {
 	wantScore := 0.5
 	if result.Summary.Score != wantScore {
 		t.Errorf("Score: want %v, got %v", wantScore, result.Summary.Score)
+	}
+}
+
+func TestEndToEndMultiPackage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+
+	binPath := buildBinary(t)
+
+	multipkgDir := relDir(t, "../runner/testdata/multipkg")
+
+	runCmd := exec.Command(binPath, "--format=json", "./...")
+	runCmd.Dir = multipkgDir
+	out, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cauldron run: %v\n%s", err, out)
+	}
+
+	var result struct {
+		Summary struct {
+			Total    int `json:"total"`
+			Killed   int `json:"killed"`
+			Survived int `json:"survived"`
+		} `json:"summary"`
+		Packages []struct {
+			Package string `json:"package"`
+		} `json:"packages"`
+		Mutants []struct {
+			Mutation struct {
+				Package string `json:"package"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+	}
+
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, out)
+	}
+
+	// Pinned ledger: foo has 2 mutations (Add +→-, Sub -→+), bar has 2 (>→>= and >→<=).
+	// TestAdd kills Add mutation; TestSub is weak (non-zero check) so Sub survives.
+	// All bar mutations killed by precise IsPositive tests.
+	if result.Summary.Total != 4 {
+		t.Errorf("Total: want 4, got %d", result.Summary.Total)
+	}
+	if result.Summary.Killed != 3 {
+		t.Errorf("Killed: want 3, got %d", result.Summary.Killed)
+	}
+	if result.Summary.Survived != 1 {
+		t.Errorf("Survived: want 1, got %d", result.Summary.Survived)
+	}
+
+	if len(result.Packages) != 2 {
+		t.Errorf("Packages: want 2, got %d", len(result.Packages))
+	}
+
+	// The fixture's go.mod declares "module multipkg", so the full import paths
+	// are "multipkg/foo" and "multipkg/bar" — no hostname prefix.  The module
+	// has no external dependencies, so no go.sum is required.
+	wantPkgs := map[string]bool{"multipkg/foo": true, "multipkg/bar": true}
+	for _, p := range result.Packages {
+		if !wantPkgs[p.Package] {
+			t.Errorf("unexpected package %q in Packages", p.Package)
+		}
+	}
+
+	for i, m := range result.Mutants {
+		if m.Mutation.Package == "" {
+			t.Errorf("Mutants[%d].Mutation.Package is empty", i)
+		}
+		if !wantPkgs[m.Mutation.Package] {
+			t.Errorf("Mutants[%d].Mutation.Package %q is not one of the expected packages", i, m.Mutation.Package)
+		}
 	}
 }

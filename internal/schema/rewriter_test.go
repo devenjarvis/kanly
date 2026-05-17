@@ -97,6 +97,28 @@ func (doubleArithOp) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	return &ast.CallExpr{Fun: &ast.Ident{Name: "__cMutInt"}, Args: args}
 }
 
+func TestRewriteSetsPackageOnMutations(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "../runner/testdata/sample"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}})
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+
+	if len(rew.Mutations) == 0 {
+		t.Fatal("expected at least one mutation")
+	}
+	wantPkg := "github.com/devenjarvis/cauldron/internal/runner/testdata/sample"
+	for i, m := range rew.Mutations {
+		if m.Package != wantPkg {
+			t.Errorf("Mutations[%d].Package: want %q, got %q", i, wantPkg, m.Package)
+		}
+	}
+}
+
 func TestRewriteAggregatesMutIDsPerNode(t *testing.T) {
 	pkg, err := source.Load(relDir(t, "../source/testdata/simple"))
 	if err != nil {

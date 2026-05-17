@@ -50,6 +50,9 @@ func TestRunEndToEndOnSamplePackage(t *testing.T) {
 			Total  int `json:"total"`
 			Killed int `json:"killed"`
 		} `json:"summary"`
+		Packages []struct {
+			Package string `json:"package"`
+		} `json:"packages"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("parse JSON output: %v\n%s", err, stdout.String())
@@ -60,5 +63,55 @@ func TestRunEndToEndOnSamplePackage(t *testing.T) {
 	}
 	if result.Summary.Killed != 1 {
 		t.Errorf("expected Killed=1, got %d", result.Summary.Killed)
+	}
+	if len(result.Packages) != 1 {
+		t.Errorf("expected 1 package entry, got %d", len(result.Packages))
+	}
+	const wantPkg = "github.com/devenjarvis/cauldron/internal/runner/testdata/sample"
+	if len(result.Packages) > 0 && result.Packages[0].Package != wantPkg {
+		t.Errorf("Packages[0].Package: want %q, got %q", wantPkg, result.Packages[0].Package)
+	}
+}
+
+func TestRunMultiplePositionalArgs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	sampleDir := relDir(t, "../../internal/runner/testdata/sample")
+	cmpDir := relDir(t, "../../internal/runner/testdata/cmpsample")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--format=json", sampleDir, cmpDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+
+	var result struct {
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+		Packages []struct {
+			Package string `json:"package"`
+		} `json:"packages"`
+		Mutants []struct {
+			Mutation struct {
+				Package string `json:"package"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON output: %v\n%s", err, stdout.String())
+	}
+
+	if result.Summary.Total != 4 {
+		t.Errorf("expected Total=4, got %d", result.Summary.Total)
+	}
+	if len(result.Packages) != 2 {
+		t.Errorf("expected 2 package entries, got %d", len(result.Packages))
+	}
+	for i, m := range result.Mutants {
+		if m.Mutation.Package == "" {
+			t.Errorf("Mutants[%d].Mutation.Package is empty", i)
+		}
 	}
 }
