@@ -130,4 +130,18 @@ func __cMutNot(x bool, mutIDs ...int) bool {
 	}
 	return !x
 }
+{{end}}{{if .ErrReturnMuts}}
+// __cMutErr returns nil for an active mutant, or the original error otherwise.
+func __cMutErr(x error, mutIDs ...int) error {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			switch id {
+{{- range .ErrReturnMuts}}
+			case {{.ID}}: return nil
+{{- end}}
+			}
+		}
+	}
+	return x
+}
 {{end}}`

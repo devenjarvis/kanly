@@ -165,6 +165,49 @@ func TestRenderDispatcherBoolSectionsAreIndependent(t *testing.T) {
 	})
 }
 
+func TestRenderDispatcherEmitsErrFunc(t *testing.T) {
+	muts := []mutation.Mutation{
+		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+		{ID: 30, OperatorName: "err_return_nil", Original: "err", Mutant: "nil"},
+	}
+	src, err := schema.RenderDispatcher("mypkg", muts)
+	if err != nil {
+		t.Fatalf("RenderDispatcher: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	_, err = parser.ParseFile(fset, "kanly_schema.go", src, 0)
+	if err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, src)
+	}
+
+	checks := []string{
+		"func __cMutErr(x error, mutIDs ...int) error",
+		"case 30:",
+		"return nil",
+		"return x",
+	}
+	for _, want := range checks {
+		if !strings.Contains(src, want) {
+			t.Errorf("missing %q in:\n%s", want, src)
+		}
+	}
+}
+
+func TestRenderDispatcherOmitsErrFuncWhenAbsent(t *testing.T) {
+	muts := []mutation.Mutation{
+		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+	}
+	src, err := schema.RenderDispatcher("mypkg", muts)
+	if err != nil {
+		t.Fatalf("RenderDispatcher: %v", err)
+	}
+
+	if strings.Contains(src, "__cMutErr") {
+		t.Errorf("expected no __cMutErr in int-only dispatcher:\n%s", src)
+	}
+}
+
 func TestRenderDispatcherEmitsIntCmpFunc(t *testing.T) {
 	muts := []mutation.Mutation{
 		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},

@@ -28,3 +28,12 @@ func TestRegistryIncludesBoolOperators(t *testing.T) {
 		t.Error("bool_not not registered")
 	}
 }
+
+func TestRegistryIncludesErrReturnNil(t *testing.T) {
+	for _, op := range mutation.Operators() {
+		if op.Name() == "err_return_nil" {
+			return
+		}
+	}
+	t.Error("err_return_nil not registered")
+}

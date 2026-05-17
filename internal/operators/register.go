@@ -8,4 +8,5 @@ func init() {
 	mutation.Register(IntCmpNegate{})
 	mutation.Register(BoolLogic{})
 	mutation.Register(BoolNot{})
+	mutation.Register(ErrReturnNil{})
 }
