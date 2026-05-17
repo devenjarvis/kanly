@@ -37,7 +37,7 @@ func TestRewriteReplacesPlusWithDispatcherCall(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}}, nil)
 	if err != nil {
 		t.Fatalf("Rewrite: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestRewriteSetsPackageOnMutations(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}}, nil)
 	if err != nil {
 		t.Fatalf("Rewrite: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestRewriteAggregatesMutIDsPerNode(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{doubleArithOp{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{doubleArithOp{}}, nil)
 	if err != nil {
 		t.Fatalf("Rewrite: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestRewriteCallDeleteAndIntArithCoexist(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}, operators.CallDelete{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}, operators.CallDelete{}}, nil)
 	if err != nil {
 		t.Fatalf("Rewrite: %v", err)
 	}

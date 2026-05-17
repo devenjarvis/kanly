@@ -36,7 +36,7 @@ func TestErrReturnSkipsLiteralNilAndNonErrors(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{ErrReturnNil{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{ErrReturnNil{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestErrReturnRewriteEmitsMutErr(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{ErrReturnNil{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{ErrReturnNil{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}

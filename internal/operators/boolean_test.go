@@ -93,7 +93,7 @@ func TestBoolNotRewriteEmitsMutNot(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{BoolNot{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{BoolNot{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestBoolLogicRewriteWrapsInClosures(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{BoolLogic{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{BoolLogic{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}

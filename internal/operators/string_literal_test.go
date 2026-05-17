@@ -51,7 +51,7 @@ func TestStringLiteralSkipsForbiddenContexts(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{StringLiteral{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{StringLiteral{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestStringLiteralRewriteEmitsMutString(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{StringLiteral{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{StringLiteral{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}

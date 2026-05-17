@@ -52,3 +52,53 @@ jobs:
           issue-number: ${{ github.event.pull_request.number }}
           body-path: comment.md
           edit-mode: replace
+
+  kanly-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build kanly
+        run: go build -o kanly ./cmd/kanly
+
+      - name: Fetch PR base ref
+        run: git fetch --no-tags origin ${{ github.base_ref }}
+
+      - name: Run kanly --diff against PR base
+        id: run
+        continue-on-error: true
+        run: ./kanly --diff --diff-base=origin/${{ github.base_ref }} --format=text 2>&1 | tee kanly-diff-report.txt
+
+      - name: Build comment body
+        run: |
+          {
+            echo "<!-- kanly-diff-report -->"
+            echo "### 🧪 Kanly mutation report — PR diff vs \`${{ github.base_ref }}\`"
+            echo ""
+            echo '```text'
+            cat kanly-diff-report.txt
+            echo '```'
+          } > comment.md
+
+      - name: Find existing comment
+        id: fc
+        uses: peter-evans/find-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '<!-- kanly-diff-report -->'
+
+      - name: Post or update comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: comment.md
+          edit-mode: replace

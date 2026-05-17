@@ -62,7 +62,7 @@ func TestCallDeleteSkipsDeferGoAssign(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{CallDelete{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{CallDelete{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestCallDeleteRewriteEmitsCallSkip(t *testing.T) {
 		t.Fatalf("source.Load: %v", err)
 	}
 
-	rew, err := schema.Rewrite(pkg, []mutation.Operator{CallDelete{}})
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{CallDelete{}}, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}

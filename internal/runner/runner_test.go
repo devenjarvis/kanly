@@ -164,7 +164,7 @@ func TestRunMutantKillsAndSurvives(t *testing.T) {
 	}
 
 	ops := []mutation.Operator{operators.IntArith{}}
-	rew, err := schema.Rewrite(pkg, ops)
+	rew, err := schema.Rewrite(pkg, ops, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestRunMutantKillsBooleanMutants(t *testing.T) {
 	}
 
 	ops := []mutation.Operator{operators.BoolLogic{}, operators.BoolNot{}}
-	rew, err := schema.Rewrite(pkg, ops)
+	rew, err := schema.Rewrite(pkg, ops, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestRunMutantBoolSurvivesWeakTest(t *testing.T) {
 	}
 
 	ops := []mutation.Operator{operators.BoolLogic{}}
-	rew, err := schema.Rewrite(pkg, ops)
+	rew, err := schema.Rewrite(pkg, ops, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestRunMutantKillsComparisonMutants(t *testing.T) {
 	}
 
 	ops := []mutation.Operator{operators.IntCmpBoundary{}, operators.IntCmpNegate{}}
-	rew, err := schema.Rewrite(pkg, ops)
+	rew, err := schema.Rewrite(pkg, ops, nil)
 	if err != nil {
 		t.Fatalf("schema.Rewrite: %v", err)
 	}
