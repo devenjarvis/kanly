@@ -59,19 +59,7 @@ func (IntArith) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 			return true
 		}
 
-		// Skip if both operands are untyped constants (compile-time folded, no runtime effect).
-		lv, lok := info.Types[expr.X]
-		rv, rok := info.Types[expr.Y]
-		if !lok || !rok {
-			return true
-		}
-		if lv.Value != nil && rv.Value != nil {
-			return true
-		}
-
-		// Only mutate when both operands are exactly types.Int (not int32, int64, named-int types).
-		// Do NOT use .Underlying() — named types like "type MyInt int" must be excluded.
-		if lv.Type != types.Typ[types.Int] || rv.Type != types.Typ[types.Int] {
+		if !intOperands(info, expr.X, expr.Y) {
 			return true
 		}
 
