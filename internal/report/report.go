@@ -114,6 +114,13 @@ func WriteText(w io.Writer, r Report) error {
 			}
 		}
 	}
+	for _, ps := range r.Packages {
+		if _, err := fmt.Fprintf(w, "Package: %s | Total: %d | Killed: %d | Survived: %d | Score: %.1f%%\n",
+			ps.Package, ps.Total, ps.Killed, ps.Survived, ps.Score*100,
+		); err != nil {
+			return err
+		}
+	}
 	_, err := fmt.Fprintf(w, "\nTotal: %d | Killed: %d | Survived: %d | Timeout: %d | Score: %.1f%%\n",
 		r.Summary.Total, r.Summary.Killed, r.Summary.Survived, r.Summary.Timeout,
 		r.Summary.Score*100,

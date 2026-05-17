@@ -175,7 +175,26 @@ func TestWriteText(t *testing.T) {
 		t.Errorf("killed mutant should not appear in text output:\n%s", out)
 	}
 
-	// Summary footer must be present.
+	// Per-package summary lines must appear.
+	if !strings.Contains(out, "Package: example.com/pkg/foo | Total: 2 | Killed: 2 | Survived: 0 | Score: 100.0%") {
+		t.Errorf("per-package foo summary missing or malformed:\n%s", out)
+	}
+	if !strings.Contains(out, "Package: example.com/pkg/bar | Total: 1 | Killed: 0 | Survived: 1 | Score: 0.0%") {
+		t.Errorf("per-package bar summary missing or malformed:\n%s", out)
+	}
+
+	// Per-package lines must appear before the aggregate footer.
+	fooIdx := strings.Index(out, "Package: example.com/pkg/foo")
+	barIdx := strings.Index(out, "Package: example.com/pkg/bar")
+	totalIdx := strings.Index(out, "Total: 3")
+	if fooIdx == -1 || barIdx == -1 || totalIdx == -1 {
+		t.Fatalf("missing lines; fooIdx=%d barIdx=%d totalIdx=%d\n%s", fooIdx, barIdx, totalIdx, out)
+	}
+	if fooIdx > totalIdx || barIdx > totalIdx {
+		t.Errorf("per-package lines must appear before the aggregate footer:\n%s", out)
+	}
+
+	// Aggregate footer must be present.
 	if !strings.Contains(out, "Total: 3") {
 		t.Errorf("summary missing Total:\n%s", out)
 	}
