@@ -30,6 +30,21 @@ func relDir(t *testing.T, sub string) string {
 	return abs
 }
 
+func TestCompileTestBinaryErrorDoesNotPanic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping: invokes go toolchain")
+	}
+	ctx := context.Background()
+	// Pass a nonexistent overlay — go test -c will fail immediately.
+	_, cleanup, err := runner.CompileTestBinary(ctx, "github.com/devenjarvis/cauldron/internal/runner", "/nonexistent/overlay.json")
+	if err == nil {
+		t.Fatal("expected error for bad overlay, got nil")
+	}
+	if cleanup != nil {
+		t.Errorf("expected nil cleanup on error, got non-nil")
+	}
+}
+
 func TestBuildOverlay(t *testing.T) {
 	pkgDir := t.TempDir()
 	srcFile := filepath.Join(pkgDir, "foo.go")
