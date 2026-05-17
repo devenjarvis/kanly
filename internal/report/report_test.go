@@ -30,24 +30,31 @@ func relDir(t *testing.T, sub string) string {
 func makeResults() []mutation.Result {
 	return []mutation.Result{
 		{
-			Mutation: mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Mutation: mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, Function: "Add", OperatorName: "int_arith", Original: "+", Mutant: "-"},
 			Status:   mutation.StatusKilled,
 			KillingTests: []string{"TestAdd"},
 		},
 		{
-			Mutation: mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 10, Column: 3, OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Mutation: mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 10, Column: 3, Function: "Sub", OperatorName: "int_arith", Original: "-", Mutant: "+"},
 			Status:   mutation.StatusKilled,
 			KillingTests: []string{"TestSub"},
 		},
 		{
-			Mutation: mutation.Mutation{ID: 3, Package: "example.com/pkg/bar", File: "bar.go", Line: 3, Column: 15, OperatorName: "int_arith", Original: "*", Mutant: "/"},
+			Mutation: mutation.Mutation{ID: 3, Package: "example.com/pkg/bar", File: "bar.go", Line: 3, Column: 15, Function: "Mul", OperatorName: "int_arith", Original: "*", Mutant: "/"},
 			Status:   mutation.StatusSurvived,
 		},
 	}
 }
 
+func makeInventory() map[string][]string {
+	return map[string][]string{
+		"example.com/pkg/foo": {"TestAdd", "TestSub"},
+		"example.com/pkg/bar": {"TestMul"},
+	}
+}
+
 func TestBuildAggregatesPerPackage(t *testing.T) {
-	r := report.Build(makeResults())
+	r := report.Build(makeResults(), makeInventory())
 
 	if len(r.Packages) != 2 {
 		t.Fatalf("Packages: want 2, got %d", len(r.Packages))
@@ -88,7 +95,7 @@ func TestBuildAggregatesPerPackage(t *testing.T) {
 
 func TestBuildComputesScore(t *testing.T) {
 	results := makeResults()
-	r := report.Build(results)
+	r := report.Build(results, makeInventory())
 
 	if r.Summary.Total != 3 {
 		t.Errorf("Total: want 3, got %d", r.Summary.Total)
@@ -106,9 +113,91 @@ func TestBuildComputesScore(t *testing.T) {
 	}
 }
 
+func TestBuildAggregatesTestStats(t *testing.T) {
+	r := report.Build(makeResults(), makeInventory())
+
+	// Inventory has 3 tests total: TestAdd, TestSub (foo), TestMul (bar).
+	if len(r.Tests) != 3 {
+		t.Fatalf("Tests: want 3, got %d", len(r.Tests))
+	}
+
+	// Sort: KillCount desc, then package, then name.
+	// TestAdd and TestSub each kill 1 mutant; TestMul kills 0.
+	// Ties between TestAdd/TestSub: both in foo, so by name → TestAdd first.
+	if r.Tests[0].Name != "TestAdd" || r.Tests[0].KillCount != 1 {
+		t.Errorf("Tests[0]: want TestAdd/1, got %s/%d", r.Tests[0].Name, r.Tests[0].KillCount)
+	}
+	if r.Tests[1].Name != "TestSub" || r.Tests[1].KillCount != 1 {
+		t.Errorf("Tests[1]: want TestSub/1, got %s/%d", r.Tests[1].Name, r.Tests[1].KillCount)
+	}
+	if r.Tests[2].Name != "TestMul" || r.Tests[2].KillCount != 0 {
+		t.Errorf("Tests[2]: want TestMul/0, got %s/%d", r.Tests[2].Name, r.Tests[2].KillCount)
+	}
+
+	// Killed mutant IDs are recorded.
+	if len(r.Tests[0].KilledMutants) != 1 || r.Tests[0].KilledMutants[0] != 1 {
+		t.Errorf("TestAdd.KilledMutants: want [1], got %v", r.Tests[0].KilledMutants)
+	}
+}
+
+func TestBuildZeroKillTests(t *testing.T) {
+	r := report.Build(makeResults(), makeInventory())
+
+	// TestMul is in inventory but appears in no KillingTests list.
+	if len(r.ZeroKillTests) != 1 {
+		t.Fatalf("ZeroKillTests: want 1, got %d (%v)", len(r.ZeroKillTests), r.ZeroKillTests)
+	}
+	if r.ZeroKillTests[0] != "example.com/pkg/bar.TestMul" {
+		t.Errorf("ZeroKillTests[0]: want %q, got %q", "example.com/pkg/bar.TestMul", r.ZeroKillTests[0])
+	}
+}
+
+func TestBuildRedundantTestGroups(t *testing.T) {
+	results := []mutation.Result{
+		{
+			Mutation:     mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestA", "TestB"}, // Both kill mutant 1.
+		},
+		{
+			Mutation:     mutation.Mutation{ID: 2, Package: "p", File: "p.go", Line: 2, OperatorName: "int_arith", Original: "*", Mutant: "/"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestA", "TestB", "TestC"}, // A and B both kill 1+2; C kills only 2.
+		},
+	}
+	// Without C in KillingTests for mutant 1, C's kill-set is {2}; A and B share {1,2}.
+
+	inventory := map[string][]string{"p": {"TestA", "TestB", "TestC"}}
+	r := report.Build(results, inventory)
+
+	if len(r.RedundantTestGroups) != 1 {
+		t.Fatalf("RedundantTestGroups: want 1 group, got %d (%v)", len(r.RedundantTestGroups), r.RedundantTestGroups)
+	}
+	group := r.RedundantTestGroups[0]
+	wantGroup := []string{"p.TestA", "p.TestB"}
+	if len(group) != 2 || group[0] != wantGroup[0] || group[1] != wantGroup[1] {
+		t.Errorf("RedundantTestGroups[0]: want %v, got %v", wantGroup, group)
+	}
+}
+
+func TestBuildSurvivorsByFunction(t *testing.T) {
+	r := report.Build(makeResults(), makeInventory())
+
+	if len(r.SurvivorsByFunction) != 1 {
+		t.Fatalf("SurvivorsByFunction: want 1 group, got %d", len(r.SurvivorsByFunction))
+	}
+	g := r.SurvivorsByFunction[0]
+	if g.Package != "example.com/pkg/bar" || g.Function != "Mul" {
+		t.Errorf("group: want bar/Mul, got %s/%s", g.Package, g.Function)
+	}
+	if len(g.Mutations) != 1 || g.Mutations[0].ID != 3 {
+		t.Errorf("Mutations: want [id=3], got %v", g.Mutations)
+	}
+}
+
 func TestWriteJSONStableFieldNames(t *testing.T) {
 	results := makeResults()
-	r := report.Build(results)
+	r := report.Build(results, makeInventory())
 
 	var buf bytes.Buffer
 	if err := report.WriteJSON(&buf, r); err != nil {
@@ -133,7 +222,11 @@ func TestWriteJSONStableFieldNames(t *testing.T) {
 
 	// Check that the actual output contains all required field names.
 	actual := buf.String()
-	for _, field := range []string{"mutation_id", "package", "file", "line", "column", "operator", "original", "mutant", "status", "killing_tests"} {
+	for _, field := range []string{
+		"mutation_id", "package", "file", "line", "column", "function", "operator", "original", "mutant",
+		"status", "killing_tests",
+		"tests", "kill_count", "killed_mutants", "zero_kill_tests", "redundant_test_groups", "survivors_by_function",
+	} {
 		if !strings.Contains(actual, `"`+field+`"`) {
 			t.Errorf("output missing required field %q", field)
 		}
@@ -156,7 +249,7 @@ func TestWriteJSONStableFieldNames(t *testing.T) {
 
 func TestWriteText(t *testing.T) {
 	results := makeResults()
-	r := report.Build(results)
+	r := report.Build(results, makeInventory())
 
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
@@ -203,5 +296,21 @@ func TestWriteText(t *testing.T) {
 	}
 	if !strings.Contains(out, "Survived: 1") {
 		t.Errorf("summary missing Survived:\n%s", out)
+	}
+
+	// Top killers section: TestAdd (1) and TestSub (1) are non-zero killers.
+	if !strings.Contains(out, "Top tests by kill count:") {
+		t.Errorf("missing 'Top tests by kill count:' section:\n%s", out)
+	}
+	if !strings.Contains(out, "example.com/pkg/foo.TestAdd (1)") {
+		t.Errorf("top killers section missing TestAdd:\n%s", out)
+	}
+
+	// Zero-kill section: TestMul (bar) is in inventory but kills nothing.
+	if !strings.Contains(out, "Tests that killed nothing:") {
+		t.Errorf("missing 'Tests that killed nothing:' section:\n%s", out)
+	}
+	if !strings.Contains(out, "example.com/pkg/bar.TestMul") {
+		t.Errorf("zero-kill section missing TestMul:\n%s", out)
 	}
 }

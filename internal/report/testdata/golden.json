@@ -30,6 +30,53 @@
       "score": 1
     }
   ],
+  "tests": [
+    {
+      "package": "example.com/pkg/foo",
+      "name": "TestAdd",
+      "kill_count": 1,
+      "killed_mutants": [
+        1
+      ]
+    },
+    {
+      "package": "example.com/pkg/foo",
+      "name": "TestSub",
+      "kill_count": 1,
+      "killed_mutants": [
+        2
+      ]
+    },
+    {
+      "package": "example.com/pkg/bar",
+      "name": "TestMul",
+      "kill_count": 0,
+      "killed_mutants": null
+    }
+  ],
+  "zero_kill_tests": [
+    "example.com/pkg/bar.TestMul"
+  ],
+  "redundant_test_groups": null,
+  "survivors_by_function": [
+    {
+      "package": "example.com/pkg/bar",
+      "function": "Mul",
+      "mutations": [
+        {
+          "mutation_id": 3,
+          "package": "example.com/pkg/bar",
+          "file": "bar.go",
+          "line": 3,
+          "column": 15,
+          "function": "Mul",
+          "operator": "int_arith",
+          "original": "*",
+          "mutant": "/"
+        }
+      ]
+    }
+  ],
   "mutants": [
     {
       "mutation": {
@@ -38,6 +85,7 @@
         "file": "foo.go",
         "line": 5,
         "column": 10,
+        "function": "Add",
         "operator": "int_arith",
         "original": "+",
         "mutant": "-"
@@ -55,6 +103,7 @@
         "file": "foo.go",
         "line": 10,
         "column": 3,
+        "function": "Sub",
         "operator": "int_arith",
         "original": "-",
         "mutant": "+"
@@ -72,6 +121,7 @@
         "file": "bar.go",
         "line": 3,
         "column": 15,
+        "function": "Mul",
         "operator": "int_arith",
         "original": "*",
         "mutant": "/"

@@ -21,37 +21,38 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, timeout time.Duration, stderr io.Writer) ([]mutation.Result, error) {
+func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, timeout time.Duration, stderr io.Writer) ([]mutation.Result, []string, error) {
 	rew, err := schema.Rewrite(pkg, ops)
 	if err != nil {
-		return nil, fmt.Errorf("schema rewrite: %w", err)
+		return nil, nil, fmt.Errorf("schema rewrite: %w", err)
 	}
 
 	if len(rew.Mutations) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	overlayPath, cleanOverlay, err := runner.BuildOverlay(rew, pkg.Dir)
 	if err != nil {
-		return nil, fmt.Errorf("build overlay: %w", err)
+		return nil, nil, fmt.Errorf("build overlay: %w", err)
 	}
 	defer cleanOverlay()
 
 	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
 	if err != nil {
-		return nil, fmt.Errorf("compile test binary: %w", err)
+		return nil, nil, fmt.Errorf("compile test binary: %w", err)
 	}
 	defer cleanBin()
 
-	if err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, timeout); err != nil {
-		return nil, fmt.Errorf("baseline failed: %w", err)
+	inventory, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, timeout)
+	if err != nil {
+		return nil, nil, fmt.Errorf("baseline failed: %w", err)
 	}
 
 	var results []mutation.Result
 	for _, mut := range rew.Mutations {
 		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, mut.ID, pkg.Dir, timeout)
 		if err != nil {
-			return nil, fmt.Errorf("run mutant %d: %w", mut.ID, err)
+			return nil, nil, fmt.Errorf("run mutant %d: %w", mut.ID, err)
 		}
 		results = append(results, mutation.Result{
 			Mutation:     mut,
@@ -60,7 +61,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 			Duration:     dur,
 		})
 	}
-	return results, nil
+	return results, inventory, nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -98,6 +99,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	ctx := context.Background()
 	var allResults []mutation.Result
+	testInventory := make(map[string][]string)
 
 	for _, pkg := range pkgs {
 		testFiles, err := filepath.Glob(filepath.Join(pkg.Dir, "*_test.go"))
@@ -106,7 +108,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 
-		results, err := runPackage(ctx, pkg, ops, *timeoutFlag, stderr)
+		results, inventory, err := runPackage(ctx, pkg, ops, *timeoutFlag, stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "error in %s: %v\n", pkg.ImportPath, err)
 			return 1
@@ -116,9 +118,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		allResults = append(allResults, results...)
+		testInventory[pkg.ImportPath] = inventory
 	}
 
-	r := report.Build(allResults)
+	r := report.Build(allResults, testInventory)
 
 	switch *formatFlag {
 	case "json":

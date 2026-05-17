@@ -7,11 +7,36 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/devenjarvis/kanly/internal/mutation"
 )
+
+// parseTestNames extracts test names from `go test -v` output by scanning for the
+// requested status prefixes (e.g. "--- FAIL: ", "--- PASS: "). The returned slice
+// preserves the order tests appeared in. Trailing timing info like " (0.00s)" is
+// stripped from each name.
+func parseTestNames(out []byte, prefixes ...string) []string {
+	var names []string
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		for _, p := range prefixes {
+			if !strings.HasPrefix(line, p) {
+				continue
+			}
+			name := strings.TrimPrefix(line, p)
+			if idx := strings.Index(name, " ("); idx >= 0 {
+				name = name[:idx]
+			}
+			names = append(names, strings.TrimSpace(name))
+			break
+		}
+	}
+	return names
+}
 
 // CompileTestBinary compiles a test binary for pkgPath using the given overlay file.
 // Returns the binary path and a cleanup function.
@@ -48,24 +73,37 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath string) (binary
 	return binPath, cleanup, nil
 }
 
-// RunBaseline executes the compiled test binary with no active mutant (KANLY_MUTANT unset).
+// RunBaseline executes the compiled test binary with no active mutant (KANLY_MUTANT unset)
+// and `-test.v`, returning the sorted, deduplicated list of test names that ran.
 // Returns an error if the baseline tests fail, indicating the package is already broken.
-func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration) error {
+func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration) ([]string, error) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(tctx, binaryPath)
+	cmd := exec.CommandContext(tctx, binaryPath, "-test.v")
 	cmd.Dir = pkgDir
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 
 	if tctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("baseline run timed out after %v", timeout)
+		return nil, fmt.Errorf("baseline run timed out after %v", timeout)
 	}
 	if err != nil {
-		return fmt.Errorf("baseline tests fail (package is already broken):\n%s", out)
+		return nil, fmt.Errorf("baseline tests fail (package is already broken):\n%s", out)
 	}
-	return nil
+
+	raw := parseTestNames(out, "--- PASS: ", "--- FAIL: ", "--- SKIP: ")
+	seen := make(map[string]struct{}, len(raw))
+	inventory := make([]string, 0, len(raw))
+	for _, n := range raw {
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		inventory = append(inventory, n)
+	}
+	sort.Strings(inventory)
+	return inventory, nil
 }
 
 // RunMutant executes the compiled test binary with KANLY_MUTANT=mutID.
@@ -86,19 +124,7 @@ func RunMutant(ctx context.Context, binaryPath string, mutID int, pkgDir string,
 		return mutation.StatusTimeout, nil, elapsed, nil
 	}
 
-	var killingTests []string
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "--- FAIL: ") {
-			name := strings.TrimPrefix(line, "--- FAIL: ")
-			// Strip timing info, e.g. "TestFoo (0.00s)"
-			if idx := strings.Index(name, " ("); idx >= 0 {
-				name = name[:idx]
-			}
-			killingTests = append(killingTests, strings.TrimSpace(name))
-		}
-	}
+	killingTests := parseTestNames(out, "--- FAIL: ")
 
 	if err != nil {
 		return mutation.StatusKilled, killingTests, elapsed, nil

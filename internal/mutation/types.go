@@ -20,6 +20,7 @@ type Mutation struct {
 	File         string `json:"file"`
 	Line         int    `json:"line"`
 	Column       int    `json:"column"`
+	Function     string `json:"function"`
 	OperatorName string `json:"operator"`
 	Original     string `json:"original"`
 	Mutant       string `json:"mutant"`
@@ -30,4 +31,19 @@ type Result struct {
 	Status       Status        `json:"status"`
 	KillingTests []string      `json:"killing_tests"`
 	Duration     time.Duration `json:"duration_ns"`
+}
+
+// TestStats summarises a single test's mutation-killing behaviour within a package.
+type TestStats struct {
+	Package       string `json:"package"`
+	Name          string `json:"name"`
+	KillCount     int    `json:"kill_count"`
+	KilledMutants []int  `json:"killed_mutants"`
+}
+
+// FunctionSurvivors groups surviving mutations by their enclosing function.
+type FunctionSurvivors struct {
+	Package   string     `json:"package"`
+	Function  string     `json:"function"`
+	Mutations []Mutation `json:"mutations"`
 }
