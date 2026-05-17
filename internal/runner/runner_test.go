@@ -209,6 +209,55 @@ func TestRunMutantKillsAndSurvives(t *testing.T) {
 	}
 }
 
+func TestRunMutantKillsBooleanMutants(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	boolDir := relDir(t, "testdata/boolsample")
+	pkg, err := source.Load(boolDir)
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+
+	ops := []mutation.Operator{operators.BoolLogic{}, operators.BoolNot{}}
+	rew, err := schema.Rewrite(pkg, ops)
+	if err != nil {
+		t.Fatalf("schema.Rewrite: %v", err)
+	}
+
+	// Both() has &&→||, Either() has ||→&&, Negate() has !→removal → 3 mutations total.
+	if len(rew.Mutations) != 3 {
+		t.Fatalf("expected 3 mutations, got %d: %v", len(rew.Mutations), rew.Mutations)
+	}
+
+	overlayPath, cleanup, err := runner.BuildOverlay(rew, boolDir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanup()
+
+	ctx := context.Background()
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	if err != nil {
+		t.Fatalf("CompileTestBinary: %v", err)
+	}
+	defer cleanBin()
+
+	timeout := 30 * time.Second
+
+	for _, m := range rew.Mutations {
+		status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, boolDir, timeout)
+		if err != nil {
+			t.Fatalf("RunMutant(%d, %s→%s): %v", m.ID, m.Original, m.Mutant, err)
+		}
+		if status != mutation.StatusKilled {
+			t.Errorf("mutation %d (%s %s→%q): expected Killed, got %s",
+				m.ID, m.OperatorName, m.Original, m.Mutant, status)
+		}
+	}
+}
+
 func TestRunMutantKillsComparisonMutants(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
