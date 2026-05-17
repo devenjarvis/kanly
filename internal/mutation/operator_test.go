@@ -12,6 +12,7 @@ type fakeOp struct{ name string }
 
 func (f fakeOp) Name() string                                          { return f.name }
 func (f fakeOp) Find(_ *ast.File, _ *types.Info) []mutation.Candidate { return nil }
+func (f fakeOp) Rewrite(_ mutation.Candidate, _ int) ast.Node         { return nil }
 
 func TestRegisterReturnsRegisteredOperators(t *testing.T) {
 	mutation.ResetRegistry()

@@ -17,6 +17,9 @@ type Candidate struct {
 type Operator interface {
 	Name() string
 	Find(file *ast.File, info *types.Info) []Candidate
+	// Rewrite returns the replacement AST node for the given candidate at mutID.
+	// The schema rewriter calls this to construct the dispatcher call expression.
+	Rewrite(c Candidate, mutID int) ast.Node
 }
 
 var registry []Operator

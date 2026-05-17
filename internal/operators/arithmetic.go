@@ -1,6 +1,7 @@
 package operators
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -19,6 +20,29 @@ var sibling = map[token.Token]token.Token{
 	token.SUB: token.ADD,
 	token.MUL: token.QUO,
 	token.QUO: token.MUL,
+}
+
+// opcodeConst maps each arithmetic op to the opcode constant name used in the dispatcher.
+var opcodeConst = map[token.Token]string{
+	token.ADD: "__cAdd",
+	token.SUB: "__cSub",
+	token.MUL: "__cMul",
+	token.QUO: "__cQuo",
+}
+
+// Rewrite returns the __cMutInt dispatcher call that replaces the original BinaryExpr.
+func (IntArith) Rewrite(c mutation.Candidate, mutID int) ast.Node {
+	expr := c.Node.(*ast.BinaryExpr)
+	opcode := opcodeConst[expr.Op]
+	return &ast.CallExpr{
+		Fun: &ast.Ident{Name: "__cMutInt"},
+		Args: []ast.Expr{
+			expr.X,
+			expr.Y,
+			&ast.Ident{Name: opcode},
+			&ast.BasicLit{Kind: token.INT, Value: fmt.Sprintf("%d", mutID)},
+		},
+	}
 }
 
 func (IntArith) Find(file *ast.File, info *types.Info) []mutation.Candidate {

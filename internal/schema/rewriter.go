@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
-	"go/token"
 
 	"golang.org/x/tools/go/ast/astutil"
 
@@ -20,14 +19,6 @@ type Rewritten struct {
 	Mutations  []mutation.Mutation
 }
 
-// opcodeConst maps a token to the __cXxx constant name in the dispatcher.
-var opcodeConst = map[token.Token]string{
-	token.ADD: "__cAdd",
-	token.SUB: "__cSub",
-	token.MUL: "__cMul",
-	token.QUO: "__cQuo",
-}
-
 // Rewrite transforms pkg's source files into a mutant schema using the provided operators.
 func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 	mutID := 0
@@ -37,9 +28,10 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 	for filePath, file := range pkg.Files {
 		// Collect all candidates for this file across all operators.
 		type entry struct {
-			node    *ast.BinaryExpr
-			cand    mutation.Candidate
-			id      int
+			node *ast.BinaryExpr
+			cand mutation.Candidate
+			id   int
+			op   mutation.Operator
 		}
 		var entries []entry
 
@@ -60,6 +52,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 					node: c.Node.(*ast.BinaryExpr),
 					cand: c,
 					id:   mutID,
+					op:   op,
 				})
 			}
 		}
@@ -68,14 +61,15 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 			continue
 		}
 
-		// Build a set for fast lookup: *ast.BinaryExpr → (mutation ID, original op).
+		// Build a lookup map: *ast.BinaryExpr → rewrite details.
 		type rewriteInfo struct {
 			mutID int
-			origTok token.Token
+			op    mutation.Operator
+			cand  mutation.Candidate
 		}
 		nodeMap := make(map[*ast.BinaryExpr]rewriteInfo, len(entries))
 		for _, e := range entries {
-			nodeMap[e.node] = rewriteInfo{mutID: e.id, origTok: e.node.Op}
+			nodeMap[e.node] = rewriteInfo{mutID: e.id, op: e.op, cand: e.cand}
 		}
 
 		// Clone the file AST by applying a cursor that replaces matching BinaryExprs.
@@ -88,20 +82,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 			if !ok {
 				return true
 			}
-			opcode, ok := opcodeConst[info.origTok]
-			if !ok {
-				return true
-			}
-			call := &ast.CallExpr{
-				Fun: &ast.Ident{Name: "__cMutInt"},
-				Args: []ast.Expr{
-					expr.X,
-					expr.Y,
-					&ast.Ident{Name: opcode},
-					&ast.BasicLit{Kind: token.INT, Value: fmt.Sprintf("%d", info.mutID)},
-				},
-			}
-			cursor.Replace(call)
+			cursor.Replace(info.op.Rewrite(info.cand, info.mutID))
 			return true
 		}, nil)
 
