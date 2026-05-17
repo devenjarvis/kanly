@@ -105,6 +105,7 @@ func TestRenderDispatcherEmitsBoolFuncs(t *testing.T) {
 		"return a() || b()",
 		"case 22:",
 		"return x",
+		"return !x",
 		"__cAnd",
 		"__cOr",
 	}
