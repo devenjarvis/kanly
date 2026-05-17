@@ -23,13 +23,14 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath string) (binary
 	cleanup = func() { os.RemoveAll(tmpDir) }
 	defer func() {
 		if err != nil {
-			cleanup()
+			os.RemoveAll(tmpDir)
 		}
 	}()
 
 	binPath := filepath.Join(tmpDir, "testbin")
 	cmd := exec.CommandContext(ctx,
 		"go", "test", "-c",
+		"-vet=off",
 		"-overlay="+overlayPath,
 		"-o", binPath,
 		pkgPath,

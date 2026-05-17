@@ -24,7 +24,7 @@ func BuildOverlay(rew *schema.Rewritten, pkgDir string) (overlayPath string, cle
 	cleanup = func() { os.RemoveAll(tmpDir) }
 	defer func() {
 		if err != nil {
-			cleanup()
+			os.RemoveAll(tmpDir)
 		}
 	}()
 

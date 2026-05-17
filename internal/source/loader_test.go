@@ -24,6 +24,17 @@ func relDir(t *testing.T, sub string) string {
 	return abs
 }
 
+func TestLoadReturnsAbsoluteDir(t *testing.T) {
+	// Relative path — Dir must still be absolute so overlay keys are valid.
+	pkg, err := source.Load("testdata/simple")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !filepath.IsAbs(pkg.Dir) {
+		t.Errorf("expected absolute Dir, got %q", pkg.Dir)
+	}
+}
+
 func TestLoadParsesPackageWithTypeInfo(t *testing.T) {
 	dir := relDir(t, "testdata/simple")
 	pkg, err := source.Load(dir)

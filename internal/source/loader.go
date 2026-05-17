@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"path/filepath"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -19,6 +20,10 @@ type Package struct {
 }
 
 func Load(dir string) (*Package, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("abs dir: %w", err)
+	}
 	cfg := &packages.Config{
 		Mode: packages.NeedName |
 			packages.NeedFiles |
@@ -28,7 +33,7 @@ func Load(dir string) (*Package, error) {
 			packages.NeedDeps |
 			packages.NeedImports |
 			packages.NeedCompiledGoFiles,
-		Dir:   dir,
+		Dir:   absDir,
 		Tests: false,
 	}
 
@@ -52,7 +57,7 @@ func Load(dir string) (*Package, error) {
 	}
 
 	return &Package{
-		Dir:        dir,
+		Dir:        absDir,
 		ImportPath: pkg.PkgPath,
 		Files:      files,
 		Fset:       pkg.Fset,
