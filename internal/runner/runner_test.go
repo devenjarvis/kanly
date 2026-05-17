@@ -208,3 +208,52 @@ func TestRunMutantKillsAndSurvives(t *testing.T) {
 			rew.Mutations[1].Original, rew.Mutations[1].Mutant, status2)
 	}
 }
+
+func TestRunMutantKillsComparisonMutants(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cmpDir := relDir(t, "testdata/cmpsample")
+	pkg, err := source.Load(cmpDir)
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+
+	ops := []mutation.Operator{operators.IntCmpBoundary{}, operators.IntCmpNegate{}}
+	rew, err := schema.Rewrite(pkg, ops)
+	if err != nil {
+		t.Fatalf("schema.Rewrite: %v", err)
+	}
+
+	// IsPositive has one '>' — one boundary mutant (>→>=) and one negate mutant (>→<=).
+	if len(rew.Mutations) != 2 {
+		t.Fatalf("expected 2 mutations, got %d: %v", len(rew.Mutations), rew.Mutations)
+	}
+
+	overlayPath, cleanup, err := runner.BuildOverlay(rew, cmpDir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanup()
+
+	ctx := context.Background()
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	if err != nil {
+		t.Fatalf("CompileTestBinary: %v", err)
+	}
+	defer cleanBin()
+
+	timeout := 30 * time.Second
+
+	for _, m := range rew.Mutations {
+		status, _, _, err := runner.RunMutant(ctx, binaryPath, m.ID, timeout)
+		if err != nil {
+			t.Fatalf("RunMutant(%d, %s→%s): %v", m.ID, m.Original, m.Mutant, err)
+		}
+		if status != mutation.StatusKilled {
+			t.Errorf("mutation %d (%s %s→%s): expected Killed, got %s",
+				m.ID, m.OperatorName, m.Original, m.Mutant, status)
+		}
+	}
+}
