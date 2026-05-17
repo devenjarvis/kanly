@@ -81,6 +81,57 @@ func TestRenderDispatcherIncludesRemCase(t *testing.T) {
 	}
 }
 
+func TestRenderDispatcherEmitsBoolFuncs(t *testing.T) {
+	muts := []mutation.Mutation{
+		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+		{ID: 21, OperatorName: "bool_logic", Original: "&&", Mutant: "||"},
+		{ID: 22, OperatorName: "bool_not", Original: "!", Mutant: ""},
+	}
+	src, err := schema.RenderDispatcher("mypkg", muts)
+	if err != nil {
+		t.Fatalf("RenderDispatcher: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	_, err = parser.ParseFile(fset, "cauldron_schema.go", src, 0)
+	if err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, src)
+	}
+
+	checks := []string{
+		"func __cMutBool(a, b func() bool, op int, mutIDs ...int) bool",
+		"func __cMutNot(x bool, mutIDs ...int) bool",
+		"case 21:",
+		"return a() || b()",
+		"case 22:",
+		"return x",
+		"__cAnd",
+		"__cOr",
+	}
+	for _, want := range checks {
+		if !strings.Contains(src, want) {
+			t.Errorf("missing %q in:\n%s", want, src)
+		}
+	}
+}
+
+func TestRenderDispatcherOmitsBoolFuncsWhenAbsent(t *testing.T) {
+	muts := []mutation.Mutation{
+		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+	}
+	src, err := schema.RenderDispatcher("mypkg", muts)
+	if err != nil {
+		t.Fatalf("RenderDispatcher: %v", err)
+	}
+
+	if strings.Contains(src, "__cMutBool") {
+		t.Errorf("expected no __cMutBool in int-only dispatcher:\n%s", src)
+	}
+	if strings.Contains(src, "__cMutNot") {
+		t.Errorf("expected no __cMutNot in int-only dispatcher:\n%s", src)
+	}
+}
+
 func TestRenderDispatcherEmitsIntCmpFunc(t *testing.T) {
 	muts := []mutation.Mutation{
 		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
