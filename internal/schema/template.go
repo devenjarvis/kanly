@@ -144,4 +144,15 @@ func __cMutErr(x error, mutIDs ...int) error {
 	}
 	return x
 }
+{{end}}{{if .CallDeleteMuts}}
+// __cMutCallSkip invokes fn unless one of mutIDs is the active mutant, in which
+// case it does nothing — neither the call nor its arguments are evaluated.
+func __cMutCallSkip(fn func(), mutIDs ...int) {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			return
+		}
+	}
+	fn()
+}
 {{end}}`
