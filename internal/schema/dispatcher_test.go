@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
-	"github.com/devenjarvis/cauldron/internal/schema"
+	"github.com/devenjarvis/kanly/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/schema"
 )
 
 func TestRenderDispatcherProducesCompilableGo(t *testing.T) {
@@ -21,7 +21,7 @@ func TestRenderDispatcherProducesCompilableGo(t *testing.T) {
 
 	// Must parse as valid Go.
 	fset := token.NewFileSet()
-	_, err = parser.ParseFile(fset, "cauldron_schema.go", src, 0)
+	_, err = parser.ParseFile(fset, "kanly_schema.go", src, 0)
 	if err != nil {
 		t.Fatalf("generated source does not parse: %v\n%s", err, src)
 	}
@@ -61,7 +61,7 @@ func TestRenderDispatcherIncludesRemCase(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	_, err = parser.ParseFile(fset, "cauldron_schema.go", src, 0)
+	_, err = parser.ParseFile(fset, "kanly_schema.go", src, 0)
 	if err != nil {
 		t.Fatalf("generated source does not parse: %v\n%s", err, src)
 	}
@@ -93,7 +93,7 @@ func TestRenderDispatcherEmitsBoolFuncs(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	_, err = parser.ParseFile(fset, "cauldron_schema.go", src, 0)
+	_, err = parser.ParseFile(fset, "kanly_schema.go", src, 0)
 	if err != nil {
 		t.Fatalf("generated source does not parse: %v\n%s", err, src)
 	}
@@ -177,7 +177,7 @@ func TestRenderDispatcherEmitsIntCmpFunc(t *testing.T) {
 
 	// Must parse as valid Go.
 	fset := token.NewFileSet()
-	_, err = parser.ParseFile(fset, "cauldron_schema.go", src, 0)
+	_, err = parser.ParseFile(fset, "kanly_schema.go", src, 0)
 	if err != nil {
 		t.Fatalf("generated source does not parse: %v\n%s", err, src)
 	}

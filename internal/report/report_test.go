@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
-	"github.com/devenjarvis/cauldron/internal/report"
+	"github.com/devenjarvis/kanly/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/report"
 )
 
 func relDir(t *testing.T, sub string) string {

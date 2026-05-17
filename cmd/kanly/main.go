@@ -9,12 +9,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
-	_ "github.com/devenjarvis/cauldron/internal/operators" // register operators via init()
-	"github.com/devenjarvis/cauldron/internal/report"
-	"github.com/devenjarvis/cauldron/internal/runner"
-	"github.com/devenjarvis/cauldron/internal/schema"
-	"github.com/devenjarvis/cauldron/internal/source"
+	"github.com/devenjarvis/kanly/internal/mutation"
+	_ "github.com/devenjarvis/kanly/internal/operators" // register operators via init()
+	"github.com/devenjarvis/kanly/internal/report"
+	"github.com/devenjarvis/kanly/internal/runner"
+	"github.com/devenjarvis/kanly/internal/schema"
+	"github.com/devenjarvis/kanly/internal/source"
 )
 
 func main() {
@@ -64,17 +64,17 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("cauldron", flag.ContinueOnError)
+	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	formatFlag := fs.String("format", "text", "output format: text|json")
 	timeoutFlag := fs.Duration("timeout", 30*time.Second, "per-mutant test timeout")
 
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "usage: cauldron [--format=text|json] [--timeout=30s] <pattern>...\n")
+		fmt.Fprintf(stderr, "usage: kanly [--format=text|json] [--timeout=30s] <pattern>...\n")
 		return 2
 	}
 	if fs.NArg() < 1 {
-		fmt.Fprintf(stderr, "usage: cauldron [--format=text|json] [--timeout=30s] <pattern>...\n")
+		fmt.Fprintf(stderr, "usage: kanly [--format=text|json] [--timeout=30s] <pattern>...\n")
 		return 2
 	}
 

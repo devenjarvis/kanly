@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/devenjarvis/cauldron/internal/source"
+	"github.com/devenjarvis/kanly/internal/source"
 )
 
 // relDir returns the absolute path of sub relative to this test file's directory.

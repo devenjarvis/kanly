@@ -8,14 +8,14 @@ import (
 
 	"golang.org/x/tools/go/ast/astutil"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
-	"github.com/devenjarvis/cauldron/internal/source"
+	"github.com/devenjarvis/kanly/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/source"
 )
 
 // Rewritten holds the results of schema rewriting: rewritten file sources and the dispatcher.
 type Rewritten struct {
 	Files      map[string]string // absolute file path → rewritten source
-	Dispatcher string            // source of the generated cauldron_schema.go file
+	Dispatcher string            // source of the generated kanly_schema.go file
 	Mutations  []mutation.Mutation
 }
 

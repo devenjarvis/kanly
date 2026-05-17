@@ -6,7 +6,7 @@ import (
 	"io"
 	"sort"
 
-	"github.com/devenjarvis/cauldron/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
 type Summary struct {

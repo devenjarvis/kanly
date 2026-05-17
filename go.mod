@@ -1,4 +1,4 @@
-module github.com/devenjarvis/cauldron
+module github.com/devenjarvis/kanly
 
 go 1.23.0
 

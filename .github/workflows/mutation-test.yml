@@ -8,7 +8,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  cauldron:
+  kanly:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,22 +18,22 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build cauldron
-        run: go build -o cauldron ./cmd/cauldron
+      - name: Build kanly
+        run: go build -o kanly ./cmd/kanly
 
-      - name: Run cauldron on internal packages
+      - name: Run kanly on internal packages
         id: run
         continue-on-error: true
-        run: ./cauldron --format=text ./internal/... 2>&1 | tee cauldron-report.txt
+        run: ./kanly --format=text ./internal/... 2>&1 | tee kanly-report.txt
 
       - name: Build comment body
         run: |
           {
-            echo "<!-- cauldron-report -->"
-            echo "### 🧪 Cauldron mutation report — ./internal/..."
+            echo "<!-- kanly-report -->"
+            echo "### 🧪 Kanly mutation report — ./internal/..."
             echo ""
             echo '```text'
-            cat cauldron-report.txt
+            cat kanly-report.txt
             echo '```'
           } > comment.md
 
@@ -43,7 +43,7 @@ jobs:
         with:
           issue-number: ${{ github.event.pull_request.number }}
           comment-author: 'github-actions[bot]'
-          body-includes: '<!-- cauldron-report -->'
+          body-includes: '<!-- kanly-report -->'
 
       - name: Post or update comment
         uses: peter-evans/create-or-update-comment@v4

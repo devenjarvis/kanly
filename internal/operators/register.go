@@ -1,6 +1,6 @@
 package operators
 
-import "github.com/devenjarvis/cauldron/internal/mutation"
+import "github.com/devenjarvis/kanly/internal/mutation"
 
 func init() {
 	mutation.Register(IntArith{})

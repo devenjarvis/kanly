@@ -28,8 +28,8 @@ func TestRunRejectsMissingPackageArg(t *testing.T) {
 	if code != 2 {
 		t.Errorf("expected exit code 2, got %d", code)
 	}
-	if !strings.Contains(stderr.String(), "usage: cauldron") {
-		t.Errorf("stderr should contain 'usage: cauldron', got: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "usage: kanly") {
+		t.Errorf("stderr should contain 'usage: kanly', got: %q", stderr.String())
 	}
 }
 
@@ -67,7 +67,7 @@ func TestRunEndToEndOnSamplePackage(t *testing.T) {
 	if len(result.Packages) != 1 {
 		t.Errorf("expected 1 package entry, got %d", len(result.Packages))
 	}
-	const wantPkg = "github.com/devenjarvis/cauldron/internal/runner/testdata/sample"
+	const wantPkg = "github.com/devenjarvis/kanly/internal/runner/testdata/sample"
 	if len(result.Packages) > 0 && result.Packages[0].Package != wantPkg {
 		t.Errorf("Packages[0].Package: want %q, got %q", wantPkg, result.Packages[0].Package)
 	}

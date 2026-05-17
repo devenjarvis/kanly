@@ -1,4 +1,4 @@
-# Cauldron
+# Kanly
 
 A Go mutation tester that uses Mutant Schema Generation to find tests that don't actually verify behaviour.
 
@@ -7,13 +7,13 @@ A Go mutation tester that uses Mutant Schema Generation to find tests that don't
 ## Install
 
 ```
-go install github.com/devenjarvis/cauldron/cmd/cauldron@latest
+go install github.com/devenjarvis/kanly/cmd/kanly@latest
 ```
 
 ## Usage
 
 ```
-cauldron [--format=text|json] [--timeout=30s] <pattern>...
+kanly [--format=text|json] [--timeout=30s] <pattern>...
 ```
 
 | Flag | Default | Description |
@@ -24,9 +24,9 @@ cauldron [--format=text|json] [--timeout=30s] <pattern>...
 ### Worked example
 
 ```
-$ cauldron ./internal/runner/testdata/sample
+$ kanly ./internal/runner/testdata/sample
 internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+
-Package: github.com/devenjarvis/cauldron/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Score: 50.0%
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Score: 50.0%
 
 Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Score: 50.0%
 ```
@@ -38,10 +38,10 @@ The survived mutant on line 5 (`Sub`) means the test suite has a weak assertion 
 Pass multiple patterns or use `./...` to mutate all packages in a module in a single run:
 
 ```
-$ cauldron ./internal/runner/testdata/sample ./internal/runner/testdata/cmpsample
+$ kanly ./internal/runner/testdata/sample ./internal/runner/testdata/cmpsample
 internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+
-Package: github.com/devenjarvis/cauldron/internal/runner/testdata/cmpsample | Total: 2 | Killed: 2 | Survived: 0 | Score: 100.0%
-Package: github.com/devenjarvis/cauldron/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Score: 50.0%
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/cmpsample | Total: 2 | Killed: 2 | Survived: 0 | Score: 100.0%
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Score: 50.0%
 
 Total: 4 | Killed: 3 | Survived: 1 | Timeout: 0 | Score: 75.0%
 ```
@@ -50,7 +50,7 @@ Each package's pipeline (rewrite → compile → baseline → mutant loop) runs 
 
 ## How it works
 
-Cauldron implements the Mutant Schema Generation (MSG) technique: instead of recompiling once per mutant, it encodes all mutants into a single metaprogram, compiles once, and selects active mutants at runtime via the `CAULDRON_MUTANT` environment variable.
+Kanly implements the Mutant Schema Generation (MSG) technique: instead of recompiling once per mutant, it encodes all mutants into a single metaprogram, compiles once, and selects active mutants at runtime via the `KANLY_MUTANT` environment variable.
 
 ## Supported operators
 
@@ -85,7 +85,7 @@ GOLDEN_UPDATE=1 go test ./internal/report
 
 ## Dogfooding
 
-Every pull request on this repo runs Cauldron against `./internal/report ./internal/mutation` via the [mutation-test](.github/workflows/mutation-test.yml) GitHub Actions workflow. The workflow posts the result as a single PR comment (updated in-place on re-pushes) and never fails the check — it is informational only.
+Every pull request on this repo runs Kanly against `./internal/report ./internal/mutation` via the [mutation-test](.github/workflows/mutation-test.yml) GitHub Actions workflow. The workflow posts the result as a single PR comment (updated in-place on re-pushes) and never fails the check — it is informational only.
 
 **Fork PRs:** `GITHUB_TOKEN` on fork pull requests does not receive `pull-requests: write` permission, so the comment step will silently no-op for contributions from forks.
 
