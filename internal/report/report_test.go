@@ -30,17 +30,17 @@ func relDir(t *testing.T, sub string) string {
 func makeResults() []mutation.Result {
 	return []mutation.Result{
 		{
-			Mutation: mutation.Mutation{ID: 1, File: "foo.go", Line: 5, Column: 10, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Mutation: mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, OperatorName: "int_arith", Original: "+", Mutant: "-"},
 			Status:   mutation.StatusKilled,
 			KillingTests: []string{"TestAdd"},
 		},
 		{
-			Mutation: mutation.Mutation{ID: 2, File: "foo.go", Line: 10, Column: 3, OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Mutation: mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 10, Column: 3, OperatorName: "int_arith", Original: "-", Mutant: "+"},
 			Status:   mutation.StatusKilled,
 			KillingTests: []string{"TestSub"},
 		},
 		{
-			Mutation: mutation.Mutation{ID: 3, File: "bar.go", Line: 3, Column: 15, OperatorName: "int_arith", Original: "*", Mutant: "/"},
+			Mutation: mutation.Mutation{ID: 3, Package: "example.com/pkg/bar", File: "bar.go", Line: 3, Column: 15, OperatorName: "int_arith", Original: "*", Mutant: "/"},
 			Status:   mutation.StatusSurvived,
 		},
 	}
@@ -93,7 +93,7 @@ func TestWriteJSONStableFieldNames(t *testing.T) {
 
 	// Check that the actual output contains all required field names.
 	actual := buf.String()
-	for _, field := range []string{"mutation_id", "file", "line", "column", "operator", "original", "mutant", "status", "killing_tests"} {
+	for _, field := range []string{"mutation_id", "package", "file", "line", "column", "operator", "original", "mutant", "status", "killing_tests"} {
 		if !strings.Contains(actual, `"`+field+`"`) {
 			t.Errorf("output missing required field %q", field)
 		}

@@ -12,6 +12,7 @@
     {
       "mutation": {
         "mutation_id": 1,
+        "package": "example.com/pkg/foo",
         "file": "foo.go",
         "line": 5,
         "column": 10,
@@ -28,6 +29,7 @@
     {
       "mutation": {
         "mutation_id": 2,
+        "package": "example.com/pkg/foo",
         "file": "foo.go",
         "line": 10,
         "column": 3,
@@ -44,6 +46,7 @@
     {
       "mutation": {
         "mutation_id": 3,
+        "package": "example.com/pkg/bar",
         "file": "bar.go",
         "line": 3,
         "column": 15,
