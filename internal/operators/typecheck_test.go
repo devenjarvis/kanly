@@ -9,6 +9,98 @@ import (
 	"github.com/devenjarvis/cauldron/internal/source"
 )
 
+func TestBoolOperandsTypeCheck(t *testing.T) {
+	tests := []struct {
+		name      string
+		pkgPath   string
+		wantTrue  int
+		wantFalse int
+	}{
+		// boolpkg: And() b1&&b2 (true), Or() b1||b2 (true), ConstAnd() true&&false (false, untyped)
+		{"boolpkg bool vars", relDirTC(t, "testdata/boolpkg"), 2, 1},
+		// namedboolpkg: MyAnd() m1&&m2 (false, named MyBool type)
+		{"namedboolpkg named bool", relDirTC(t, "testdata/namedboolpkg"), 0, 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg, err := source.Load(tc.pkgPath)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+
+			var trueCount, falseCount int
+			for _, f := range pkg.Files {
+				ast.Inspect(f, func(n ast.Node) bool {
+					expr, ok := n.(*ast.BinaryExpr)
+					if !ok {
+						return true
+					}
+					if boolOperands(pkg.TypesInfo, expr.X, expr.Y) {
+						trueCount++
+					} else {
+						falseCount++
+					}
+					return true
+				})
+			}
+
+			if trueCount != tc.wantTrue {
+				t.Errorf("boolOperands true count: want %d, got %d", tc.wantTrue, trueCount)
+			}
+			if falseCount != tc.wantFalse {
+				t.Errorf("boolOperands false count: want %d, got %d", tc.wantFalse, falseCount)
+			}
+		})
+	}
+}
+
+func TestBoolOperandTypeCheck(t *testing.T) {
+	tests := []struct {
+		name      string
+		pkgPath   string
+		wantTrue  int
+		wantFalse int
+	}{
+		// boolpkg: Not() !b1 (true), ConstNot() !true (false, untyped bool constant)
+		{"boolpkg bool var", relDirTC(t, "testdata/boolpkg"), 1, 1},
+		// namedboolpkg: MyNot() !m1 (false, named MyBool type)
+		{"namedboolpkg named bool", relDirTC(t, "testdata/namedboolpkg"), 0, 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg, err := source.Load(tc.pkgPath)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+
+			var trueCount, falseCount int
+			for _, f := range pkg.Files {
+				ast.Inspect(f, func(n ast.Node) bool {
+					expr, ok := n.(*ast.UnaryExpr)
+					if !ok {
+						return true
+					}
+					if boolOperand(pkg.TypesInfo, expr.X) {
+						trueCount++
+					} else {
+						falseCount++
+					}
+					return true
+				})
+			}
+
+			if trueCount != tc.wantTrue {
+				t.Errorf("boolOperand true count: want %d, got %d", tc.wantTrue, trueCount)
+			}
+			if falseCount != tc.wantFalse {
+				t.Errorf("boolOperand false count: want %d, got %d", tc.wantFalse, falseCount)
+			}
+		})
+	}
+}
+
 func relDirTC(t *testing.T, sub string) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
