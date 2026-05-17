@@ -178,6 +178,9 @@ func TestEndToEndMultiPackage(t *testing.T) {
 		t.Errorf("Packages: want 2, got %d", len(result.Packages))
 	}
 
+	// The fixture's go.mod declares "module multipkg", so the full import paths
+	// are "multipkg/foo" and "multipkg/bar" — no hostname prefix.  The module
+	// has no external dependencies, so no go.sum is required.
 	wantPkgs := map[string]bool{"multipkg/foo": true, "multipkg/bar": true}
 	for _, p := range result.Packages {
 		if !wantPkgs[p.Package] {
