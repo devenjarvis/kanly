@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/devenjarvis/kanly/internal/mutation"
 )
+
+// fileScopeFunc is the synthetic "function name" used for mutations that aren't
+// inside any top-level FuncDecl (rare, but possible for future operators).
+const fileScopeFunc = "<file-scope>"
 
 type Summary struct {
 	Total      int     `json:"total"`
@@ -25,12 +31,16 @@ type PackageSummary struct {
 }
 
 type Report struct {
-	Summary  Summary          `json:"summary"`
-	Packages []PackageSummary `json:"packages"`
-	Mutants  []mutation.Result `json:"mutants"`
+	Summary             Summary                      `json:"summary"`
+	Packages            []PackageSummary             `json:"packages"`
+	Tests               []mutation.TestStats         `json:"tests"`
+	ZeroKillTests       []string                     `json:"zero_kill_tests"`
+	RedundantTestGroups [][]string                   `json:"redundant_test_groups"`
+	SurvivorsByFunction []mutation.FunctionSurvivors `json:"survivors_by_function"`
+	Mutants             []mutation.Result            `json:"mutants"`
 }
 
-func Build(results []mutation.Result) Report {
+func Build(results []mutation.Result, testInventory map[string][]string) Report {
 	var s Summary
 	s.Total = len(results)
 	for _, r := range results {
@@ -93,7 +103,147 @@ func Build(results []mutation.Result) Report {
 		pkgSummaries = append(pkgSummaries, PackageSummary{Package: name, Summary: *ps})
 	}
 
-	return Report{Summary: s, Packages: pkgSummaries, Mutants: results}
+	tests, zeroKill, redundant := buildTestAggregations(results, testInventory)
+	survivors := buildSurvivorsByFunction(results)
+
+	return Report{
+		Summary:             s,
+		Packages:            pkgSummaries,
+		Tests:               tests,
+		ZeroKillTests:       zeroKill,
+		RedundantTestGroups: redundant,
+		SurvivorsByFunction: survivors,
+		Mutants:             results,
+	}
+}
+
+// buildTestAggregations flips per-mutant kill data around the test axis and
+// derives the zero-kill list and redundant-test groups.
+func buildTestAggregations(results []mutation.Result, testInventory map[string][]string) ([]mutation.TestStats, []string, [][]string) {
+	type key struct{ pkg, name string }
+	stats := make(map[key]*mutation.TestStats)
+
+	ensure := func(pkg, name string) *mutation.TestStats {
+		k := key{pkg, name}
+		if ts, ok := stats[k]; ok {
+			return ts
+		}
+		ts := &mutation.TestStats{Package: pkg, Name: name}
+		stats[k] = ts
+		return ts
+	}
+
+	for pkg, names := range testInventory {
+		for _, n := range names {
+			ensure(pkg, n)
+		}
+	}
+
+	for _, r := range results {
+		for _, name := range r.KillingTests {
+			ts := ensure(r.Mutation.Package, name)
+			ts.KilledMutants = append(ts.KilledMutants, r.Mutation.ID)
+		}
+	}
+
+	tests := make([]mutation.TestStats, 0, len(stats))
+	for _, ts := range stats {
+		sort.Ints(ts.KilledMutants)
+		ts.KillCount = len(ts.KilledMutants)
+		tests = append(tests, *ts)
+	}
+	sort.Slice(tests, func(i, j int) bool {
+		if tests[i].KillCount != tests[j].KillCount {
+			return tests[i].KillCount > tests[j].KillCount
+		}
+		if tests[i].Package != tests[j].Package {
+			return tests[i].Package < tests[j].Package
+		}
+		return tests[i].Name < tests[j].Name
+	})
+
+	var zeroKill []string
+	for _, ts := range tests {
+		if ts.KillCount > 0 {
+			continue
+		}
+		zeroKill = append(zeroKill, qualifyTestName(ts.Package, ts.Name))
+	}
+	sort.Strings(zeroKill)
+
+	// Group tests sharing identical non-empty kill-sets.
+	byHash := make(map[string][]string)
+	for _, ts := range tests {
+		if ts.KillCount == 0 {
+			continue
+		}
+		ids := make([]string, len(ts.KilledMutants))
+		for i, id := range ts.KilledMutants {
+			ids[i] = strconv.Itoa(id)
+		}
+		h := strings.Join(ids, ",")
+		byHash[h] = append(byHash[h], qualifyTestName(ts.Package, ts.Name))
+	}
+	var redundant [][]string
+	for _, group := range byHash {
+		if len(group) < 2 {
+			continue
+		}
+		sort.Strings(group)
+		redundant = append(redundant, group)
+	}
+	sort.Slice(redundant, func(i, j int) bool {
+		return redundant[i][0] < redundant[j][0]
+	})
+
+	return tests, zeroKill, redundant
+}
+
+// buildSurvivorsByFunction groups every surviving mutation by its enclosing
+// (package, function), producing a deterministically-sorted slice for navigation.
+func buildSurvivorsByFunction(results []mutation.Result) []mutation.FunctionSurvivors {
+	type key struct{ pkg, fn string }
+	groups := make(map[key]*mutation.FunctionSurvivors)
+	for _, r := range results {
+		if r.Status != mutation.StatusSurvived {
+			continue
+		}
+		fn := r.Mutation.Function
+		if fn == "" {
+			fn = fileScopeFunc
+		}
+		k := key{r.Mutation.Package, fn}
+		g, ok := groups[k]
+		if !ok {
+			g = &mutation.FunctionSurvivors{Package: r.Mutation.Package, Function: fn}
+			groups[k] = g
+		}
+		g.Mutations = append(g.Mutations, r.Mutation)
+	}
+	out := make([]mutation.FunctionSurvivors, 0, len(groups))
+	for _, g := range groups {
+		sort.Slice(g.Mutations, func(i, j int) bool {
+			if g.Mutations[i].Line != g.Mutations[j].Line {
+				return g.Mutations[i].Line < g.Mutations[j].Line
+			}
+			return g.Mutations[i].Column < g.Mutations[j].Column
+		})
+		out = append(out, *g)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Package != out[j].Package {
+			return out[i].Package < out[j].Package
+		}
+		return out[i].Function < out[j].Function
+	})
+	return out
+}
+
+func qualifyTestName(pkg, name string) string {
+	if pkg == "" {
+		return name
+	}
+	return pkg + "." + name
 }
 
 func WriteJSON(w io.Writer, r Report) error {
@@ -121,9 +271,56 @@ func WriteText(w io.Writer, r Report) error {
 			return err
 		}
 	}
-	_, err := fmt.Fprintf(w, "\nTotal: %d | Killed: %d | Survived: %d | Timeout: %d | Score: %.1f%%\n",
+	if _, err := fmt.Fprintf(w, "\nTotal: %d | Killed: %d | Survived: %d | Timeout: %d | Score: %.1f%%\n",
 		r.Summary.Total, r.Summary.Killed, r.Summary.Survived, r.Summary.Timeout,
 		r.Summary.Score*100,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+
+	// Top tests by kill count — up to 5 entries with at least one kill.
+	var topKillers []mutation.TestStats
+	for _, ts := range r.Tests {
+		if ts.KillCount == 0 {
+			continue
+		}
+		topKillers = append(topKillers, ts)
+		if len(topKillers) == 5 {
+			break
+		}
+	}
+	if len(topKillers) > 0 {
+		if _, err := fmt.Fprintln(w, "\nTop tests by kill count:"); err != nil {
+			return err
+		}
+		for _, ts := range topKillers {
+			if _, err := fmt.Fprintf(w, "  %s (%d)\n", qualifyTestName(ts.Package, ts.Name), ts.KillCount); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(r.ZeroKillTests) > 0 {
+		if _, err := fmt.Fprintln(w, "\nTests that killed nothing:"); err != nil {
+			return err
+		}
+		for _, n := range r.ZeroKillTests {
+			if _, err := fmt.Fprintf(w, "  %s\n", n); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(r.RedundantTestGroups) > 0 {
+		if _, err := fmt.Fprintln(w, "\nRedundant test groups (identical kill sets):"); err != nil {
+			return err
+		}
+		for _, group := range r.RedundantTestGroups {
+			if _, err := fmt.Fprintf(w, "  %s\n", strings.Join(group, ", ")); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

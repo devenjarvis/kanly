@@ -5,12 +5,74 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
+	"go/token"
 
 	"golang.org/x/tools/go/ast/astutil"
 
 	"github.com/devenjarvis/kanly/internal/mutation"
 	"github.com/devenjarvis/kanly/internal/source"
 )
+
+// funcSpan records a top-level FuncDecl's source range and qualified name.
+type funcSpan struct {
+	start token.Pos
+	end   token.Pos
+	name  string
+}
+
+// collectFuncSpans returns the source ranges of every top-level FuncDecl in file,
+// each tagged with a display name that disambiguates methods by receiver type.
+func collectFuncSpans(file *ast.File) []funcSpan {
+	var spans []funcSpan
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Name == nil {
+			continue
+		}
+		spans = append(spans, funcSpan{
+			start: fd.Pos(),
+			end:   fd.End(),
+			name:  funcDeclName(fd),
+		})
+	}
+	return spans
+}
+
+// funcDeclName renders a FuncDecl as either "Func" or "(Recv).Method" / "(*Recv).Method".
+func funcDeclName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return fd.Name.Name
+	}
+	recv := fd.Recv.List[0].Type
+	switch t := recv.(type) {
+	case *ast.Ident:
+		return "(" + t.Name + ")." + fd.Name.Name
+	case *ast.StarExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return "(*" + id.Name + ")." + fd.Name.Name
+		}
+	case *ast.IndexExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return "(" + id.Name + ")." + fd.Name.Name
+		}
+	case *ast.IndexListExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return "(" + id.Name + ")." + fd.Name.Name
+		}
+	}
+	return fd.Name.Name
+}
+
+// enclosingFunc returns the display name of the FuncDecl whose range contains pos,
+// or "" if pos lies outside every top-level function (file-scope).
+func enclosingFunc(spans []funcSpan, pos token.Pos) string {
+	for _, s := range spans {
+		if pos >= s.start && pos < s.end {
+			return s.name
+		}
+	}
+	return ""
+}
 
 // Rewritten holds the results of schema rewriting: rewritten file sources and the dispatcher.
 type Rewritten struct {
@@ -34,6 +96,8 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 		}
 		var entries []entry
 
+		funcSpans := collectFuncSpans(file)
+
 		for _, op := range ops {
 			for _, c := range op.Find(file, pkg.TypesInfo) {
 				mutID++
@@ -44,6 +108,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator) (*Rewritten, error) {
 					File:         filePath,
 					Line:         pos.Line,
 					Column:       pos.Column,
+					Function:     enclosingFunc(funcSpans, c.Pos),
 					OperatorName: op.Name(),
 					Original:     c.Original,
 					Mutant:       c.Mutant,
