@@ -13,7 +13,7 @@ go install github.com/devenjarvis/cauldron/cmd/cauldron@latest
 ## Usage
 
 ```
-cauldron [--format=text|json] [--timeout=30s] <package-dir>
+cauldron [--format=text|json] [--timeout=30s] <pattern>...
 ```
 
 | Flag | Default | Description |
@@ -26,11 +26,27 @@ cauldron [--format=text|json] [--timeout=30s] <package-dir>
 ```
 $ cauldron ./internal/runner/testdata/sample
 internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+
+Package: github.com/devenjarvis/cauldron/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Score: 50.0%
 
 Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Score: 50.0%
 ```
 
 The survived mutant on line 5 (`Sub`) means the test suite has a weak assertion on subtraction — it passes even when `-` is replaced with `+`.
+
+### Multi-package
+
+Pass multiple patterns or use `./...` to mutate all packages in a module in a single run:
+
+```
+$ cauldron ./internal/runner/testdata/sample ./internal/runner/testdata/cmpsample
+internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+
+Package: github.com/devenjarvis/cauldron/internal/runner/testdata/cmpsample | Total: 2 | Killed: 2 | Survived: 0 | Score: 100.0%
+Package: github.com/devenjarvis/cauldron/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Score: 50.0%
+
+Total: 4 | Killed: 3 | Survived: 1 | Timeout: 0 | Score: 75.0%
+```
+
+Each package's pipeline (rewrite → compile → baseline → mutant loop) runs independently. Packages with no test files or no mutations are skipped with a one-line stderr notice and the run continues. Package-level parallelism is a planned future addition.
 
 ## How it works
 
@@ -51,7 +67,7 @@ All operators restrict to operands whose type is exactly `int` (not `int32`, `in
 - **Plain `int` only.** Named int types (`type MyInt int`) and sized types (`int32`, `int64`) are not mutated. See `internal/operators/typecheck.go`.
 - **No boolean operators.** `&&`, `||`, and `!` require closure-wrapping to preserve short-circuit semantics; tracked for a future release.
 - **No statement-level mutators.** Statement deletion and return-value replacement need a different operator shape; tracked for a future release.
-- **One package at a time.** Pass a single `<package-dir>` argument; there is no built-in `./...` expansion yet.
+- **Sequential multi-package only.** `./...` and multiple positional args are supported; packages run sequentially. Package-level parallelism is tracked for a future release.
 
 ## Development
 
@@ -68,7 +84,7 @@ GOLDEN_UPDATE=1 go test ./internal/report
 
 ## Dogfooding
 
-Every pull request on this repo runs Cauldron against `./internal/report` via the [mutation-test](.github/workflows/mutation-test.yml) GitHub Actions workflow. The workflow posts the result as a single PR comment (updated in-place on re-pushes) and never fails the check — it is informational only.
+Every pull request on this repo runs Cauldron against `./internal/report ./internal/mutation` via the [mutation-test](.github/workflows/mutation-test.yml) GitHub Actions workflow. The workflow posts the result as a single PR comment (updated in-place on re-pushes) and never fails the check — it is informational only.
 
 **Fork PRs:** `GITHUB_TOKEN` on fork pull requests does not receive `pull-requests: write` permission, so the comment step will silently no-op for contributions from forks.
 
