@@ -6,4 +6,6 @@ func init() {
 	mutation.Register(IntArith{})
 	mutation.Register(IntCmpBoundary{})
 	mutation.Register(IntCmpNegate{})
+	mutation.Register(BoolLogic{})
+	mutation.Register(BoolNot{})
 }
