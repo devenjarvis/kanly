@@ -76,11 +76,12 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, map[string]interface{}{
-		"PkgName":      pkgName,
-		"IntArithMuts": byOperator(muts, "int_arith"),
-		"IntCmpMuts":   byOperator(muts, "int_cmp_boundary", "int_cmp_negate"),
+		"PkgName":       pkgName,
+		"IntArithMuts":  byOperator(muts, "int_arith"),
+		"IntCmpMuts":    byOperator(muts, "int_cmp_boundary", "int_cmp_negate"),
 		"BoolLogicMuts": byOperator(muts, "bool_logic"),
-		"BoolNotMuts":  byOperator(muts, "bool_not"),
+		"BoolNotMuts":   byOperator(muts, "bool_not"),
+		"ErrReturnMuts": byOperator(muts, "err_return_nil"),
 	}); err != nil {
 		return "", err
 	}

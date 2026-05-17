@@ -61,13 +61,14 @@ Kanly implements the Mutant Schema Generation (MSG) technique: instead of recomp
 | `int_cmp_negate` | `<→>=`, `>→<=`, `<=→>`, `>=→<`, `==→!=`, `!=→==` | PIT NEGATE\_CONDITIONALS mutator |
 | `bool_logic` | `&&↔\|\|` | PIT CONDITIONALS\_NEGATION (logical) |
 | `bool_not` | `!→⌀` | PIT NEGATE\_CONDITIONALS (unary) |
+| `err_return_nil` | `err→nil` (any `error`-typed expr in a `return` stmt) | PIT EMPTY\_RETURNS family |
 
-Arithmetic and comparison operators restrict to operands whose type is exactly `int` (not `int32`, `int64`, or named types like `type MyInt int`); boolean operators restrict to operands whose type is exactly `bool` (not named types like `type MyBool bool`).
+Arithmetic and comparison operators restrict to operands whose type is exactly `int` (not `int32`, `int64`, or named types like `type MyInt int`); boolean operators restrict to operands whose type is exactly `bool` (not named types like `type MyBool bool`). `err_return_nil` restricts to expressions whose static type is exactly the universe `error` interface (not concrete types like `*MyError`), and ignores naked `return` statements in functions with named results.
 
 ## Limitations
 
 - **Plain `int` only.** Named int types (`type MyInt int`) and sized types (`int32`, `int64`) are not mutated. See `internal/operators/typecheck.go`.
-- **Narrow operator surface.** Today Kanly only mutates arithmetic operators, integer comparisons, and boolean logic on plain `int`/`bool` operands. Code dominated by string templates (e.g. `internal/schema/template.go`), JSON/I/O construction, `os/exec` orchestration, slice/map indexing, or returned errors emits zero mutants — even when heavily tested. The highest-leverage operator families still to add: statement/call deletion, return-value replacement (e.g. `return err` → `return nil`), string-literal mutation, and slice/map index mutation.
+- **Narrow operator surface.** Today Kanly mutates arithmetic operators, integer comparisons, boolean logic, and `error`-typed return values on plain `int`/`bool`/`error` operands. Code dominated by string templates (e.g. `internal/schema/template.go`), JSON/I/O construction, `os/exec` orchestration, or slice/map indexing still emits zero mutants — even when heavily tested. The highest-leverage operator families still to add: statement/call deletion, string-literal mutation, and slice/map index mutation.
 - **Test-centric signals depend on operator coverage.** The `tests`, `zero_kill_tests`, and `survivors_by_function` views in the JSON report are only as sharp as the underlying operator set. Today, many entries in `zero_kill_tests` are tests exercising code that has no mutable operators in it — not tests with weak assertions. Read these views as exploration aids; broadening the operator set will turn them into a reliable test-quality signal.
 - **"Identical kill-sets" is not the same as "redundant tests."** Two tests can land in the same `redundant_test_groups` entry because they coincidentally trip the same mutated lines while asserting on entirely different concerns. Treat the grouping as a "look here" prompt, not a "delete one" recommendation.
 - **Sequential multi-package only.** `./...` and multiple positional args are supported; packages run sequentially. Package-level parallelism is tracked for a future release.

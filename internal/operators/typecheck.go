@@ -48,3 +48,17 @@ func boolOperand(info *types.Info, x ast.Expr) bool {
 	}
 	return lv.Type == types.Typ[types.Bool]
 }
+
+// errorType is the universe "error" interface, captured once.
+var errorType = types.Universe.Lookup("error").Type()
+
+// isErrorType reports whether x's static type is exactly the universe error interface.
+// Named error wrappers (e.g. "*MyError") are excluded, mirroring the strict-identity
+// policy used by intOperands and boolOperands.
+func isErrorType(info *types.Info, x ast.Expr) bool {
+	tv, ok := info.Types[x]
+	if !ok || tv.Type == nil {
+		return false
+	}
+	return types.Identical(tv.Type, errorType)
+}
