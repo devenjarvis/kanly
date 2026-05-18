@@ -21,6 +21,13 @@ const (
 	__cNE  = 16
 	__cAnd = 21
 	__cOr  = 22
+
+	__cAnd2   = 31
+	__cOr2    = 32
+	__cXor    = 33
+	__cShl    = 34
+	__cShr    = 35
+	__cAndNot = 36
 )
 
 var __kanlyActiveMutant int
@@ -191,5 +198,63 @@ func __cMutStmt(orig, mut func(), mutIDs ...int) {
 		}
 	}
 	orig()
+}
+{{end}}{{if .IntBitMuts}}
+// __cMutIntBit executes either the mutant or the original integer bitwise/shift
+// binary operation. op encodes the original operation; mutIDs lists all
+// mutation IDs active at this call site.
+func __cMutIntBit(a, b int, op int, mutIDs ...int) int {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			switch id {
+{{- range .IntBitMuts}}
+			case {{.ID}}: return {{intBitExpr .}}
+{{- end}}
+			}
+		}
+	}
+	switch op {
+	case __cAnd2:
+		return a & b
+	case __cOr2:
+		return a | b
+	case __cXor:
+		return a ^ b
+	case __cShl:
+		return a << b
+	case __cShr:
+		return a >> b
+	case __cAndNot:
+		return a &^ b
+	}
+	panic("__cMutIntBit: unknown op")
+}
+{{end}}{{if .IntLitMuts}}
+// __cMutIntLit returns the active mutant's int literal value if any of mutIDs
+// is the active mutant, otherwise orig.
+func __cMutIntLit(orig int, mutIDs ...int) int {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			switch id {
+{{- range .IntLitMuts}}
+			case {{.ID}}: return {{.Mutant}}
+{{- end}}
+			}
+		}
+	}
+	return orig
+}
+{{end}}{{if .RetZeroMuts}}
+// __cMutRetZero returns the zero value of T for an active mutant, or orig
+// otherwise. T is inferred at each call site from the return expression's
+// static type. var-zero gives 0 / "" / false / nil per T's kind.
+func __cMutRetZero[T any](orig T, mutIDs ...int) T {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			var zero T
+			return zero
+		}
+	}
+	return orig
 }
 {{end}}`

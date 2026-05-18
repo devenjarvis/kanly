@@ -41,6 +41,24 @@ func sliceIdxExpr(m mutation.Mutation) string {
 	return "i"
 }
 
+func intBitExpr(m mutation.Mutation) string {
+	switch m.Mutant {
+	case "&":
+		return "a & b"
+	case "|":
+		return "a | b"
+	case "^":
+		return "a ^ b"
+	case "<<":
+		return "a << b"
+	case ">>":
+		return "a >> b"
+	case "&^":
+		return "a &^ b"
+	}
+	return "a & b"
+}
+
 func intCmpExpr(m mutation.Mutation) string {
 	switch m.Mutant {
 	case "<":
@@ -80,6 +98,7 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 		"intCmpExpr":    intCmpExpr,
 		"boolLogicExpr": boolLogicExpr,
 		"sliceIdxExpr":  sliceIdxExpr,
+		"intBitExpr":    intBitExpr,
 	}).Parse(dispatcherSrc)
 	if err != nil {
 		return "", err
@@ -97,6 +116,9 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 		"StringLitMuts":  byOperator(muts, "string_literal"),
 		"SliceIdxMuts":   byOperator(muts, "slice_index"),
 		"StmtSwapMuts":   byOperator(muts, "inc_dec", "int_compound_assign"),
+		"IntBitMuts":     byOperator(muts, "int_bitwise"),
+		"IntLitMuts":     byOperator(muts, "int_literal"),
+		"RetZeroMuts":    byOperator(muts, "return_zero"),
 	}); err != nil {
 		return "", err
 	}

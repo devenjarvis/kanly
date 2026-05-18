@@ -162,14 +162,17 @@ func TestEndToEndMultiPackage(t *testing.T) {
 		t.Fatalf("parse JSON: %v\n%s", err, out)
 	}
 
-	// Pinned ledger: foo has 2 mutations (Add +→-, Sub -→+), bar has 2 (>→>= and >→<=).
-	// TestAdd kills Add mutation; TestSub is weak (non-zero check) so Sub survives.
-	// All bar mutations killed by precise IsPositive tests.
-	if result.Summary.Total != 4 {
-		t.Errorf("Total: want 4, got %d", result.Summary.Total)
+	// Pinned ledger:
+	//   foo has 2 mutations (Add +→-, Sub -→+).
+	//   bar has 4: int_cmp_boundary >→>=, int_cmp_negate >→<=,
+	//              and int_literal 0→1, 0→-1 on the `0` in `n > 0`.
+	// TestAdd kills Add; TestSub is weak so Sub survives. The bar mutations
+	// all die to TestIsPositive's three-point check.
+	if result.Summary.Total != 6 {
+		t.Errorf("Total: want 6, got %d", result.Summary.Total)
 	}
-	if result.Summary.Killed != 3 {
-		t.Errorf("Killed: want 3, got %d", result.Summary.Killed)
+	if result.Summary.Killed != 5 {
+		t.Errorf("Killed: want 5, got %d", result.Summary.Killed)
 	}
 	if result.Summary.Survived != 1 {
 		t.Errorf("Survived: want 1, got %d", result.Summary.Survived)
@@ -290,17 +293,29 @@ func TestSub(t *testing.T) {
 		t.Fatalf("parse JSON: %v\n%s", err, out)
 	}
 
-	// Only the Sub mutation (line 5, - → +) should be present; Add (line 3) is
-	// outside the diff.
-	if result.Summary.Total != 1 {
-		t.Fatalf("Total: want 1, got %d\noutput:\n%s", result.Summary.Total, out)
+	// Only mutations on line 5 should be present; Add (line 3) is outside the
+	// diff. Two operators target line 5: int_arith on `a - b` and return_zero
+	// on the surrounding `(a - b)` ParenExpr.
+	if result.Summary.Total != 2 {
+		t.Fatalf("Total: want 2, got %d\noutput:\n%s", result.Summary.Total, out)
 	}
-	m := result.Mutants[0].Mutation
-	if m.Line != 5 {
-		t.Errorf("mutant line: want 5, got %d", m.Line)
+	var sawArith, sawRetZero bool
+	for _, mm := range result.Mutants {
+		if mm.Mutation.Line != 5 {
+			t.Errorf("mutant line: want 5, got %d", mm.Mutation.Line)
+		}
+		switch {
+		case mm.Mutation.Original == "-" && mm.Mutation.Mutant == "+":
+			sawArith = true
+		case mm.Mutation.Original == "value" && mm.Mutation.Mutant == "0":
+			sawRetZero = true
+		}
 	}
-	if m.Original != "-" || m.Mutant != "+" {
-		t.Errorf("mutant op: want -→+, got %s→%s", m.Original, m.Mutant)
+	if !sawArith {
+		t.Errorf("missing int_arith -→+ mutant on line 5")
+	}
+	if !sawRetZero {
+		t.Errorf("missing return_zero value→0 mutant on line 5")
 	}
 }
 
