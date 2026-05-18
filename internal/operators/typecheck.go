@@ -76,3 +76,18 @@ func isErrorType(info *types.Info, x ast.Expr) bool {
 	}
 	return types.Identical(tv.Type, errorType)
 }
+
+// isNilableType reports whether values of t accept the untyped nil constant.
+// Used by ReturnZero to recognise pointer/slice/map/chan/func/interface return
+// types — including named wrappers like `type MyMap map[string]int` or
+// `io.Reader`. The universe `error` interface is excluded — ErrReturnNil
+// handles it.
+func isNilableType(t types.Type) bool {
+	switch t.Underlying().(type) {
+	case *types.Pointer, *types.Slice, *types.Map, *types.Chan, *types.Signature:
+		return true
+	case *types.Interface:
+		return !types.Identical(t, errorType)
+	}
+	return false
+}

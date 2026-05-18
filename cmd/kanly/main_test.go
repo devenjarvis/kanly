@@ -103,8 +103,10 @@ func TestRunMultiplePositionalArgs(t *testing.T) {
 		t.Fatalf("parse JSON output: %v\n%s", err, stdout.String())
 	}
 
-	if result.Summary.Total != 4 {
-		t.Errorf("expected Total=4, got %d", result.Summary.Total)
+	// sample: 2 int_arith mutants (Add +→-, Sub -→+).
+	// cmpsample: 2 cmp mutants (>→>=, >→<=) + 2 int_literal mutants on `0` (→1, →-1).
+	if result.Summary.Total != 6 {
+		t.Errorf("expected Total=6, got %d", result.Summary.Total)
 	}
 	if len(result.Packages) != 2 {
 		t.Errorf("expected 2 package entries, got %d", len(result.Packages))

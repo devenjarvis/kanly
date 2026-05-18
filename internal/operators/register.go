@@ -14,4 +14,7 @@ func init() {
 	mutation.Register(SliceIndex{})
 	mutation.Register(IncDec{})
 	mutation.Register(IntCompoundAssign{})
+	mutation.Register(IntBitwise{})
+	mutation.Register(IntLiteral{})
+	mutation.Register(ReturnZero{})
 }

@@ -153,14 +153,21 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 			nodeMap[key.node] = g
 		}
 
-		newFile := astutil.Apply(file, func(cursor *astutil.Cursor) bool {
+		// Post-order rewrite: children are visited (and possibly replaced) before
+		// their parent. Outer operators that capture child pointers in their
+		// Rewrite — e.g. int_cmp / int_arith wrapping `expr.X, expr.Y` — therefore
+		// see the already-mutated children, so nested mutations like
+		// int_literal-inside-int_cmp compose correctly. Pre-order traversal
+		// stranded inner replacements on the detached subtree (they never
+		// reached the new outer call).
+		newFile := astutil.Apply(file, nil, func(cursor *astutil.Cursor) bool {
 			g, ok := nodeMap[cursor.Node()]
 			if !ok {
 				return true
 			}
 			cursor.Replace(g.op.Rewrite(g.cand, g.mutIDs))
 			return true
-		}, nil)
+		})
 
 		var buf bytes.Buffer
 		if err := format.Node(&buf, pkg.Fset, newFile); err != nil {
