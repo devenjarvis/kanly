@@ -48,14 +48,14 @@ func FloatCompound(a, b float64) float64 {
 	return a
 }
 
-// Int32Compound: sized-int variant must be rejected. Expected: 0 candidates.
+// Int32Compound: sized-int variant — mutated under the underlying-integer policy. Expected: 1 candidate.
 func Int32Compound(a, b int32) int32 {
 	a += b
 	return a
 }
 
 // BitwiseAnd / BitwiseOr / BitwiseXor / Shl / Shr / AndNot:
-// bitwise compound ops are intentionally out of scope. Expected: 0 each.
+// bitwise compound ops are mutated by IntCompoundAssign. Expected: 1 candidate each.
 func BitwiseAnd(a, b int) int   { a &= b; return a }
 func BitwiseOr(a, b int) int    { a |= b; return a }
 func BitwiseXor(a, b int) int   { a ^= b; return a }

@@ -30,6 +30,19 @@ const (
 	__cAndNot = 36
 )
 
+// __cInteger constrains the integer-operand dispatchers to any basic integer
+// type or a defined type whose underlying type is a basic integer.
+type __cInteger interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr
+}
+
+// __cBoolean constrains the bool-operand dispatchers to plain bool or any
+// defined type whose underlying type is bool.
+type __cBoolean interface {
+	~bool
+}
+
 var __kanlyActiveMutant int
 
 func init() {
@@ -48,7 +61,7 @@ func init() {
 
 // __cMutInt executes either the mutant or the original integer binary operation.
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
-func __cMutInt(a, b int, op int, mutIDs ...int) int {
+func __cMutInt[T __cInteger](a, b T, op int, mutIDs ...int) T {
 	for _, id := range mutIDs {
 		if id == __kanlyActiveMutant {
 			switch id {
@@ -75,7 +88,7 @@ func __cMutInt(a, b int, op int, mutIDs ...int) int {
 {{if .IntCmpMuts}}
 // __cMutIntCmp executes either the mutant or the original integer comparison.
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
-func __cMutIntCmp(a, b int, op int, mutIDs ...int) bool {
+func __cMutIntCmp[T __cInteger](a, b T, op int, mutIDs ...int) bool {
 	for _, id := range mutIDs {
 		if id == __kanlyActiveMutant {
 			switch id {
@@ -105,7 +118,7 @@ func __cMutIntCmp(a, b int, op int, mutIDs ...int) bool {
 // __cMutBool executes either the mutant or the original boolean binary operation.
 // Operands are passed as closures to preserve short-circuit semantics.
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
-func __cMutBool(a, b func() bool, op int, mutIDs ...int) bool {
+func __cMutBool[T __cBoolean](a, b func() T, op int, mutIDs ...int) T {
 	for _, id := range mutIDs {
 		if id == __kanlyActiveMutant {
 			switch id {
@@ -125,7 +138,7 @@ func __cMutBool(a, b func() bool, op int, mutIDs ...int) bool {
 }
 {{end}}{{if .BoolNotMuts}}
 // __cMutNot executes either the mutant or the original boolean negation.
-func __cMutNot(x bool, mutIDs ...int) bool {
+func __cMutNot[T __cBoolean](x T, mutIDs ...int) T {
 	for _, id := range mutIDs {
 		if id == __kanlyActiveMutant {
 			switch id {
@@ -174,7 +187,7 @@ func __cMutString(orig string, mutIDs ...int) string {
 }
 {{end}}{{if .SliceIdxMuts}}
 // __cMutIdx returns i offset by +1 or -1 when one of mutIDs is active, otherwise i.
-func __cMutIdx(i int, mutIDs ...int) int {
+func __cMutIdx[T __cInteger](i T, mutIDs ...int) T {
 	for _, id := range mutIDs {
 		if id == __kanlyActiveMutant {
 			switch id {
@@ -203,7 +216,7 @@ func __cMutStmt(orig, mut func(), mutIDs ...int) {
 // __cMutIntBit executes either the mutant or the original integer bitwise/shift
 // binary operation. op encodes the original operation; mutIDs lists all
 // mutation IDs active at this call site.
-func __cMutIntBit(a, b int, op int, mutIDs ...int) int {
+func __cMutIntBit[T __cInteger](a, b T, op int, mutIDs ...int) T {
 	for _, id := range mutIDs {
 		if id == __kanlyActiveMutant {
 			switch id {

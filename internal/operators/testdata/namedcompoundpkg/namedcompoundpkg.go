@@ -1,10 +1,11 @@
 package namedcompoundpkg
 
-// MyInt is a named int type. IntCompoundAssign must skip operations on it
-// (strict-identity policy: do NOT use .Underlying()).
+// MyInt is a named int type. IntCompoundAssign mutates operations on it
+// under the underlying-integer policy (Underlying() + Identical for
+// symmetric operands).
 type MyInt int
 
-// NamedAddAssign: += on named-int. Expected: 0 candidates.
+// NamedAddAssign: += on named-int. Expected: 1 candidate.
 func NamedAddAssign(a, b MyInt) MyInt {
 	a += b
 	return a

@@ -35,18 +35,26 @@ func (BoolLogic) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 		} else {
 			mutOp = token.LAND
 		}
+		// Capture operand type so Rewrite can emit closures with the right
+		// return type (e.g. `func() MyBool` for named-bool operands). Both
+		// operands share the same type by boolOperands' Identical check.
+		operandType := info.Types[expr.X].Type
 		candidates = append(candidates, mutation.Candidate{
 			Node:     expr,
 			Pos:      expr.OpPos,
 			Original: expr.Op.String(),
 			Mutant:   mutOp.String(),
+			Type:     operandType,
 		})
 		return true
 	})
 	return candidates
 }
 
-// Rewrite wraps each operand in a func() bool closure to preserve short-circuit semantics.
+// Rewrite wraps each operand in a closure with the operand type as the
+// return type, preserving short-circuit semantics. For named-bool operands
+// (e.g. `type MyBool bool`) the closure is `func() MyBool { return op }`
+// so the generic dispatcher infers T=MyBool.
 func (BoolLogic) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	expr := c.Node.(*ast.BinaryExpr)
 	var opcode string
@@ -55,9 +63,10 @@ func (BoolLogic) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	} else {
 		opcode = "__cOr"
 	}
+	typeName := boolReturnTypeName(c.Type)
 	args := []ast.Expr{
-		boolFuncLit(expr.X),
-		boolFuncLit(expr.Y),
+		boolFuncLit(expr.X, typeName),
+		boolFuncLit(expr.Y, typeName),
 		&ast.Ident{Name: opcode},
 	}
 	for _, id := range mutIDs {
@@ -106,14 +115,16 @@ func (BoolNot) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	return &ast.CallExpr{Fun: &ast.Ident{Name: "__cMutNot"}, Args: args}
 }
 
-// boolFuncLit wraps expr in func() bool { return expr } preserving the original node pointer
-// so astutil.Apply can recurse into nested bool expressions and rewrite them too.
-func boolFuncLit(expr ast.Expr) *ast.FuncLit {
+// boolFuncLit wraps expr in func() T { return expr } where T is the operand
+// type (typically `bool`, but possibly a named wrapper). Preserves the
+// original node pointer so astutil.Apply can recurse into nested bool
+// expressions and rewrite them too.
+func boolFuncLit(expr ast.Expr, typeName ast.Expr) *ast.FuncLit {
 	return &ast.FuncLit{
 		Type: &ast.FuncType{
 			Results: &ast.FieldList{
 				List: []*ast.Field{
-					{Type: &ast.Ident{Name: "bool"}},
+					{Type: typeName},
 				},
 			},
 		},
@@ -123,5 +134,30 @@ func boolFuncLit(expr ast.Expr) *ast.FuncLit {
 			},
 		},
 	}
+}
+
+// boolReturnTypeName renders t as an ast.Expr suitable for use as a func()
+// return type. Handles plain bool, named types in the current package
+// (`MyBool`), and qualified named types from imports (`pkg.MyBool`). Falls
+// back to plain `bool` when t is nil — backwards-compatible with operators
+// that don't set Candidate.Type yet.
+func boolReturnTypeName(t types.Type) ast.Expr {
+	if t == nil {
+		return &ast.Ident{Name: "bool"}
+	}
+	if basic, ok := t.(*types.Basic); ok && basic.Kind() == types.Bool {
+		return &ast.Ident{Name: "bool"}
+	}
+	if named, ok := t.(*types.Named); ok {
+		obj := named.Obj()
+		if obj.Pkg() == nil {
+			return &ast.Ident{Name: obj.Name()}
+		}
+		return &ast.SelectorExpr{
+			X:   &ast.Ident{Name: obj.Pkg().Name()},
+			Sel: &ast.Ident{Name: obj.Name()},
+		}
+	}
+	return &ast.Ident{Name: "bool"}
 }
 

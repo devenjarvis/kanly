@@ -16,8 +16,8 @@ func TestBoolOperandsTypeCheck(t *testing.T) {
 	}{
 		// boolpkg: And() b1&&b2 (true), Or() b1||b2 (true), ConstAnd() true&&false (false, untyped)
 		{"boolpkg bool vars", relDir(t, "testdata/boolpkg"), 2, 1},
-		// namedboolpkg: MyAnd() m1&&m2 (false, named MyBool type)
-		{"namedboolpkg named bool", relDir(t, "testdata/namedboolpkg"), 0, 1},
+		// namedboolpkg: MyAnd() m1&&m2 — underlying-bool policy accepts named types.
+		{"namedboolpkg named bool", relDir(t, "testdata/namedboolpkg"), 1, 0},
 	}
 
 	for _, tc := range tests {
@@ -62,8 +62,8 @@ func TestBoolOperandTypeCheck(t *testing.T) {
 	}{
 		// boolpkg: Not() !b1 (true), ConstNot() !true (false, untyped bool constant)
 		{"boolpkg bool var", relDir(t, "testdata/boolpkg"), 1, 1},
-		// namedboolpkg: MyNot() !m1 (false, named MyBool type)
-		{"namedboolpkg named bool", relDir(t, "testdata/namedboolpkg"), 0, 1},
+		// namedboolpkg: MyNot() !m1 — underlying-bool policy accepts named types.
+		{"namedboolpkg named bool", relDir(t, "testdata/namedboolpkg"), 1, 0},
 	}
 
 	for _, tc := range tests {
@@ -112,8 +112,8 @@ func TestIntOperandsTypeCheck(t *testing.T) {
 		{"floatpkg float64+float64", relDir(t, "testdata/floatpkg"), 0, 1},
 		// constpkg: const x = 1+2 (false) and func Add(a,b int) → one true + one false
 		{"constpkg const+func", relDir(t, "testdata/constpkg"), 1, 1},
-		// namedintpkg: type MyInt int; func Add(a, b MyInt) MyInt { return a+b } → one false
-		{"namedintpkg MyInt+MyInt", relDir(t, "testdata/namedintpkg"), 0, 1},
+		// namedintpkg: type MyInt int; underlying-integer policy accepts named types.
+		{"namedintpkg MyInt+MyInt", relDir(t, "testdata/namedintpkg"), 1, 0},
 	}
 
 	for _, tc := range tests {

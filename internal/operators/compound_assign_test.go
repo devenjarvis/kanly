@@ -22,17 +22,26 @@ func TestIntCompoundAssignFindsAllArithmeticTokens(t *testing.T) {
 		candidates = append(candidates, op.Find(f, pkg.TypesInfo)...)
 	}
 
-	// Positives: AddAssign, SubAssign, MulAssign, QuoAssign, RemAssign, IndexedAssign = 6.
-	if len(candidates) != 6 {
-		t.Fatalf("expected 6 candidates, got %d", len(candidates))
+	// Arithmetic positives: AddAssign, SubAssign, MulAssign, QuoAssign, RemAssign,
+	// IndexedAssign (all plain int) plus Int32Compound (sized int) = 7.
+	// Bitwise positives: BitwiseAnd, BitwiseOr, BitwiseXor, Shl, Shr, AndNot = 6.
+	// Float is still rejected. Total = 13.
+	if len(candidates) != 13 {
+		t.Fatalf("expected 13 candidates, got %d", len(candidates))
 	}
 
 	wantMutant := map[string]string{
-		"+=": "-=",
-		"-=": "+=",
-		"*=": "/=",
-		"/=": "*=",
-		"%=": "*=",
+		"+=":  "-=",
+		"-=":  "+=",
+		"*=":  "/=",
+		"/=":  "*=",
+		"%=":  "*=",
+		"&=":  "|=",
+		"|=":  "&=",
+		"^=":  "&=",
+		"<<=": ">>=",
+		">>=": "<<=",
+		"&^=": "&=",
 	}
 	seen := make(map[string]int)
 	for _, c := range candidates {
@@ -46,38 +55,18 @@ func TestIntCompoundAssignFindsAllArithmeticTokens(t *testing.T) {
 		}
 		seen[c.Original]++
 	}
-	// AddAssign function and IndexedAssign both produce += candidates.
-	if seen["+="] != 2 {
-		t.Errorf("+= count: want 2 (AddAssign + IndexedAssign), got %d", seen["+="])
+	// AddAssign, IndexedAssign, and Int32Compound all produce += candidates.
+	if seen["+="] != 3 {
+		t.Errorf("+= count: want 3 (AddAssign + IndexedAssign + Int32Compound), got %d", seen["+="])
 	}
-	for _, op := range []string{"-=", "*=", "/=", "%="} {
+	for _, op := range []string{"-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^="} {
 		if seen[op] != 1 {
 			t.Errorf("%s count: want 1, got %d", op, seen[op])
 		}
 	}
 }
 
-func TestIntCompoundAssignSkipsNonIntAndBitwise(t *testing.T) {
-	// compoundpkg.go contains float, int32, and bitwise compound-assign
-	// negative cases — they must all be rejected.
-	pkg, err := source.Load(relDir(t, "testdata/compoundpkg"))
-	if err != nil {
-		t.Fatalf("source.Load: %v", err)
-	}
-
-	op := operators.IntCompoundAssign{}
-	for _, f := range pkg.Files {
-		for _, c := range op.Find(f, pkg.TypesInfo) {
-			// Make sure no bitwise / shift token slipped through.
-			switch c.Original {
-			case "&=", "|=", "^=", "<<=", ">>=", "&^=":
-				t.Errorf("bitwise compound op %q must not be a candidate", c.Original)
-			}
-		}
-	}
-}
-
-func TestIntCompoundAssignSkipsNamedInt(t *testing.T) {
+func TestIntCompoundAssignAcceptsNamedInt(t *testing.T) {
 	pkg, err := source.Load(relDir(t, "testdata/namedcompoundpkg"))
 	if err != nil {
 		t.Fatalf("source.Load: %v", err)
@@ -88,8 +77,9 @@ func TestIntCompoundAssignSkipsNamedInt(t *testing.T) {
 	for _, f := range pkg.Files {
 		total += len(op.Find(f, pkg.TypesInfo))
 	}
-	if total != 0 {
-		t.Errorf("expected 0 candidates for named-int compound-assign package, got %d", total)
+	// NamedAddAssign on MyInt — mutated under the underlying-integer policy.
+	if total != 1 {
+		t.Errorf("expected 1 candidate for named-int compound-assign package, got %d", total)
 	}
 }
 
@@ -106,8 +96,8 @@ func TestIntCompoundAssignRewriteEmitsStmtSwap(t *testing.T) {
 
 	for path, src := range rew.Files {
 		count := strings.Count(src, "__cMutStmt(")
-		if count != 6 {
-			t.Errorf("%s: expected 6 __cMutStmt calls, got %d:\n%s", path, count, src)
+		if count != 13 {
+			t.Errorf("%s: expected 13 __cMutStmt calls, got %d:\n%s", path, count, src)
 		}
 		// Indexed LHS must remain inside the closures — proving single-eval safety.
 		if !strings.Contains(src, "m[key] += delta") {

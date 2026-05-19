@@ -22,10 +22,10 @@ func TestIncDecFindsIntTargets(t *testing.T) {
 		candidates = append(candidates, op.Find(f, pkg.TypesInfo)...)
 	}
 
-	// Expected positives: IdentInc, IdentDec, IndexedInc, SelectorInc, ForLoopInc = 5.
-	// Negatives: FloatInc, Int32Inc.
-	if len(candidates) != 5 {
-		t.Fatalf("expected 5 candidates, got %d", len(candidates))
+	// Positives: IdentInc, IdentDec, IndexedInc, SelectorInc, ForLoopInc, Int32Inc = 6.
+	// Negative: FloatInc (float is not an integer).
+	if len(candidates) != 6 {
+		t.Fatalf("expected 6 candidates, got %d", len(candidates))
 	}
 
 	var incs, decs int
@@ -45,12 +45,12 @@ func TestIncDecFindsIntTargets(t *testing.T) {
 			t.Errorf("unexpected Original %q", c.Original)
 		}
 	}
-	if incs != 4 || decs != 1 {
-		t.Errorf("counts: want 4 ++ and 1 --, got %d ++ and %d --", incs, decs)
+	if incs != 5 || decs != 1 {
+		t.Errorf("counts: want 5 ++ and 1 --, got %d ++ and %d --", incs, decs)
 	}
 }
 
-func TestIncDecSkipsNamedInt(t *testing.T) {
+func TestIncDecAcceptsNamedInt(t *testing.T) {
 	pkg, err := source.Load(relDir(t, "testdata/namedincdecpkg"))
 	if err != nil {
 		t.Fatalf("source.Load: %v", err)
@@ -61,8 +61,9 @@ func TestIncDecSkipsNamedInt(t *testing.T) {
 	for _, f := range pkg.Files {
 		total += len(op.Find(f, pkg.TypesInfo))
 	}
-	if total != 0 {
-		t.Errorf("expected 0 candidates for named-int package, got %d", total)
+	// namedincdecpkg has NamedInc (x++) and NamedDec (x--) on MyInt — both mutated now.
+	if total != 2 {
+		t.Errorf("expected 2 candidates for named-int package, got %d", total)
 	}
 }
 
@@ -79,8 +80,8 @@ func TestIncDecRewriteEmitsStmtSwap(t *testing.T) {
 
 	for path, src := range rew.Files {
 		count := strings.Count(src, "__cMutStmt(")
-		if count != 5 {
-			t.Errorf("%s: expected 5 __cMutStmt calls, got %d:\n%s", path, count, src)
+		if count != 6 {
+			t.Errorf("%s: expected 6 __cMutStmt calls, got %d:\n%s", path, count, src)
 		}
 		// The mutant closure must contain the flipped token.
 		if !strings.Contains(src, "x--") {
