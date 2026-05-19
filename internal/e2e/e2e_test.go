@@ -5,7 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -545,5 +547,124 @@ func TestEndToEndBooleanPackage(t *testing.T) {
 	}
 	if notCount != 1 {
 		t.Errorf("bool_not mutant count: want 1, got %d", notCount)
+	}
+}
+
+// TestEndToEndJobsParity verifies that --jobs=1 and --jobs=8 produce
+// identical mutant results once sorted by mutation ID. This is the
+// regression guard for the parallel mutant loop and per-test coverage
+// pool: any nondeterminism introduced by the worker pool would surface
+// here. We use the multipkg fixture so both parallel phases (coverage +
+// mutant loop) carry meaningful load.
+func TestEndToEndJobsParity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+
+	binPath := buildBinary(t)
+	multipkgDir := relDir(t, "../runner/testdata/multipkg")
+
+	run := func(jobs string) []byte {
+		t.Helper()
+		cmd := exec.Command(binPath, "--format=json", "--jobs="+jobs, "./...")
+		cmd.Dir = multipkgDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("kanly --jobs=%s: %v\n%s", jobs, err, out)
+		}
+		return out
+	}
+
+	type mut struct {
+		Mutation struct {
+			ID       int    `json:"mutation_id"`
+			Package  string `json:"package"`
+			File     string `json:"file"`
+			Line     int    `json:"line"`
+			Operator string `json:"operator"`
+			Original string `json:"original"`
+			Mutant   string `json:"mutant"`
+		} `json:"mutation"`
+		Status       string   `json:"status"`
+		KillingTests []string `json:"killing_tests"`
+	}
+	type result struct {
+		Summary struct {
+			Total    int `json:"total"`
+			Killed   int `json:"killed"`
+			Survived int `json:"survived"`
+		} `json:"summary"`
+		Mutants []mut `json:"mutants"`
+	}
+
+	parseAndSort := func(out []byte) result {
+		t.Helper()
+		var r result
+		if err := json.Unmarshal(out, &r); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, out)
+		}
+		// The CLI walks packages serially, so cross-package IDs collide
+		// (both packages count from 1). Sort by (package, ID) for a
+		// stable total order; KillingTests is already sorted by report.
+		sort.Slice(r.Mutants, func(i, j int) bool {
+			if r.Mutants[i].Mutation.Package != r.Mutants[j].Mutation.Package {
+				return r.Mutants[i].Mutation.Package < r.Mutants[j].Mutation.Package
+			}
+			return r.Mutants[i].Mutation.ID < r.Mutants[j].Mutation.ID
+		})
+		return r
+	}
+
+	serial := parseAndSort(run("1"))
+	parallel := parseAndSort(run("8"))
+
+	if !reflect.DeepEqual(serial.Summary, parallel.Summary) {
+		t.Errorf("Summary mismatch:\n  --jobs=1: %+v\n  --jobs=8: %+v", serial.Summary, parallel.Summary)
+	}
+	if !reflect.DeepEqual(serial.Mutants, parallel.Mutants) {
+		t.Errorf("Mutants mismatch between --jobs=1 and --jobs=8 (sorted by package, ID)")
+		for i := range serial.Mutants {
+			if i >= len(parallel.Mutants) {
+				t.Errorf("  parallel missing index %d: %+v", i, serial.Mutants[i])
+				continue
+			}
+			if !reflect.DeepEqual(serial.Mutants[i], parallel.Mutants[i]) {
+				t.Errorf("  diff at index %d:\n    serial:   %+v\n    parallel: %+v",
+					i, serial.Mutants[i], parallel.Mutants[i])
+			}
+		}
+		for i := len(serial.Mutants); i < len(parallel.Mutants); i++ {
+			t.Errorf("  serial missing index %d: %+v", i, parallel.Mutants[i])
+		}
+	}
+}
+
+// TestEndToEndJobsValidation rejects --jobs=0 and --jobs=-1 with exit 2.
+func TestEndToEndJobsValidation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+
+	binPath := buildBinary(t)
+	sampleDir := relDir(t, "../runner/testdata/sample")
+
+	for _, bad := range []string{"0", "-1"} {
+		cmd := exec.Command(binPath, "--format=json", "--jobs="+bad, sampleDir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Errorf("--jobs=%s: expected non-zero exit, got success\n%s", bad, out)
+			continue
+		}
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Errorf("--jobs=%s: expected *exec.ExitError, got %T: %v", bad, err, err)
+			continue
+		}
+		if exitErr.ExitCode() != 2 {
+			t.Errorf("--jobs=%s: expected exit 2, got %d", bad, exitErr.ExitCode())
+		}
+		if !strings.Contains(string(out), "must be >= 1") {
+			t.Errorf("--jobs=%s: stderr missing validation message, got:\n%s", bad, out)
+		}
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
@@ -302,43 +304,69 @@ func parseCoverProfile(data []byte) ([]coverBlock, error) {
 // bounded by `timeout`. Tests run with -test.parallel=1 to avoid
 // interleaved coverage attribution when tests share state.
 //
+// `jobs` controls how many per-test coverage runs execute concurrently;
+// callers should pass >= 1 (1 reproduces the previous serial behavior).
+// Each goroutine writes its own cov-<i>.out file in `tmpDir` and parses
+// it into a local map; the final merge walks inventory in order so the
+// returned map is deterministic regardless of completion order.
+//
 // Coverprofile file paths are normalized via filepath.Join(pkgDir, basename),
 // which is correct for single-directory Go packages.
-func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inventory []string, timeout time.Duration) (map[FileLine][]string, error) {
+func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inventory []string, timeout time.Duration, jobs int) (map[FileLine][]string, error) {
+	if jobs < 1 {
+		jobs = 1
+	}
+
 	tmpDir, err := os.MkdirTemp("", "kanly-cov-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
+	localBlocks := make([][]coverBlock, len(inventory))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(jobs)
+	for i, name := range inventory {
+		i, name := i, name
+		g.Go(func() error {
+			profPath := filepath.Join(tmpDir, fmt.Sprintf("cov-%d.out", i))
+			tctx, cancel := context.WithTimeout(gctx, timeout)
+			defer cancel()
+			cmd := exec.CommandContext(tctx, binaryPath,
+				"-test.run="+buildRunRegex([]string{name}),
+				"-test.coverprofile="+profPath,
+				"-test.parallel=1",
+			)
+			cmd.Dir = pkgDir
+			// Inherit env but ensure KANLY_MUTANT is not set so coverage reflects
+			// the original code path.
+			cmd.Env = filterEnv(os.Environ(), "KANLY_MUTANT")
+			combined, runErr := cmd.CombinedOutput()
+			if runErr != nil {
+				return fmt.Errorf("coverage run for %q failed: %w\n%s", name, runErr, combined)
+			}
+
+			data, err := os.ReadFile(profPath)
+			if err != nil {
+				return fmt.Errorf("read coverprofile for %q: %w", name, err)
+			}
+			blocks, err := parseCoverProfile(data)
+			if err != nil {
+				return fmt.Errorf("parse coverprofile for %q: %w", name, err)
+			}
+			localBlocks[i] = blocks
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	// Serial merge in inventory order keeps the result map deterministic
+	// regardless of which goroutine finished first.
 	out := make(map[FileLine]map[string]struct{})
 	for i, name := range inventory {
-		profPath := filepath.Join(tmpDir, fmt.Sprintf("cov-%d.out", i))
-		tctx, cancel := context.WithTimeout(ctx, timeout)
-		cmd := exec.CommandContext(tctx, binaryPath,
-			"-test.run="+buildRunRegex([]string{name}),
-			"-test.coverprofile="+profPath,
-			"-test.parallel=1",
-		)
-		cmd.Dir = pkgDir
-		// Inherit env but ensure KANLY_MUTANT is not set so coverage reflects
-		// the original code path.
-		cmd.Env = filterEnv(os.Environ(), "KANLY_MUTANT")
-		combined, runErr := cmd.CombinedOutput()
-		cancel()
-		if runErr != nil {
-			return nil, fmt.Errorf("coverage run for %q failed: %w\n%s", name, runErr, combined)
-		}
-
-		data, err := os.ReadFile(profPath)
-		if err != nil {
-			return nil, fmt.Errorf("read coverprofile for %q: %w", name, err)
-		}
-		blocks, err := parseCoverProfile(data)
-		if err != nil {
-			return nil, fmt.Errorf("parse coverprofile for %q: %w", name, err)
-		}
-		for _, b := range blocks {
+		for _, b := range localBlocks[i] {
 			base := filepath.Base(b.File)
 			if base == "kanly_schema.go" {
 				continue
