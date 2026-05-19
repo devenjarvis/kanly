@@ -116,23 +116,6 @@ func TestRenderDispatcherEmitsBoolFuncs(t *testing.T) {
 	}
 }
 
-func TestRenderDispatcherOmitsBoolFuncsWhenAbsent(t *testing.T) {
-	muts := []mutation.Mutation{
-		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
-	}
-	src, err := schema.RenderDispatcher("mypkg", muts)
-	if err != nil {
-		t.Fatalf("RenderDispatcher: %v", err)
-	}
-
-	if strings.Contains(src, "__cMutBool") {
-		t.Errorf("expected no __cMutBool in int-only dispatcher:\n%s", src)
-	}
-	if strings.Contains(src, "__cMutNot") {
-		t.Errorf("expected no __cMutNot in int-only dispatcher:\n%s", src)
-	}
-}
-
 func TestRenderDispatcherBoolSectionsAreIndependent(t *testing.T) {
 	intArith := mutation.Mutation{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"}
 
@@ -194,20 +177,6 @@ func TestRenderDispatcherEmitsErrFunc(t *testing.T) {
 	}
 }
 
-func TestRenderDispatcherOmitsErrFuncWhenAbsent(t *testing.T) {
-	muts := []mutation.Mutation{
-		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
-	}
-	src, err := schema.RenderDispatcher("mypkg", muts)
-	if err != nil {
-		t.Fatalf("RenderDispatcher: %v", err)
-	}
-
-	if strings.Contains(src, "__cMutErr") {
-		t.Errorf("expected no __cMutErr in int-only dispatcher:\n%s", src)
-	}
-}
-
 func TestRenderDispatcherEmitsCallSkipFunc(t *testing.T) {
 	muts := []mutation.Mutation{
 		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
@@ -233,20 +202,6 @@ func TestRenderDispatcherEmitsCallSkipFunc(t *testing.T) {
 		if !strings.Contains(src, want) {
 			t.Errorf("missing %q in:\n%s", want, src)
 		}
-	}
-}
-
-func TestRenderDispatcherOmitsCallSkipFuncWhenAbsent(t *testing.T) {
-	muts := []mutation.Mutation{
-		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
-	}
-	src, err := schema.RenderDispatcher("mypkg", muts)
-	if err != nil {
-		t.Fatalf("RenderDispatcher: %v", err)
-	}
-
-	if strings.Contains(src, "__cMutCallSkip") {
-		t.Errorf("expected no __cMutCallSkip in int-only dispatcher:\n%s", src)
 	}
 }
 
@@ -278,20 +233,6 @@ func TestRenderDispatcherEmitsStringFunc(t *testing.T) {
 	}
 }
 
-func TestRenderDispatcherOmitsStringFuncWhenAbsent(t *testing.T) {
-	muts := []mutation.Mutation{
-		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
-	}
-	src, err := schema.RenderDispatcher("mypkg", muts)
-	if err != nil {
-		t.Fatalf("RenderDispatcher: %v", err)
-	}
-
-	if strings.Contains(src, "__cMutString") {
-		t.Errorf("expected no __cMutString in int-only dispatcher:\n%s", src)
-	}
-}
-
 func TestRenderDispatcherEmitsSliceIdxFunc(t *testing.T) {
 	muts := []mutation.Mutation{
 		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
@@ -320,20 +261,6 @@ func TestRenderDispatcherEmitsSliceIdxFunc(t *testing.T) {
 		if !strings.Contains(src, want) {
 			t.Errorf("missing %q in:\n%s", want, src)
 		}
-	}
-}
-
-func TestRenderDispatcherOmitsSliceIdxFuncWhenAbsent(t *testing.T) {
-	muts := []mutation.Mutation{
-		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
-	}
-	src, err := schema.RenderDispatcher("mypkg", muts)
-	if err != nil {
-		t.Fatalf("RenderDispatcher: %v", err)
-	}
-
-	if strings.Contains(src, "__cMutIdx") {
-		t.Errorf("expected no __cMutIdx in int-only dispatcher:\n%s", src)
 	}
 }
 

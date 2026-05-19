@@ -50,7 +50,7 @@ func (IntLiteral) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 			return true
 		}
 		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.INT {
-			if intLitMutable(stack) && intLitOperand(info, lit) {
+			if litMutable(stack) && intLitOperand(info, lit) {
 				for _, m := range intLitMutants(lit.Value) {
 					candidates = append(candidates, mutation.Candidate{
 						Node:     lit,
@@ -77,11 +77,12 @@ func intLitOperand(info *types.Info, lit *ast.BasicLit) bool {
 	return tv.Type == types.Typ[types.Int]
 }
 
-// intLitMutable reports whether the literal can be safely replaced with a
-// function call. Rejects const-decl initializers (must be const exprs),
-// array type lengths (must be const), and the rare struct-tag / import-spec
-// positions (defensive — int literals don't normally appear there).
-func intLitMutable(stack []ast.Node) bool {
+// litMutable reports whether a literal (int or bool keyword) can be safely
+// replaced with a function call at its current position. Rejects const-decl
+// initializers (must be const exprs), array type lengths (must be const),
+// and the rare import-spec position (defensive — neither int nor bool
+// literals normally appear there).
+func litMutable(stack []ast.Node) bool {
 	for i := len(stack) - 1; i >= 0; i-- {
 		switch p := stack[i].(type) {
 		case *ast.ImportSpec:

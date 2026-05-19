@@ -118,7 +118,8 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 		"StmtSwapMuts":   byOperator(muts, "inc_dec", "int_compound_assign"),
 		"IntBitMuts":     byOperator(muts, "int_bitwise"),
 		"IntLitMuts":     byOperator(muts, "int_literal"),
-		"RetZeroMuts":    byOperator(muts, "return_zero"),
+		"RetZeroMuts":    byOperator(muts, "return_zero", "struct_field_zero"),
+		"BoolLitMuts":    byOperator(muts, "bool_literal"),
 	}); err != nil {
 		return "", err
 	}

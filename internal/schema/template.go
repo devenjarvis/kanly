@@ -257,4 +257,15 @@ func __cMutRetZero[T any](orig T, mutIDs ...int) T {
 	}
 	return orig
 }
+{{end}}{{if .BoolLitMuts}}
+// __cMutBoolLit returns the negation of orig for an active mutant, or orig
+// otherwise — used to flip predeclared true/false literals at their use site.
+func __cMutBoolLit(orig bool, mutIDs ...int) bool {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			return !orig
+		}
+	}
+	return orig
+}
 {{end}}`

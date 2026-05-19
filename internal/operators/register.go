@@ -17,4 +17,6 @@ func init() {
 	mutation.Register(IntBitwise{})
 	mutation.Register(IntLiteral{})
 	mutation.Register(ReturnZero{})
+	mutation.Register(BoolLiteral{})
+	mutation.Register(StructFieldZero{})
 }
