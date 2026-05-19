@@ -31,6 +31,7 @@ type PackageSummary struct {
 }
 
 type Report struct {
+	Scope               string                       `json:"scope,omitempty"`
 	Summary             Summary                      `json:"summary"`
 	Packages            []PackageSummary             `json:"packages"`
 	Tests               []mutation.TestStats         `json:"tests"`
@@ -253,6 +254,11 @@ func WriteJSON(w io.Writer, r Report) error {
 }
 
 func WriteText(w io.Writer, r Report) error {
+	if r.Scope != "" {
+		if _, err := fmt.Fprintf(w, "Scope: %s\n\n", r.Scope); err != nil {
+			return err
+		}
+	}
 	// Surviving mutants first — they are the actionable signal.
 	for _, m := range r.Mutants {
 		if m.Status == mutation.StatusSurvived {

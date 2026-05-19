@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/format"
 	"go/token"
+	"sort"
 
 	"golang.org/x/tools/go/ast/astutil"
 
@@ -74,6 +75,24 @@ func enclosingFunc(spans []funcSpan, pos token.Pos) string {
 	return ""
 }
 
+// FuncNames returns the canonical names (as produced by funcDeclName) of every
+// top-level FuncDecl in pkg, sorted. Used by CLI callers to validate
+// user-supplied function selectors and suggest near misses.
+func FuncNames(pkg *source.Package) []string {
+	seen := make(map[string]struct{})
+	for _, file := range pkg.Files {
+		for _, s := range collectFuncSpans(file) {
+			seen[s.name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Rewritten holds the results of schema rewriting: rewritten file sources and the dispatcher.
 type Rewritten struct {
 	Files      map[string]string // absolute file path → rewritten source
@@ -82,9 +101,11 @@ type Rewritten struct {
 }
 
 // Rewrite transforms pkg's source files into a mutant schema using the provided operators.
-// If filter is non-nil, only candidates whose (absolute file path, line number)
-// satisfy filter are emitted; passing nil disables filtering.
-func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file string, line int) bool) (*Rewritten, error) {
+// If filter is non-nil, only candidates whose (absolute file path, 1-based line
+// number, enclosing function name) satisfy filter are emitted; passing nil disables
+// filtering. The function name is the canonical funcDeclName form ("Foo",
+// "(T).Bar", "(*T).Bar") or "" when the candidate is outside any top-level FuncDecl.
+func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file string, line int, funcName string) bool) (*Rewritten, error) {
 	mutID := 0
 	var mutations []mutation.Mutation
 	rewrittenFiles := make(map[string]string)
@@ -103,7 +124,8 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 		for _, op := range ops {
 			for _, c := range op.Find(file, pkg.TypesInfo) {
 				pos := pkg.Fset.Position(c.Pos)
-				if filter != nil && !filter(filePath, pos.Line) {
+				funcName := enclosingFunc(funcSpans, c.Pos)
+				if filter != nil && !filter(filePath, pos.Line, funcName) {
 					continue
 				}
 				mutID++
@@ -113,7 +135,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 					File:         filePath,
 					Line:         pos.Line,
 					Column:       pos.Column,
-					Function:     enclosingFunc(funcSpans, c.Pos),
+					Function:     funcName,
 					OperatorName: op.Name(),
 					Original:     c.Original,
 					Mutant:       c.Mutant,

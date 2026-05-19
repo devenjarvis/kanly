@@ -444,6 +444,50 @@ func TestEndToEndUncovered(t *testing.T) {
 	}
 }
 
+// TestEndToEndFunctionSelector exercises the `<pkg>:<func>` positional syntax
+// against the standard sample package: only Add's mutations should run.
+func TestEndToEndFunctionSelector(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping e2e test in short mode")
+	}
+
+	binPath := buildBinary(t)
+	sampleDir := relDir(t, "../runner/testdata/sample")
+
+	runCmd := exec.Command(binPath, "--format=json", sampleDir+":Add")
+	out, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kanly: %v\n%s", err, out)
+	}
+
+	var result struct {
+		Scope   string `json:"scope"`
+		Summary struct {
+			Total  int `json:"total"`
+			Killed int `json:"killed"`
+		} `json:"summary"`
+		Mutants []struct {
+			Mutation struct {
+				Function string `json:"function"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, out)
+	}
+	if result.Summary.Total != 1 || result.Summary.Killed != 1 {
+		t.Errorf("Total/Killed: want 1/1, got %d/%d", result.Summary.Total, result.Summary.Killed)
+	}
+	for _, m := range result.Mutants {
+		if m.Mutation.Function != "Add" {
+			t.Errorf("mutant function: want Add, got %q", m.Mutation.Function)
+		}
+	}
+	if !strings.Contains(result.Scope, ":Add") {
+		t.Errorf("Scope should mention :Add, got %q", result.Scope)
+	}
+}
+
 func TestEndToEndBooleanPackage(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping e2e test in short mode")

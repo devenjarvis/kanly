@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -71,6 +73,195 @@ func TestRunEndToEndOnSamplePackage(t *testing.T) {
 	if len(result.Packages) > 0 && result.Packages[0].Package != wantPkg {
 		t.Errorf("Packages[0].Package: want %q, got %q", wantPkg, result.Packages[0].Package)
 	}
+}
+
+func TestRunFunctionSelector(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	sampleDir := relDir(t, "../../internal/runner/testdata/sample")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--format=json", sampleDir + ":Add"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+
+	var result struct {
+		Scope    string `json:"scope"`
+		Summary  struct {
+			Total  int `json:"total"`
+			Killed int `json:"killed"`
+		} `json:"summary"`
+		Mutants []struct {
+			Mutation struct {
+				Function string `json:"function"`
+				Original string `json:"original"`
+				Mutant   string `json:"mutant"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+
+	// sample has Add (+→-) and Sub (-→+); the selector keeps only Add's mutant.
+	if result.Summary.Total != 1 {
+		t.Errorf("Total: want 1, got %d", result.Summary.Total)
+	}
+	if result.Summary.Killed != 1 {
+		t.Errorf("Killed: want 1, got %d", result.Summary.Killed)
+	}
+	for _, m := range result.Mutants {
+		if m.Mutation.Function != "Add" {
+			t.Errorf("mutant function: want Add, got %q", m.Mutation.Function)
+		}
+		if m.Mutation.Original != "+" || m.Mutation.Mutant != "-" {
+			t.Errorf("mutant op: want +→-, got %s→%s", m.Mutation.Original, m.Mutation.Mutant)
+		}
+	}
+	if !strings.Contains(result.Scope, ":Add") {
+		t.Errorf("Scope should mention :Add, got %q", result.Scope)
+	}
+}
+
+func TestRunFunctionSelectorNoMatchErrors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	sampleDir := relDir(t, "../../internal/runner/testdata/sample")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--format=json", sampleDir + ":Nonexistent"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit, got 0; stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "no function matches") {
+		t.Errorf("stderr should explain the missing function, got: %s", stderr.String())
+	}
+	// Suggestions should include real names.
+	if !strings.Contains(stderr.String(), "Add") && !strings.Contains(stderr.String(), "Sub") {
+		t.Errorf("stderr should suggest known funcs, got: %s", stderr.String())
+	}
+}
+
+func TestRunMutantIDFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	sampleDir := relDir(t, "../../internal/runner/testdata/sample")
+
+	// Discover the IDs assigned to each function by running without filter first.
+	var probeOut, probeErr bytes.Buffer
+	if code := run([]string{"--format=json", sampleDir}, &probeOut, &probeErr); code != 0 {
+		t.Fatalf("probe run returned %d: %s", code, probeErr.String())
+	}
+	var probe struct {
+		Mutants []struct {
+			Mutation struct {
+				ID       int    `json:"mutation_id"`
+				Function string `json:"function"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(probeOut.Bytes(), &probe); err != nil {
+		t.Fatalf("parse probe JSON: %v", err)
+	}
+	var subID int
+	for _, m := range probe.Mutants {
+		if m.Mutation.Function == "Sub" {
+			subID = m.Mutation.ID
+			break
+		}
+	}
+	if subID == 0 {
+		t.Fatalf("could not find Sub mutant ID in probe: %s", probeOut.String())
+	}
+
+	// Now narrow with --mutant.
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--format=json", "--mutant=" + strconv.Itoa(subID), sampleDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Summary struct {
+			Total int `json:"total"`
+		} `json:"summary"`
+		Mutants []struct {
+			Mutation struct {
+				ID       int    `json:"mutation_id"`
+				Function string `json:"function"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	if result.Summary.Total != 1 {
+		t.Errorf("Total: want 1, got %d", result.Summary.Total)
+	}
+	if len(result.Mutants) != 1 || result.Mutants[0].Mutation.ID != subID {
+		t.Errorf("expected only mutant id %d, got %+v", subID, result.Mutants)
+	}
+}
+
+func TestRunTestsRegexNarrowsInventory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	sampleDir := relDir(t, "../../internal/runner/testdata/sample")
+	var stdout, stderr bytes.Buffer
+	// Restrict to TestAdd only — Sub mutant should now appear as not_covered.
+	code := run([]string{"--format=json", "--tests=^TestAdd$", sampleDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Summary struct {
+			Total      int `json:"total"`
+			Killed     int `json:"killed"`
+			NotCovered int `json:"not_covered"`
+		} `json:"summary"`
+		Tests []struct {
+			Name string `json:"name"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	if result.Summary.Total != 2 {
+		t.Errorf("Total: want 2, got %d", result.Summary.Total)
+	}
+	if result.Summary.Killed != 1 {
+		t.Errorf("Killed: want 1, got %d", result.Summary.Killed)
+	}
+	if result.Summary.NotCovered != 1 {
+		t.Errorf("NotCovered: want 1 (Sub mutant uncovered when TestSub excluded), got %d", result.Summary.NotCovered)
+	}
+	names := make([]string, 0, len(result.Tests))
+	for _, ts := range result.Tests {
+		names = append(names, ts.Name)
+	}
+	sort.Strings(names)
+	want := []string{"TestAdd"}
+	if !equalStringsSorted(names, want) {
+		t.Errorf("inventory: want %v, got %v", want, names)
+	}
+}
+
+func equalStringsSorted(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRunMultiplePositionalArgs(t *testing.T) {
