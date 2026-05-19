@@ -24,6 +24,24 @@ func relDir(t *testing.T, sub string) string {
 	return abs
 }
 
+func TestRunVersionFlag(t *testing.T) {
+	prev := version
+	version = "v1.2.3"
+	defer func() { version = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--version"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: want 0, got %d; stderr: %q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "kanly v1.2.3\n" {
+		t.Errorf("stdout: want %q, got %q", "kanly v1.2.3\n", got)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr should be empty, got %q", stderr.String())
+	}
+}
+
 func TestRunRejectsMissingPackageArg(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{}, &stdout, &stderr)

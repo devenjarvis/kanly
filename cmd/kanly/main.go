@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,8 +27,24 @@ import (
 	"github.com/devenjarvis/kanly/internal/source"
 )
 
+// version is overridden at release-build time via
+// -ldflags="-X main.version=vX.Y.Z". The "dev" default is replaced at runtime
+// with the embedded module version when the binary was produced by
+// `go install github.com/devenjarvis/kanly/cmd/kanly@vX.Y.Z`.
+var version = "dev"
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func resolveVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return version
 }
 
 // runConfig collects the per-package knobs threaded from CLI flags into runPackage.
@@ -162,10 +179,11 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly [--version] [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	versionFlag := fs.Bool("version", false, "print version and exit")
 	formatFlag := fs.String("format", "text", "output format: text|json")
 	timeoutFlag := fs.Duration("timeout", 30*time.Second, "per-mutant test timeout")
 	diffFlag := fs.Bool("diff", false, "only mutate lines changed since --diff-base")
@@ -177,6 +195,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(stderr, usage)
 		return 2
+	}
+
+	if *versionFlag {
+		fmt.Fprintf(stdout, "kanly %s\n", resolveVersion())
+		return 0
 	}
 
 	if *jobsFlag < 1 {
