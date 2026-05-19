@@ -13,7 +13,7 @@ go install github.com/devenjarvis/kanly/cmd/kanly@latest
 ## Usage
 
 ```
-kanly [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<ids>] <pattern>[:<func-list>]...
+kanly [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<ids>] [--jobs=N] <pattern>[:<func-list>]...
 ```
 
 | Flag | Default | Description |
@@ -24,6 +24,7 @@ kanly [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests
 | `--diff-base` | `HEAD` | Git ref to diff against when `--diff` is set |
 | `--tests` | (all) | Regex narrowing the test inventory used by baseline and per-test coverage |
 | `--mutant` | (all) | Comma-separated schema-assigned mutant IDs to re-run; others are skipped |
+| `--jobs` | `NumCPU` | Parallel worker processes for per-test coverage and the mutant loop (`1` = sequential) |
 
 Positional arguments take the form `<pkg-pattern>[:<func-list>]`. The optional function list selects mutants by enclosing function — accepts plain names (`Foo`), method receivers in dotted form (`Server.Handle` matches both `(Server).Handle` and `(*Server).Handle`), or the explicit canonical form (`(*Server).Handle`). A function filter requires the pattern to resolve to a single package (no `./...`).
 
@@ -52,7 +53,7 @@ Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2
 Total: 4 | Killed: 3 | Survived: 1 | Timeout: 0 | Score: 75.0%
 ```
 
-Each package's pipeline (rewrite → compile → baseline → mutant loop) runs independently. Packages with no test files or no mutations are skipped with a one-line stderr notice and the run continues. Package-level parallelism is a planned future addition.
+Each package's pipeline (rewrite → compile → baseline → mutant loop) runs independently. Packages with no test files or no mutations are skipped with a one-line stderr notice and the run continues. Within a package the per-test coverage pass and the mutant loop both run concurrently under a worker pool sized by `--jobs` (default `runtime.NumCPU()`; pass `--jobs=1` for serial execution). Cross-package parallelism is still sequential and is a planned future addition.
 
 ### Focused mutation
 
@@ -125,7 +126,7 @@ largest remaining gap in Kanly's coverage:
 - **Test-centric signals depend on operator coverage.** The `tests`, `zero_kill_tests`, and `survivors_by_function` views in the JSON report are only as sharp as the underlying operator set. Today, many entries in `zero_kill_tests` are tests exercising code that has no mutable operators in it — not tests with weak assertions. Read these views as exploration aids; broadening the operator set will turn them into a reliable test-quality signal.
 - **Some assertions are structurally unkillable.** A few test patterns can't be expressed as MSG mutants no matter how many operators are added — most notably tests that assert on struct field tags (e.g., JSON tag names read via reflection), because Go syntax requires struct tags to be uninterpreted string literals that cannot be rewritten to runtime-conditional expressions. Such tests will always appear in `zero_kill_tests`; treat them as "structurally unkillable" rather than weak.
 - **"Identical kill-sets" is not the same as "redundant tests."** Two tests can land in the same `redundant_test_groups` entry because they coincidentally trip the same mutated lines while asserting on entirely different concerns. Treat the grouping as a "look here" prompt, not a "delete one" recommendation.
-- **Sequential multi-package only.** `./...` and multiple positional args are supported; packages run sequentially. Package-level parallelism is tracked for a future release.
+- **Sequential multi-package only.** `./...` and multiple positional args are supported; packages run sequentially. Within a package the per-test coverage pass and the mutant loop are already parallel (`--jobs N`, default `runtime.NumCPU()`); cross-package parallelism is tracked for a future release.
 
 ## Development
 

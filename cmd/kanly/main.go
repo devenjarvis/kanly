@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/devenjarvis/kanly/internal/diff"
 	"github.com/devenjarvis/kanly/internal/mutation"
@@ -29,10 +32,11 @@ func main() {
 
 // runConfig collects the per-package knobs threaded from CLI flags into runPackage.
 type runConfig struct {
-	filter      func(file string, line int, funcName string) bool
-	timeout     time.Duration
-	testsRegex  string  // if non-empty, narrows baseline + per-test coverage
-	mutantIDs   map[int]bool // if non-nil, only these schema-assigned IDs run
+	filter     func(file string, line int, funcName string) bool
+	timeout    time.Duration
+	testsRegex string       // if non-empty, narrows baseline + per-test coverage
+	mutantIDs  map[int]bool // if non-nil, only these schema-assigned IDs run
+	jobs       int          // worker pool size for per-test coverage and the mutant loop; >= 1
 }
 
 func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) ([]mutation.Result, []string, error) {
@@ -87,37 +91,57 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 
 	// Collect per-test coverage once; pays off across all mutants.
-	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.timeout)
+	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.timeout, cfg.jobs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("collect coverage: %w", err)
 	}
 
-	var results []mutation.Result
+	// Per-mutant covering tests are read out up front so the parallel loop
+	// below does not touch covMap concurrently and so we can populate the
+	// `relevant` set (used to narrow the reported inventory) before any
+	// goroutine starts. Indexed slices preserve schema-ID order across the
+	// parallel phase, keeping JSON output byte-identical to --jobs=1.
+	perMut := make([][]string, len(mutations))
 	relevant := make(map[string]bool)
-	for _, mut := range mutations {
+	for i, mut := range mutations {
 		tests := covMap[runner.FileLine{File: mut.File, Line: mut.Line}]
+		perMut[i] = tests
 		for _, t := range tests {
 			relevant[t] = true
 		}
+	}
+
+	results := make([]mutation.Result, len(mutations))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(cfg.jobs)
+	for i, mut := range mutations {
+		i, mut := i, mut
+		tests := perMut[i]
 		if len(tests) == 0 {
 			// No test covers this line — the mutant cannot be killed,
 			// so skip the run and mark it not-covered.
-			results = append(results, mutation.Result{
+			results[i] = mutation.Result{
 				Mutation: mut,
 				Status:   mutation.StatusNotCovered,
-			})
+			}
 			continue
 		}
-		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.timeout)
-		if err != nil {
-			return nil, nil, fmt.Errorf("run mutant %d: %w", mut.ID, err)
-		}
-		results = append(results, mutation.Result{
-			Mutation:     mut,
-			Status:       status,
-			KillingTests: killingTests,
-			Duration:     dur,
+		g.Go(func() error {
+			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.timeout)
+			if err != nil {
+				return fmt.Errorf("run mutant %d: %w", mut.ID, err)
+			}
+			results[i] = mutation.Result{
+				Mutation:     mut,
+				Status:       status,
+				KillingTests: killingTests,
+				Duration:     dur,
+			}
+			return nil
 		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
 	}
 
 	// When a scope is active (filter or --mutant), drop tests from the reported
@@ -138,7 +162,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -148,9 +172,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	diffBaseFlag := fs.String("diff-base", "HEAD", "git ref to diff against when --diff is set")
 	testsFlag := fs.String("tests", "", "regex narrowing the test inventory used by baseline and per-test coverage")
 	mutantFlag := fs.String("mutant", "", "comma-separated schema-assigned mutant IDs to re-run; others are skipped")
+	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(stderr, usage)
+		return 2
+	}
+
+	if *jobsFlag < 1 {
+		fmt.Fprintf(stderr, "--jobs: must be >= 1, got %d\n", *jobsFlag)
 		return 2
 	}
 
@@ -248,6 +278,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				timeout:    *timeoutFlag,
 				testsRegex: *testsFlag,
 				mutantIDs:  mutantIDs,
+				jobs:       *jobsFlag,
 			}
 
 			results, inventory, err := runPackage(ctx, pkg, ops, cfg, stderr)

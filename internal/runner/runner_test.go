@@ -377,7 +377,7 @@ func TestCollectPerTestCoverageAttributesTests(t *testing.T) {
 	defer cleanCovBin()
 
 	inventory := []string{"TestAdd", "TestSub"}
-	covMap, err := runner.CollectPerTestCoverage(ctx, covBin, sampleDir, inventory, 30*time.Second)
+	covMap, err := runner.CollectPerTestCoverage(ctx, covBin, sampleDir, inventory, 30*time.Second, 1)
 	if err != nil {
 		t.Fatalf("CollectPerTestCoverage: %v", err)
 	}
