@@ -26,8 +26,8 @@ func TestRenderDispatcherProducesCompilableGo(t *testing.T) {
 		t.Fatalf("generated source does not parse: %v\n%s", err, src)
 	}
 
-	if !strings.Contains(src, "func __cMutInt(a, b int, op int, mutIDs ...int) int") {
-		t.Errorf("missing __cMutInt declaration in:\n%s", src)
+	if !strings.Contains(src, "func __cMutInt[T __cInteger](a, b T, op int, mutIDs ...int) T") {
+		t.Errorf("missing generic __cMutInt declaration in:\n%s", src)
 	}
 	if !strings.Contains(src, "case 1:") {
 		t.Errorf("missing case 1 in generated source:\n%s", src)
@@ -46,8 +46,8 @@ func TestRenderDispatcherVariadicSignature(t *testing.T) {
 		t.Fatalf("RenderDispatcher: %v", err)
 	}
 
-	if !strings.Contains(src, "func __cMutInt(a, b int, op int, mutIDs ...int) int") {
-		t.Errorf("__cMutInt should be variadic, got:\n%s", src)
+	if !strings.Contains(src, "func __cMutInt[T __cInteger](a, b T, op int, mutIDs ...int) T") {
+		t.Errorf("__cMutInt should be generic and variadic, got:\n%s", src)
 	}
 }
 
@@ -99,8 +99,8 @@ func TestRenderDispatcherEmitsBoolFuncs(t *testing.T) {
 	}
 
 	checks := []string{
-		"func __cMutBool(a, b func() bool, op int, mutIDs ...int) bool",
-		"func __cMutNot(x bool, mutIDs ...int) bool",
+		"func __cMutBool[T __cBoolean](a, b func() T, op int, mutIDs ...int) T",
+		"func __cMutNot[T __cBoolean](x T, mutIDs ...int) T",
 		"case 21:",
 		"return a() || b()",
 		"case 22:",
@@ -251,7 +251,7 @@ func TestRenderDispatcherEmitsSliceIdxFunc(t *testing.T) {
 	}
 
 	checks := []string{
-		"func __cMutIdx(i int, mutIDs ...int) int",
+		"func __cMutIdx[T __cInteger](i T, mutIDs ...int) T",
 		"case 60:",
 		"return i + 1",
 		"case 61:",
@@ -281,8 +281,8 @@ func TestRenderDispatcherEmitsIntCmpFunc(t *testing.T) {
 		t.Fatalf("generated source does not parse: %v\n%s", err, src)
 	}
 
-	if !strings.Contains(src, "func __cMutIntCmp(a, b int, op int, mutIDs ...int) bool") {
-		t.Errorf("missing __cMutIntCmp declaration in:\n%s", src)
+	if !strings.Contains(src, "func __cMutIntCmp[T __cInteger](a, b T, op int, mutIDs ...int) bool") {
+		t.Errorf("missing generic __cMutIntCmp declaration in:\n%s", src)
 	}
 	if !strings.Contains(src, "case 4:") {
 		t.Errorf("missing case 4 for cmp mutation in:\n%s", src)

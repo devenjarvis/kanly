@@ -1,6 +1,6 @@
 package bitwisepkg
 
-// Each of the six bitwise/shift ops should produce exactly one int_bitwise candidate.
+// Each of the six bitwise/shift ops on plain int produces one int_bitwise candidate.
 func And(a, b int) int    { return a & b }
 func Or(a, b int) int     { return a | b }
 func Xor(a, b int) int    { return a ^ b }
@@ -8,7 +8,8 @@ func Shl(a, b int) int    { return a << b }
 func Shr(a, b int) int    { return a >> b }
 func AndNot(a, b int) int { return a &^ b }
 
-// Sized-int variants must be skipped by the strict-identity policy.
+// Sized-int variants are now mutated too (underlying-integer policy). Each
+// produces one candidate, mirroring its plain-int sibling.
 func AndUint(a, b uint) uint { return a & b }
 func ShlInt32(a, b int32) int32 {
 	return a << b

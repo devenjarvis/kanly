@@ -5,9 +5,16 @@ import (
 	"go/types"
 )
 
-// intOperands reports whether both x and y are exactly types.Int (not named or sized variants)
-// and at least one is not a compile-time constant.
-// Do NOT use .Underlying() — named types like "type MyInt int" must be excluded.
+// intOperands reports whether x and y are both integer-typed and at least one
+// is not a compile-time constant. Accepts every basic type whose Info bit
+// includes IsInteger — `int`, sized ints (`int8`/`int16`/`int32`/`int64`),
+// `uint` and its sized variants, `uintptr`, `byte`, `rune` — as well as any
+// named wrapper around them (`type MyInt int`, `time.Duration`, etc.).
+//
+// Both operands must share the same defined type (types.Identical), which
+// Go's type-checker already enforces for non-constant binary operands —
+// the check is kept here as defensive backstop, so a future caller cannot
+// inadvertently mutate a cross-typed binary expression.
 func intOperands(info *types.Info, x, y ast.Expr) bool {
 	lv, lok := info.Types[x]
 	rv, rok := info.Types[y]
@@ -17,12 +24,16 @@ func intOperands(info *types.Info, x, y ast.Expr) bool {
 	if lv.Value != nil && rv.Value != nil {
 		return false
 	}
-	return lv.Type == types.Typ[types.Int] && rv.Type == types.Typ[types.Int]
+	if !isIntegerType(lv.Type) || !isIntegerType(rv.Type) {
+		return false
+	}
+	return types.Identical(lv.Type, rv.Type)
 }
 
-// boolOperands reports whether both x and y are exactly types.Bool (not named types or untyped bool)
-// and at least one is not a compile-time constant.
-// Do NOT use .Underlying() — named types like "type MyBool bool" must be excluded.
+// boolOperands reports whether x and y are both boolean-typed and at least
+// one is not a compile-time constant. Accepts plain `bool` and any named
+// wrapper around it (`type MyBool bool`). Both operands must share the
+// same defined type.
 func boolOperands(info *types.Info, x, y ast.Expr) bool {
 	lv, lok := info.Types[x]
 	rv, rok := info.Types[y]
@@ -32,12 +43,14 @@ func boolOperands(info *types.Info, x, y ast.Expr) bool {
 	if lv.Value != nil && rv.Value != nil {
 		return false
 	}
-	return lv.Type == types.Typ[types.Bool] && rv.Type == types.Typ[types.Bool]
+	if !isBoolType(lv.Type) || !isBoolType(rv.Type) {
+		return false
+	}
+	return types.Identical(lv.Type, rv.Type)
 }
 
-// boolOperand reports whether x is exactly types.Bool (not named types or untyped bool)
-// and is not a compile-time constant.
-// Do NOT use .Underlying() — named types like "type MyBool bool" must be excluded.
+// boolOperand reports whether x is a non-constant boolean-typed expression.
+// Accepts plain `bool` and named wrappers like `type MyBool bool`.
 func boolOperand(info *types.Info, x ast.Expr) bool {
 	lv, lok := info.Types[x]
 	if !lok {
@@ -46,12 +59,11 @@ func boolOperand(info *types.Info, x ast.Expr) bool {
 	if lv.Value != nil {
 		return false
 	}
-	return lv.Type == types.Typ[types.Bool]
+	return isBoolType(lv.Type)
 }
 
-// intOperand reports whether x is exactly types.Int (not named or sized variants)
-// and is not a compile-time constant.
-// Do NOT use .Underlying() — named types like "type MyInt int" must be excluded.
+// intOperand reports whether x is a non-constant integer-typed expression.
+// Accepts every IsInteger basic, plus named wrappers around them.
 func intOperand(info *types.Info, x ast.Expr) bool {
 	lv, lok := info.Types[x]
 	if !lok {
@@ -60,7 +72,32 @@ func intOperand(info *types.Info, x ast.Expr) bool {
 	if lv.Value != nil {
 		return false
 	}
-	return lv.Type == types.Typ[types.Int]
+	return isIntegerType(lv.Type)
+}
+
+// isIntegerType reports whether t's underlying type is a basic integer
+// (signed or unsigned, any width, including byte/rune/uintptr).
+func isIntegerType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	b, ok := t.Underlying().(*types.Basic)
+	if !ok {
+		return false
+	}
+	return b.Info()&types.IsInteger != 0
+}
+
+// isBoolType reports whether t's underlying type is the boolean basic.
+func isBoolType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	b, ok := t.Underlying().(*types.Basic)
+	if !ok {
+		return false
+	}
+	return b.Info()&types.IsBoolean != 0
 }
 
 // errorType is the universe "error" interface, captured once.
@@ -68,7 +105,7 @@ var errorType = types.Universe.Lookup("error").Type()
 
 // isErrorType reports whether x's static type is exactly the universe error interface.
 // Named error wrappers (e.g. "*MyError") are excluded, mirroring the strict-identity
-// policy used by intOperands and boolOperands.
+// policy used by err_return_nil.
 func isErrorType(info *types.Info, x ast.Expr) bool {
 	tv, ok := info.Types[x]
 	if !ok || tv.Type == nil {

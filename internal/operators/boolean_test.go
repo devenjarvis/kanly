@@ -9,7 +9,7 @@ import (
 	"github.com/devenjarvis/kanly/internal/source"
 )
 
-func TestBoolLogicRejectsNamedBool(t *testing.T) {
+func TestBoolLogicAcceptsNamedBool(t *testing.T) {
 	pkg, err := source.Load(relDir(t, "testdata/namedboolpkg"))
 	if err != nil {
 		t.Fatalf("source.Load: %v", err)
@@ -20,8 +20,13 @@ func TestBoolLogicRejectsNamedBool(t *testing.T) {
 		candidates = append(candidates, BoolLogic{}.Find(f, pkg.TypesInfo)...)
 	}
 
-	if len(candidates) != 0 {
-		t.Errorf("BoolLogic.Find: expected 0 candidates for named bool type, got %d: %v", len(candidates), candidates)
+	// namedboolpkg has MyAnd() with m1 && m2 over named MyBool operands —
+	// one candidate (&& → ||).
+	if len(candidates) != 1 {
+		t.Fatalf("BoolLogic.Find: expected 1 candidate for named bool type, got %d: %v", len(candidates), candidates)
+	}
+	if candidates[0].Original != "&&" || candidates[0].Mutant != "||" {
+		t.Errorf("expected &&→|| candidate, got %q→%q", candidates[0].Original, candidates[0].Mutant)
 	}
 }
 
@@ -52,7 +57,7 @@ func TestBoolLogicFindsBothSwaps(t *testing.T) {
 	}
 }
 
-func TestBoolNotRejectsNamedBool(t *testing.T) {
+func TestBoolNotAcceptsNamedBool(t *testing.T) {
 	pkg, err := source.Load(relDir(t, "testdata/namedboolpkg"))
 	if err != nil {
 		t.Fatalf("source.Load: %v", err)
@@ -63,8 +68,13 @@ func TestBoolNotRejectsNamedBool(t *testing.T) {
 		candidates = append(candidates, BoolNot{}.Find(f, pkg.TypesInfo)...)
 	}
 
-	if len(candidates) != 0 {
-		t.Errorf("BoolNot.Find: expected 0 candidates for named bool type, got %d: %v", len(candidates), candidates)
+	// namedboolpkg has MyNot() with !m1 over a named MyBool operand —
+	// one candidate (!→⌀).
+	if len(candidates) != 1 {
+		t.Fatalf("BoolNot.Find: expected 1 candidate for named bool type, got %d: %v", len(candidates), candidates)
+	}
+	if candidates[0].Original != "!" || candidates[0].Mutant != "" {
+		t.Errorf("expected !→\"\" candidate, got %q→%q", candidates[0].Original, candidates[0].Mutant)
 	}
 }
 

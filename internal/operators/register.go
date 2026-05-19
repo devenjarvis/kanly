@@ -12,6 +12,7 @@ func init() {
 	mutation.Register(CallDelete{})
 	mutation.Register(StringLiteral{})
 	mutation.Register(SliceIndex{})
+	mutation.Register(SliceRange{})
 	mutation.Register(IncDec{})
 	mutation.Register(IntCompoundAssign{})
 	mutation.Register(IntBitwise{})

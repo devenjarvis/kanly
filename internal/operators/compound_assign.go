@@ -8,14 +8,13 @@ import (
 	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
-// IntCompoundAssign finds integer compound-assignment statements (`x += y`,
-// `x -= y`, `x *= y`, `x /= y`, `x %= y`) and proposes the sibling-operator
-// mutation matching IntArith: +↔-, *↔/, %→*. It is the statement-level
-// counterpart of IntArith.
+// IntCompoundAssign finds integer compound-assignment statements (arithmetic
+// `+= -= *= /= %=` and bitwise/shift `&= |= ^= <<= >>= &^=`) and proposes
+// the sibling-operator mutation matching IntArith and IntBitwise. It is the
+// statement-level counterpart of those two operators.
 //
-// Type guard: both Lhs[0] and Rhs[0] must be exactly types.Int. Bitwise
-// compound ops (&=, |=, ^=, <<=, >>=, &^=) are intentionally skipped —
-// IntArith has no counterpart for them.
+// Type guard: both Lhs[0] and Rhs[0] must be integer-typed (underlying basic
+// integer, plus shared defined type per intOperands).
 //
 // Rewrite: matches IncDec's closure-swap strategy. The original AssignStmt
 // is replaced with __cMutStmt(func(){ x+=y }, func(){ x-=y }, mutIDs...) to
@@ -29,13 +28,19 @@ func (IntCompoundAssign) Name() string { return "int_compound_assign" }
 func (IntCompoundAssign) DispatcherKey() string { return "stmt_swap" }
 
 // compoundSibling maps each int compound-assignment token to its mutation.
-// Mirrors IntArith.sibling at the assignment-token level.
+// Mirrors IntArith.sibling and IntBitwise.sibling at the assignment-token level.
 var compoundSibling = map[token.Token]token.Token{
-	token.ADD_ASSIGN: token.SUB_ASSIGN,
-	token.SUB_ASSIGN: token.ADD_ASSIGN,
-	token.MUL_ASSIGN: token.QUO_ASSIGN,
-	token.QUO_ASSIGN: token.MUL_ASSIGN,
-	token.REM_ASSIGN: token.MUL_ASSIGN,
+	token.ADD_ASSIGN:     token.SUB_ASSIGN,
+	token.SUB_ASSIGN:     token.ADD_ASSIGN,
+	token.MUL_ASSIGN:     token.QUO_ASSIGN,
+	token.QUO_ASSIGN:     token.MUL_ASSIGN,
+	token.REM_ASSIGN:     token.MUL_ASSIGN,
+	token.AND_ASSIGN:     token.OR_ASSIGN,
+	token.OR_ASSIGN:      token.AND_ASSIGN,
+	token.XOR_ASSIGN:     token.AND_ASSIGN,
+	token.SHL_ASSIGN:     token.SHR_ASSIGN,
+	token.SHR_ASSIGN:     token.SHL_ASSIGN,
+	token.AND_NOT_ASSIGN: token.AND_ASSIGN,
 }
 
 func (IntCompoundAssign) Find(file *ast.File, info *types.Info) []mutation.Candidate {

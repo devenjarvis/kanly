@@ -114,7 +114,7 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 		"ErrReturnMuts":  byOperator(muts, "err_return_nil"),
 		"CallDeleteMuts": byOperator(muts, "call_delete"),
 		"StringLitMuts":  byOperator(muts, "string_literal"),
-		"SliceIdxMuts":   byOperator(muts, "slice_index"),
+		"SliceIdxMuts":   byOperator(muts, "slice_index", "slice_range"),
 		"StmtSwapMuts":   byOperator(muts, "inc_dec", "int_compound_assign"),
 		"IntBitMuts":     byOperator(muts, "int_bitwise"),
 		"IntLitMuts":     byOperator(muts, "int_literal"),

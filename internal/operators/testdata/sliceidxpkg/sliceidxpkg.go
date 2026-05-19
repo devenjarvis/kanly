@@ -15,10 +15,11 @@ func MapIntKey(m map[int]string, k int) string { return m[k] }
 // MapStrKey uses a string key. Expected: 0 candidates (key type not exactly int).
 func MapStrKey(m map[string]int) int { return m["key"] }
 
-// MyInt is a named int type whose values are not exactly types.Int.
+// MyInt is a named int type. Under the underlying-integer policy named ints
+// are mutated like plain int.
 type MyInt int
 
-// MapNamedKey uses a named-int key. Expected: 0 candidates (strict identity).
+// MapNamedKey uses a named-int key. Expected: 2 candidates.
 func MapNamedKey(m map[MyInt]int, k MyInt) int { return m[k] }
 
 // ConstIdx uses a constant index. Expected: 0 candidates (constants excluded).

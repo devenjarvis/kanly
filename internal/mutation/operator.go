@@ -12,6 +12,11 @@ type Candidate struct {
 	Pos      token.Pos // raw position; resolve with the package FileSet
 	Original string
 	Mutant   string
+	// Type is the static type of the candidate's operand, when the operator
+	// needs it to render type-bearing AST forms (e.g. bool_logic uses it to
+	// emit `func() MyBool` closures over named-bool operands). Optional —
+	// nil for operators whose Rewrite doesn't depend on the operand type.
+	Type types.Type
 }
 
 type Operator interface {

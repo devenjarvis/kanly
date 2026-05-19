@@ -42,7 +42,7 @@ func FloatInc() {
 	x++
 }
 
-// Int32Inc: sized-int variant must be rejected (strict identity). Expected: 0 candidates.
+// Int32Inc: sized-int variant — mutated under the underlying-integer policy. Expected: 1 candidate.
 func Int32Inc() {
 	var x int32 = 1
 	x++
