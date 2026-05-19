@@ -13,11 +13,12 @@ go install github.com/devenjarvis/kanly/cmd/kanly@latest
 ## Usage
 
 ```
-kanly [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<ids>] [--jobs=N] <pattern>[:<func-list>]...
+kanly [--version] [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<ids>] [--jobs=N] <pattern>[:<func-list>]...
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--version` | off | Print version and exit |
 | `--format` | `text` | Output format: `text` or `json` |
 | `--timeout` | `30s` | Per-mutant test timeout |
 | `--diff` | off | Only mutate lines changed since `--diff-base` |
