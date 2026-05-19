@@ -13,13 +13,19 @@ go install github.com/devenjarvis/kanly/cmd/kanly@latest
 ## Usage
 
 ```
-kanly [--format=text|json] [--timeout=30s] <pattern>...
+kanly [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<ids>] <pattern>[:<func-list>]...
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--format` | `text` | Output format: `text` or `json` |
 | `--timeout` | `30s` | Per-mutant test timeout |
+| `--diff` | off | Only mutate lines changed since `--diff-base` |
+| `--diff-base` | `HEAD` | Git ref to diff against when `--diff` is set |
+| `--tests` | (all) | Regex narrowing the test inventory used by baseline and per-test coverage |
+| `--mutant` | (all) | Comma-separated schema-assigned mutant IDs to re-run; others are skipped |
+
+Positional arguments take the form `<pkg-pattern>[:<func-list>]`. The optional function list selects mutants by enclosing function — accepts plain names (`Foo`), method receivers in dotted form (`Server.Handle` matches both `(Server).Handle` and `(*Server).Handle`), or the explicit canonical form (`(*Server).Handle`). A function filter requires the pattern to resolve to a single package (no `./...`).
 
 ### Worked example
 
@@ -47,6 +53,29 @@ Total: 4 | Killed: 3 | Survived: 1 | Timeout: 0 | Score: 75.0%
 ```
 
 Each package's pipeline (rewrite → compile → baseline → mutant loop) runs independently. Packages with no test files or no mutations are skipped with a one-line stderr notice and the run continues. Package-level parallelism is a planned future addition.
+
+### Focused mutation
+
+For tight LLM iteration loops, narrow the scope so the schema, test selection, and report stay sharp:
+
+```
+# Mutate one function; the report's test inventory drops tests that don't cover Add.
+$ kanly ./internal/runner/testdata/sample:Add
+
+# Multiple functions in one package, including a method.
+$ kanly './internal/foo:Compute,(*Server).Handle'
+
+# Pre-narrow the test inventory (skips baseline + coverage for everything else).
+$ kanly --tests='^TestCompute' ./internal/foo:Compute
+
+# Re-verify two survivors after editing the test suite.
+$ kanly --mutant=7,12 ./internal/foo
+
+# Compose with --diff: only changed lines inside the named function.
+$ kanly --diff ./internal/foo:Compute
+```
+
+When a scope is active (`pkg:Func`, `--tests`, `--mutant`, or `--diff`), the report's `scope` field and the text-mode `Scope:` header announce exactly what was tested. The inventory used for `zero_kill_tests` / `redundant_test_groups` is also narrowed to tests that touch a kept mutation, so the signal stays focused on the targeted change.
 
 ## How it works
 

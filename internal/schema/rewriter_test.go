@@ -178,6 +178,46 @@ func TestRewriteAggregatesMutIDsPerNode(t *testing.T) {
 	}
 }
 
+// TestRewriteFunctionFilter exercises the widened (file, line, funcName)
+// predicate: only mutations inside the named function are emitted.
+func TestRewriteFunctionFilter(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "../runner/testdata/sample"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	keepAdd := func(_ string, _ int, funcName string) bool {
+		return funcName == "Add"
+	}
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}}, keepAdd)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	if len(rew.Mutations) != 1 {
+		t.Fatalf("expected 1 mutation (Add only), got %d", len(rew.Mutations))
+	}
+	if got := rew.Mutations[0].Function; got != "Add" {
+		t.Errorf("Function: want Add, got %q", got)
+	}
+}
+
+func TestFuncNames(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "../runner/testdata/sample"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	names := schema.FuncNames(pkg)
+	want := map[string]bool{"Add": true, "Sub": true}
+	if len(names) != len(want) {
+		t.Fatalf("FuncNames: want %d entries, got %d (%v)", len(want), len(names), names)
+	}
+	for _, n := range names {
+		if !want[n] {
+			t.Errorf("unexpected name %q", n)
+		}
+	}
+}
+
 // TestRewriteCallDeleteAndIntArithCoexist verifies that two operators with
 // different DispatcherKeys can target distinct nodes in the same file without
 // stomping on each other in the rewriter's node→group flattening.

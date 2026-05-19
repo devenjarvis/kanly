@@ -132,12 +132,19 @@ func CompileCoverageBinary(ctx context.Context, pkgPath string) (binaryPath stri
 
 // RunBaseline executes the compiled test binary with no active mutant (KANLY_MUTANT unset)
 // and `-test.v`, returning the sorted, deduplicated list of test names that ran.
+// If testRunRegex is non-empty it is passed as `-test.run=<regex>`, narrowing
+// the baseline to a subset of tests — useful when callers know which tests
+// exercise the focused mutation set and want to skip the rest of the package.
 // Returns an error if the baseline tests fail, indicating the package is already broken.
-func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration) ([]string, error) {
+func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration, testRunRegex string) ([]string, error) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(tctx, binaryPath, "-test.v")
+	args := []string{"-test.v"}
+	if testRunRegex != "" {
+		args = append(args, "-test.run="+testRunRegex)
+	}
+	cmd := exec.CommandContext(tctx, binaryPath, args...)
 	cmd.Dir = pkgDir
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
