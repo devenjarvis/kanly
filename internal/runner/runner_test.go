@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -386,11 +385,11 @@ func TestCollectPerTestCoverageAttributesTests(t *testing.T) {
 	addCovers := covMap[runner.FileLine{File: sampleFile, Line: 3}]
 	subCovers := covMap[runner.FileLine{File: sampleFile, Line: 5}]
 
-	if !reflect.DeepEqual(addCovers, []string{"TestAdd"}) {
-		t.Errorf("Add line covers: want [TestAdd], got %v", addCovers)
+	if len(addCovers) != 1 || addCovers[0].Name != "TestAdd" || addCovers[0].Hits <= 0 {
+		t.Errorf("Add line covers: want [{TestAdd, >0}], got %v", addCovers)
 	}
-	if !reflect.DeepEqual(subCovers, []string{"TestSub"}) {
-		t.Errorf("Sub line covers: want [TestSub], got %v", subCovers)
+	if len(subCovers) != 1 || subCovers[0].Name != "TestSub" || subCovers[0].Hits <= 0 {
+		t.Errorf("Sub line covers: want [{TestSub, >0}], got %v", subCovers)
 	}
 }
 

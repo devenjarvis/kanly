@@ -24,6 +24,15 @@ type FileLine struct {
 	Line int
 }
 
+// TestHit records one test's coverage on a specific line. Hits is the summed
+// execution count across all cover blocks whose [StartLine, EndLine] span
+// includes the line — a per-test value, distinguishing setup-style traffic
+// (Hits == 1) from heavily-exercised assertion paths (Hits >> 1).
+type TestHit struct {
+	Name string
+	Hits int
+}
+
 // parseTestNames extracts test names from `go test -v` output by scanning for the
 // requested status prefixes (e.g. "--- FAIL: ", "--- PASS: "). The returned slice
 // preserves the order tests appeared in. Trailing timing info like " (0.00s)" is
@@ -111,10 +120,17 @@ func CompileCoverageBinary(ctx context.Context, pkgPath string) (binaryPath stri
 	}()
 
 	binPath := filepath.Join(tmpDir, "covbin")
+	// -covermode=count records per-block execution counts (not just 0/1 as
+	// the default `set` mode does). The CLI uses those counts to distinguish
+	// incidental coverage (a line touched once via a helper/setup path) from
+	// assertion-bearing coverage (a line exercised many times by a table-
+	// driven test) when narrowing the per-mutant test set under --diff or
+	// pkg:func scope.
 	cmd := exec.CommandContext(ctx,
 		"go", "test", "-c",
 		"-vet=off",
 		"-cover",
+		"-covermode=count",
 		"-coverpkg="+pkgPath,
 		"-o", binPath,
 		pkgPath,
@@ -214,11 +230,13 @@ func buildRunRegex(names []string) string {
 }
 
 // coverBlock is one entry from a coverprofile: the file path it references
-// (as written in the profile, before normalization) and an inclusive line range.
+// (as written in the profile, before normalization), an inclusive line range,
+// and the execution count for the block.
 type coverBlock struct {
 	File      string
 	StartLine int
 	EndLine   int
+	Count     int
 }
 
 // parseCoverProfile parses Go's `-coverprofile` text format. It returns one
@@ -287,7 +305,7 @@ func parseCoverProfile(data []byte) ([]coverBlock, error) {
 		if err != nil {
 			return nil, fmt.Errorf("coverprofile end line not int in %q: %w", line, err)
 		}
-		blocks = append(blocks, coverBlock{File: file, StartLine: startLine, EndLine: endLine})
+		blocks = append(blocks, coverBlock{File: file, StartLine: startLine, EndLine: endLine, Count: count})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -296,8 +314,8 @@ func parseCoverProfile(data []byte) ([]coverBlock, error) {
 }
 
 // CollectPerTestCoverage runs each named test individually under coverage and
-// returns a map from (absolute file, line) to the names of tests whose
-// statement coverage touches that line.
+// returns a map from (absolute file, line) to TestHit entries describing which
+// tests' statement coverage touched that line and how many times.
 //
 // `binaryPath` must point to a cover-instrumented binary built by
 // CompileCoverageBinary (NOT the mutation binary). Each per-test run is
@@ -310,9 +328,14 @@ func parseCoverProfile(data []byte) ([]coverBlock, error) {
 // it into a local map; the final merge walks inventory in order so the
 // returned map is deterministic regardless of completion order.
 //
+// When a test touches a line via multiple overlapping cover blocks, the
+// hit counts are summed: each block is a distinct basic block in Go's
+// cover instrumentation, so both firing means both contributed to the
+// test's traffic on that line.
+//
 // Coverprofile file paths are normalized via filepath.Join(pkgDir, basename),
 // which is correct for single-directory Go packages.
-func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inventory []string, timeout time.Duration, jobs int) (map[FileLine][]string, error) {
+func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inventory []string, timeout time.Duration, jobs int) (map[FileLine][]TestHit, error) {
 	if jobs < 1 {
 		jobs = 1
 	}
@@ -364,7 +387,7 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inve
 
 	// Serial merge in inventory order keeps the result map deterministic
 	// regardless of which goroutine finished first.
-	out := make(map[FileLine]map[string]struct{})
+	out := make(map[FileLine]map[string]int)
 	for i, name := range inventory {
 		for _, b := range localBlocks[i] {
 			base := filepath.Base(b.File)
@@ -376,22 +399,22 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inve
 				key := FileLine{File: abs, Line: ln}
 				set, ok := out[key]
 				if !ok {
-					set = make(map[string]struct{})
+					set = make(map[string]int)
 					out[key] = set
 				}
-				set[name] = struct{}{}
+				set[name] += b.Count
 			}
 		}
 	}
 
-	result := make(map[FileLine][]string, len(out))
+	result := make(map[FileLine][]TestHit, len(out))
 	for k, set := range out {
-		names := make([]string, 0, len(set))
-		for n := range set {
-			names = append(names, n)
+		hits := make([]TestHit, 0, len(set))
+		for n, c := range set {
+			hits = append(hits, TestHit{Name: n, Hits: c})
 		}
-		sort.Strings(names)
-		result[k] = names
+		sort.Slice(hits, func(i, j int) bool { return hits[i].Name < hits[j].Name })
+		result[k] = hits
 	}
 	return result, nil
 }

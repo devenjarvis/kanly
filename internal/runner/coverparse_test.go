@@ -17,8 +17,8 @@ multipkg/foo/bar.go:10.1,12.20 2 3
 	}
 
 	want := []coverBlock{
-		{File: "multipkg/foo/foo.go", StartLine: 3, EndLine: 3},
-		{File: "multipkg/foo/bar.go", StartLine: 10, EndLine: 12},
+		{File: "multipkg/foo/foo.go", StartLine: 3, EndLine: 3, Count: 1},
+		{File: "multipkg/foo/bar.go", StartLine: 10, EndLine: 12, Count: 3},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parsed blocks mismatch\nwant: %#v\ngot:  %#v", want, got)
