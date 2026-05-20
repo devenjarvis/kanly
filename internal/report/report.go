@@ -268,6 +268,13 @@ const llmWarnSize = 200 * 1024
 // ones. The layout puts the highest-leverage data (surviving mutants with
 // source context + the tests that almost killed them) above the
 // consolidation and inventory sections.
+//
+// The structure follows the prescription validated by Wang, Xu, Briand & Liu
+// (2025), "Mutation-Guided Unit Test Generation with a Large Language Model"
+// (arXiv:2506.02954): the task is framed explicitly, live (covered-but-
+// survived) mutants are surfaced separately from uncovered mutants because
+// they need different test strategies, and the iterate-after-edit loop using
+// `--mutant=<ids>` mirrors MUTGEN's iterative generation mechanism.
 func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	readFile := src.ReadFile
 	if readFile == nil {
@@ -280,11 +287,15 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 		fmt.Fprintf(&b, "**Scope:** `%s`\n\n", r.Scope)
 	}
 
+	writeLLMPreamble(&b)
 	writeLLMSummary(&b, r.Summary)
-	writeLLMSurvivors(&b, r, src.FuncRanges, readFile)
+	survivors, uncovered := splitUnkilled(r.Mutants)
+	writeLLMLiveSection(&b, r, survivors, src.FuncRanges, readFile)
+	writeLLMUncoveredSection(&b, r, uncovered, src.FuncRanges, readFile)
 	writeLLMRedundant(&b, r.RedundantTestGroups)
 	writeLLMZeroKill(&b, r.ZeroKillTests)
 	writeLLMTestInventory(&b, r.Tests)
+	writeLLMNextIteration(&b, survivors, uncovered)
 
 	out := b.String()
 	if _, err := io.WriteString(w, out); err != nil {
@@ -296,6 +307,18 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	return nil
 }
 
+// writeLLMPreamble renders the task framing so an LLM consuming the artifact
+// has explicit instructions without the user having to wrap it in their own
+// system prompt. Mutation score (not line coverage) is named as the goal,
+// matching the headline finding of arXiv:2506.02954.
+func writeLLMPreamble(b *strings.Builder) {
+	b.WriteString("## Task\n\n")
+	b.WriteString("Your goal is to **raise the mutation score** of this package: write tests that fail when the listed mutations are applied. Line coverage is not the target — a test suite can reach 100% coverage and still kill almost no mutants. Two kinds of offense target follow:\n\n")
+	b.WriteString("- **Live mutants** are reached by existing tests but not detected — the fix is to *sharpen an assertion* so the original and mutant diverge.\n")
+	b.WriteString("- **Uncovered mutants** are never executed — the fix is to *add a test* that exercises the line; almost any assertion on its result will catch the mutation.\n\n")
+	b.WriteString("After editing tests, verify with `kanly --mutant=<ids> <pkg>` (see the iteration block at the end of this report) to re-run only the targeted mutants.\n\n")
+}
+
 func writeLLMSummary(b *strings.Builder, s Summary) {
 	b.WriteString("## Summary\n\n")
 	b.WriteString("| Total | Killed | Survived | Timeout | NotCovered | NotViable | Score |\n")
@@ -304,14 +327,23 @@ func writeLLMSummary(b *strings.Builder, s Summary) {
 		s.Total, s.Killed, s.Survived, s.Timeout, s.NotCovered, s.NotViable, s.Score*100)
 }
 
-// unkilledByFunction groups survived AND not-covered mutants by (package,
-// function) — both are offense targets. The report.SurvivorsByFunction only
-// covers status=survived, so we re-bucket from r.Mutants here.
-func unkilledByFunction(results []mutation.Result) []mutation.FunctionSurvivors {
+// splitUnkilled groups survived and not-covered mutants by (package,
+// function), returning them as two parallel slices. The split mirrors the
+// MUTGEN distinction (arXiv:2506.02954) — covered-but-survived needs an
+// assertion-strength fix; uncovered needs a new test to reach the line.
+func splitUnkilled(results []mutation.Result) (survived, notCovered []mutation.FunctionSurvivors) {
+	return groupByFunction(results, mutation.StatusSurvived),
+		groupByFunction(results, mutation.StatusNotCovered)
+}
+
+// groupByFunction buckets results matching `want` by (package, function) and
+// returns the groups in package-then-function order, each with mutations
+// sorted by line and column.
+func groupByFunction(results []mutation.Result, want mutation.Status) []mutation.FunctionSurvivors {
 	type key struct{ pkg, fn string }
 	groups := make(map[key]*mutation.FunctionSurvivors)
 	for _, r := range results {
-		if r.Status != mutation.StatusSurvived && r.Status != mutation.StatusNotCovered {
+		if r.Status != want {
 			continue
 		}
 		fn := r.Mutation.Function
@@ -345,26 +377,38 @@ func unkilledByFunction(results []mutation.Result) []mutation.FunctionSurvivors 
 	return out
 }
 
-func writeLLMSurvivors(b *strings.Builder, r Report, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
-	b.WriteString("## Surviving mutants (offense targets)\n\n")
+// operatorHints maps each registered operator ID to a one-line test-strategy
+// hint. Emitted on first occurrence within a section so the LLM gets a nudge
+// toward the inputs/assertions that distinguish original from mutant for that
+// operator class.
+var operatorHints = map[string]string{
+	"int_arith":           "Use inputs where +/-/*/% differ; avoid zero/identity values that mask the operator.",
+	"int_cmp_boundary":    "Test exactly at the boundary (n and n±1) so `<` vs `<=` flips the result.",
+	"int_cmp_negate":      "Assert on both truthy and falsy inputs so a negated comparison can't pass both.",
+	"int_bitwise":         "Choose bit patterns where `&` and `|` differ (e.g. 0b10 and 0b01) and assert the exact value.",
+	"int_literal":         "Assert the exact numeric result so swapping the literal to 0/1/±1 fails.",
+	"bool_logic":          "Pick inputs where `&&` and `||` diverge (one true, one false) and assert the boolean result.",
+	"bool_not":            "Assert the boolean direction explicitly — removing `!` should flip the test.",
+	"bool_literal":        "Assert the exact boolean value (not just truthiness) so `true↔false` is caught.",
+	"err_return_nil":      "Drive the function down the error branch and assert `err != nil` (and ideally its kind).",
+	"return_zero":         "Assert the returned value, not just `err == nil`; a zero return must fail the test.",
+	"call_delete":         "Assert the observable side effect of the call (state change, panic, output), not just that the caller returned.",
+	"string_literal":      "Assert the exact string value, not just non-empty or length.",
+	"slice_index":         "Use distinct values at adjacent indices and assert the exact element, not just presence.",
+	"slice_range":         "Test inputs where shifting the slice bounds by one would change the result.",
+	"inc_dec":             "Assert the post-loop counter / iteration count so `++↔--` diverges visibly.",
+	"int_compound_assign": "Pick operands where the compound op's direction matters and assert the exact accumulator value.",
+	"struct_field_zero":   "Assert the populated field value, not just that the struct is non-nil.",
+}
 
-	groups := unkilledByFunction(r.Mutants)
-	if len(groups) == 0 {
-		b.WriteString("_None — every mutant was killed._\n\n")
-		return
-	}
-
-	// Index results by mutation ID so each group entry can look up its
-	// CoveringTests/KillingTests without re-scanning r.Mutants.
-	byID := make(map[int]mutation.Result, len(r.Mutants))
-	for _, res := range r.Mutants {
-		byID[res.Mutation.ID] = res
-	}
-
+// writeLLMUnkilledGroups renders one offense section (live or uncovered),
+// emitting the per-function snippet, the per-mutant line, and an inline
+// operator-hint legend that fires once per operator on first occurrence.
+func writeLLMUnkilledGroups(b *strings.Builder, groups []mutation.FunctionSurvivors, byID map[int]mutation.Result, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
+	seenHints := make(map[string]bool)
 	for _, g := range groups {
-		fmt.Fprintf(b, "### %s — %s  (%d unkilled)\n\n", g.Package, g.Function, len(g.Mutations))
+		fmt.Fprintf(b, "### %s — %s  (%d)\n\n", g.Package, g.Function, len(g.Mutations))
 
-		// Source snippet, if we have a range for this function.
 		if pkgRanges, ok := funcRanges[g.Package]; ok {
 			if fr, ok := pkgRanges[g.Function]; ok {
 				writeLLMSnippet(b, fr, readFile)
@@ -373,13 +417,75 @@ func writeLLMSurvivors(b *strings.Builder, r Report, funcRanges map[string]map[s
 
 		for _, m := range g.Mutations {
 			res := byID[m.ID]
-			status := string(res.Status)
-			fmt.Fprintf(b, "- **#%d** at %s:%d:%d — `%s` `%s` → `%s` _(%s)_\n",
-				m.ID, m.File, m.Line, m.Column, m.OperatorName, m.Original, m.Mutant, status)
+			fmt.Fprintf(b, "- **#%d** at %s:%d:%d — `%s` `%s` → `%s`\n",
+				m.ID, m.File, m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
+			if hint, ok := operatorHints[m.OperatorName]; ok && !seenHints[m.OperatorName] {
+				fmt.Fprintf(b, "  - _Hint (`%s`): %s_\n", m.OperatorName, hint)
+				seenHints[m.OperatorName] = true
+			}
 			writeLLMCoveringTests(b, res)
 		}
 		b.WriteString("\n")
 	}
+}
+
+func writeLLMLiveSection(b *strings.Builder, r Report, groups []mutation.FunctionSurvivors, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
+	b.WriteString("## Live mutants (covered but not killed)\n\n")
+	b.WriteString("_Existing tests reach the mutated line but don't observe the change. Sharpen an assertion so the original and mutant diverge._\n\n")
+	if len(groups) == 0 {
+		b.WriteString("_None — every covered mutant was killed._\n\n")
+		return
+	}
+	byID := make(map[int]mutation.Result, len(r.Mutants))
+	for _, res := range r.Mutants {
+		byID[res.Mutation.ID] = res
+	}
+	writeLLMUnkilledGroups(b, groups, byID, funcRanges, readFile)
+}
+
+func writeLLMUncoveredSection(b *strings.Builder, r Report, groups []mutation.FunctionSurvivors, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
+	b.WriteString("## Uncovered mutants (no test reaches this line)\n\n")
+	b.WriteString("_No test executes this code. Add a new test that drives the path; almost any meaningful assertion on the result will catch the mutation._\n\n")
+	if len(groups) == 0 {
+		b.WriteString("_None — every mutation site is reached by at least one test._\n\n")
+		return
+	}
+	byID := make(map[int]mutation.Result, len(r.Mutants))
+	for _, res := range r.Mutants {
+		byID[res.Mutation.ID] = res
+	}
+	writeLLMUnkilledGroups(b, groups, byID, funcRanges, readFile)
+}
+
+// writeLLMNextIteration renders the closing instruction pointing at the
+// `--mutant=<ids>` re-verification loop. Skipped when there's nothing to
+// iterate on, so a clean-suite artifact ends on the inventory.
+func writeLLMNextIteration(b *strings.Builder, survived, notCovered []mutation.FunctionSurvivors) {
+	var ids []int
+	for _, g := range survived {
+		for _, m := range g.Mutations {
+			ids = append(ids, m.ID)
+		}
+	}
+	for _, g := range notCovered {
+		for _, m := range g.Mutations {
+			ids = append(ids, m.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	sort.Ints(ids)
+	idStrs := make([]string, len(ids))
+	for i, id := range ids {
+		idStrs[i] = strconv.Itoa(id)
+	}
+	b.WriteString("## Next iteration\n\n")
+	b.WriteString("After editing tests, re-run only the targeted mutants to verify each is now killed — this skips the compile + baseline + per-test coverage passes for unaffected mutants and is the iterative loop validated in arXiv:2506.02954:\n\n")
+	b.WriteString("```\n")
+	fmt.Fprintf(b, "kanly --mutant=%s <pkg>\n", strings.Join(idStrs, ","))
+	b.WriteString("```\n\n")
+	b.WriteString("Any survivor still listed after the re-run is a real assertion gap — feed it back through this artifact and iterate.\n\n")
 }
 
 func writeLLMSnippet(b *strings.Builder, fr mutation.FuncRange, readFile func(string) ([]byte, error)) {
