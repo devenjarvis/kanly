@@ -75,6 +75,27 @@ func enclosingFunc(spans []funcSpan, pos token.Pos) string {
 	return ""
 }
 
+// FuncRanges returns the source range of every top-level FuncDecl in pkg,
+// keyed by the canonical funcDeclName form ("Foo", "(T).Bar", "(*T).Bar").
+// Used by the LLM renderer to slice the enclosing function's source out of
+// disk so the artifact carries enough context for an LLM to reason about
+// the surviving mutant.
+func FuncRanges(pkg *source.Package) map[string]mutation.FuncRange {
+	out := make(map[string]mutation.FuncRange)
+	for _, file := range pkg.Files {
+		for _, s := range collectFuncSpans(file) {
+			start := pkg.Fset.Position(s.start)
+			end := pkg.Fset.Position(s.end)
+			out[s.name] = mutation.FuncRange{
+				File:      start.Filename,
+				StartLine: start.Line,
+				EndLine:   end.Line,
+			}
+		}
+	}
+	return out
+}
+
 // FuncNames returns the canonical names (as produced by funcDeclName) of every
 // top-level FuncDecl in pkg, sorted. Used by CLI callers to validate
 // user-supplied function selectors and suggest near misses.

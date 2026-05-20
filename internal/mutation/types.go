@@ -27,10 +27,19 @@ type Mutation struct {
 }
 
 type Result struct {
-	Mutation     Mutation      `json:"mutation"`
-	Status       Status        `json:"status"`
-	KillingTests []string      `json:"killing_tests"`
-	Duration     time.Duration `json:"duration_ns"`
+	Mutation      Mutation      `json:"mutation"`
+	Status        Status        `json:"status"`
+	KillingTests  []string      `json:"killing_tests"`
+	CoveringTests []string      `json:"covering_tests"`
+	Duration      time.Duration `json:"duration_ns"`
+}
+
+// FuncRange identifies a top-level function's source range, used by the LLM
+// renderer to slice out the enclosing function for each surviving mutant.
+type FuncRange struct {
+	File      string
+	StartLine int
+	EndLine   int
 }
 
 // TestStats summarises a single test's mutation-killing behaviour within a package.

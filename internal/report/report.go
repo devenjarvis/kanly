@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -245,6 +246,247 @@ func qualifyTestName(pkg, name string) string {
 		return name
 	}
 	return pkg + "." + name
+}
+
+// LLMSource carries the extra context the LLM-ready Markdown renderer needs
+// beyond the bare Report: per-package function source ranges (so the renderer
+// can slice the enclosing function out of each file) and an injectable
+// ReadFile so tests can supply fake source content. When ReadFile is nil the
+// renderer falls back to os.ReadFile.
+type LLMSource struct {
+	FuncRanges map[string]map[string]mutation.FuncRange
+	ReadFile   func(string) ([]byte, error)
+}
+
+// llmWarnSize triggers a stderr-style warning when the rendered artifact
+// exceeds this many bytes; an LLM prompt much larger than this is usually a
+// sign the user should add a --diff / --tests / pkg:func scope.
+const llmWarnSize = 200 * 1024
+
+// WriteLLM renders the report as a Markdown artifact tailored for feeding to
+// an LLM that will write new tests for survivors and consolidate redundant
+// ones. The layout puts the highest-leverage data (surviving mutants with
+// source context + the tests that almost killed them) above the
+// consolidation and inventory sections.
+func WriteLLM(w io.Writer, r Report, src LLMSource) error {
+	readFile := src.ReadFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+
+	var b strings.Builder
+	b.WriteString("# Kanly mutation report\n\n")
+	if r.Scope != "" {
+		fmt.Fprintf(&b, "**Scope:** `%s`\n\n", r.Scope)
+	}
+
+	writeLLMSummary(&b, r.Summary)
+	writeLLMSurvivors(&b, r, src.FuncRanges, readFile)
+	writeLLMRedundant(&b, r.RedundantTestGroups)
+	writeLLMZeroKill(&b, r.ZeroKillTests)
+	writeLLMTestInventory(&b, r.Tests)
+
+	out := b.String()
+	if _, err := io.WriteString(w, out); err != nil {
+		return err
+	}
+	if len(out) > llmWarnSize {
+		fmt.Fprintf(os.Stderr, "kanly: llm output is %d bytes; consider scoping with --diff, --tests, or pkg:func\n", len(out))
+	}
+	return nil
+}
+
+func writeLLMSummary(b *strings.Builder, s Summary) {
+	b.WriteString("## Summary\n\n")
+	b.WriteString("| Total | Killed | Survived | Timeout | NotCovered | NotViable | Score |\n")
+	b.WriteString("|-------|--------|----------|---------|------------|-----------|-------|\n")
+	fmt.Fprintf(b, "| %d | %d | %d | %d | %d | %d | %.1f%% |\n\n",
+		s.Total, s.Killed, s.Survived, s.Timeout, s.NotCovered, s.NotViable, s.Score*100)
+}
+
+// unkilledByFunction groups survived AND not-covered mutants by (package,
+// function) — both are offense targets. The report.SurvivorsByFunction only
+// covers status=survived, so we re-bucket from r.Mutants here.
+func unkilledByFunction(results []mutation.Result) []mutation.FunctionSurvivors {
+	type key struct{ pkg, fn string }
+	groups := make(map[key]*mutation.FunctionSurvivors)
+	for _, r := range results {
+		if r.Status != mutation.StatusSurvived && r.Status != mutation.StatusNotCovered {
+			continue
+		}
+		fn := r.Mutation.Function
+		if fn == "" {
+			fn = fileScopeFunc
+		}
+		k := key{r.Mutation.Package, fn}
+		g, ok := groups[k]
+		if !ok {
+			g = &mutation.FunctionSurvivors{Package: r.Mutation.Package, Function: fn}
+			groups[k] = g
+		}
+		g.Mutations = append(g.Mutations, r.Mutation)
+	}
+	out := make([]mutation.FunctionSurvivors, 0, len(groups))
+	for _, g := range groups {
+		sort.Slice(g.Mutations, func(i, j int) bool {
+			if g.Mutations[i].Line != g.Mutations[j].Line {
+				return g.Mutations[i].Line < g.Mutations[j].Line
+			}
+			return g.Mutations[i].Column < g.Mutations[j].Column
+		})
+		out = append(out, *g)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Package != out[j].Package {
+			return out[i].Package < out[j].Package
+		}
+		return out[i].Function < out[j].Function
+	})
+	return out
+}
+
+func writeLLMSurvivors(b *strings.Builder, r Report, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
+	b.WriteString("## Surviving mutants (offense targets)\n\n")
+
+	groups := unkilledByFunction(r.Mutants)
+	if len(groups) == 0 {
+		b.WriteString("_None — every mutant was killed._\n\n")
+		return
+	}
+
+	// Index results by mutation ID so each group entry can look up its
+	// CoveringTests/KillingTests without re-scanning r.Mutants.
+	byID := make(map[int]mutation.Result, len(r.Mutants))
+	for _, res := range r.Mutants {
+		byID[res.Mutation.ID] = res
+	}
+
+	for _, g := range groups {
+		fmt.Fprintf(b, "### %s — %s  (%d unkilled)\n\n", g.Package, g.Function, len(g.Mutations))
+
+		// Source snippet, if we have a range for this function.
+		if pkgRanges, ok := funcRanges[g.Package]; ok {
+			if fr, ok := pkgRanges[g.Function]; ok {
+				writeLLMSnippet(b, fr, readFile)
+			}
+		}
+
+		for _, m := range g.Mutations {
+			res := byID[m.ID]
+			status := string(res.Status)
+			fmt.Fprintf(b, "- **#%d** at %s:%d:%d — `%s` `%s` → `%s` _(%s)_\n",
+				m.ID, m.File, m.Line, m.Column, m.OperatorName, m.Original, m.Mutant, status)
+			writeLLMCoveringTests(b, res)
+		}
+		b.WriteString("\n")
+	}
+}
+
+func writeLLMSnippet(b *strings.Builder, fr mutation.FuncRange, readFile func(string) ([]byte, error)) {
+	data, err := readFile(fr.File)
+	if err != nil {
+		fmt.Fprintf(b, "_Source unavailable for %s: %v_\n\n", fr.File, err)
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	if fr.StartLine < 1 || fr.StartLine > len(lines) {
+		return
+	}
+	end := fr.EndLine
+	if end > len(lines) {
+		end = len(lines)
+	}
+	fmt.Fprintf(b, "**Source: %s:%d-%d**\n\n", fr.File, fr.StartLine, end)
+	b.WriteString("```go\n")
+	width := len(strconv.Itoa(end))
+	for i := fr.StartLine; i <= end; i++ {
+		fmt.Fprintf(b, "%*d  %s\n", width, i, lines[i-1])
+	}
+	b.WriteString("```\n\n")
+}
+
+func writeLLMCoveringTests(b *strings.Builder, res mutation.Result) {
+	if res.Status == mutation.StatusNotCovered || len(res.CoveringTests) == 0 {
+		b.WriteString("  - Covering tests that did NOT kill: _none — mutation site is not exercised by any test_\n")
+		return
+	}
+	killers := make(map[string]struct{}, len(res.KillingTests))
+	for _, t := range res.KillingTests {
+		killers[t] = struct{}{}
+	}
+	var coveringNonKillers []string
+	for _, t := range res.CoveringTests {
+		if _, killed := killers[t]; killed {
+			continue
+		}
+		coveringNonKillers = append(coveringNonKillers, t)
+	}
+	if len(coveringNonKillers) == 0 {
+		b.WriteString("  - Covering tests that did NOT kill: _none_\n")
+		return
+	}
+	sort.Strings(coveringNonKillers)
+	qualified := make([]string, len(coveringNonKillers))
+	for i, name := range coveringNonKillers {
+		qualified[i] = qualifyTestName(res.Mutation.Package, name)
+	}
+	fmt.Fprintf(b, "  - Covering tests that did NOT kill: %s\n", strings.Join(backtickAll(qualified), ", "))
+}
+
+func backtickAll(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = "`" + s + "`"
+	}
+	return out
+}
+
+func writeLLMRedundant(b *strings.Builder, groups [][]string) {
+	b.WriteString("## Redundant test groups (consolidation targets)\n\n")
+	if len(groups) == 0 {
+		b.WriteString("_None — no two tests share an identical kill set._\n\n")
+		return
+	}
+	b.WriteString("Each group's tests kill exactly the same mutants; keep one and delete the rest unless they assert different behaviour.\n\n")
+	for _, g := range groups {
+		fmt.Fprintf(b, "- %s\n", strings.Join(backtickAll(g), ", "))
+	}
+	b.WriteString("\n")
+}
+
+func writeLLMZeroKill(b *strings.Builder, tests []string) {
+	b.WriteString("## Zero-kill tests (deletion candidates)\n\n")
+	if len(tests) == 0 {
+		b.WriteString("_None — every test killed at least one mutant._\n\n")
+		return
+	}
+	b.WriteString("These tests killed no mutants within the current scope. Consider deleting or rewriting them to target a surviving mutant above.\n\n")
+	for _, t := range tests {
+		fmt.Fprintf(b, "- `%s`\n", t)
+	}
+	b.WriteString("\n")
+}
+
+func writeLLMTestInventory(b *strings.Builder, tests []mutation.TestStats) {
+	b.WriteString("## Test inventory\n\n")
+	if len(tests) == 0 {
+		b.WriteString("_No tests in scope._\n\n")
+		return
+	}
+	b.WriteString("| Test | KillCount | Killed mutants |\n")
+	b.WriteString("|------|-----------|----------------|\n")
+	for _, ts := range tests {
+		killed := "_none_"
+		if len(ts.KilledMutants) > 0 {
+			ids := make([]string, len(ts.KilledMutants))
+			for i, id := range ts.KilledMutants {
+				ids[i] = "#" + strconv.Itoa(id)
+			}
+			killed = strings.Join(ids, ", ")
+		}
+		fmt.Fprintf(b, "| `%s` | %d | %s |\n", qualifyTestName(ts.Package, ts.Name), ts.KillCount, killed)
+	}
+	b.WriteString("\n")
 }
 
 func WriteJSON(w io.Writer, r Report) error {

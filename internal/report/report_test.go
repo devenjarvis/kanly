@@ -224,7 +224,7 @@ func TestWriteJSONStableFieldNames(t *testing.T) {
 	actual := buf.String()
 	for _, field := range []string{
 		"mutation_id", "package", "file", "line", "column", "function", "operator", "original", "mutant",
-		"status", "killing_tests",
+		"status", "killing_tests", "covering_tests",
 		"tests", "kill_count", "killed_mutants", "zero_kill_tests", "redundant_test_groups", "survivors_by_function",
 	} {
 		if !strings.Contains(actual, `"`+field+`"`) {
@@ -244,6 +244,134 @@ func TestWriteJSONStableFieldNames(t *testing.T) {
 	wantJSON, _ := json.Marshal(want)
 	if string(gotJSON) != string(wantJSON) {
 		t.Errorf("output does not match golden\ngot:  %s\nwant: %s", gotJSON, wantJSON)
+	}
+}
+
+func makeLLMResults() []mutation.Result {
+	// A killed mutant, a survivor with one covering-but-not-killing test, and
+	// a not-covered mutant — exercises every branch of the LLM renderer.
+	return []mutation.Result{
+		{
+			Mutation:      mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, Function: "Add", OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:        mutation.StatusKilled,
+			KillingTests:  []string{"TestAdd"},
+			CoveringTests: []string{"TestAdd", "TestAddSmoke"},
+		},
+		{
+			Mutation:      mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 14, Function: "Add", OperatorName: "int_literal", Original: "1", Mutant: "0"},
+			Status:        mutation.StatusSurvived,
+			CoveringTests: []string{"TestAdd", "TestAddSmoke"},
+		},
+		{
+			Mutation: mutation.Mutation{ID: 3, Package: "example.com/pkg/bar", File: "bar.go", Line: 3, Column: 15, Function: "Mul", OperatorName: "int_arith", Original: "*", Mutant: "/"},
+			Status:   mutation.StatusNotCovered,
+		},
+	}
+}
+
+func TestWriteLLMGolden(t *testing.T) {
+	results := makeLLMResults()
+	inventory := map[string][]string{
+		"example.com/pkg/foo": {"TestAdd", "TestAddSmoke"},
+		"example.com/pkg/bar": {"TestMul"},
+	}
+	r := report.Build(results, inventory)
+	r.Scope = "./..."
+
+	// Fake source content keyed by file path, returned by an injectable
+	// ReadFile so the golden is reproducible without a real filesystem.
+	fakeFiles := map[string]string{
+		"foo.go": "package foo\n\nfunc Add(a, b int) int {\n\t// no-op comment\n\treturn a + b + 1\n}\n",
+		"bar.go": "package bar\n\nfunc Mul(a, b int) int { return a * b }\n",
+	}
+	src := report.LLMSource{
+		FuncRanges: map[string]map[string]mutation.FuncRange{
+			"example.com/pkg/foo": {
+				"Add": {File: "foo.go", StartLine: 3, EndLine: 6},
+			},
+			"example.com/pkg/bar": {
+				"Mul": {File: "bar.go", StartLine: 3, EndLine: 3},
+			},
+		},
+		ReadFile: func(path string) ([]byte, error) {
+			content, ok := fakeFiles[path]
+			if !ok {
+				return nil, os.ErrNotExist
+			}
+			return []byte(content), nil
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := report.WriteLLM(&buf, r, src); err != nil {
+		t.Fatal(err)
+	}
+
+	goldenPath := relDir(t, "testdata/golden.md")
+	if os.Getenv("GOLDEN_UPDATE") != "" {
+		if err := os.WriteFile(goldenPath, buf.Bytes(), 0644); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("updated golden file")
+		return
+	}
+
+	golden, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden file: %v (run with GOLDEN_UPDATE=1 to create)", err)
+	}
+	if buf.String() != string(golden) {
+		t.Errorf("output does not match golden\n--- got ---\n%s\n--- want ---\n%s", buf.String(), string(golden))
+	}
+}
+
+func TestWriteLLMEmpty(t *testing.T) {
+	// Empty report should still render every section so the LLM sees the
+	// full schema, even when there's nothing to act on.
+	r := report.Build(nil, nil)
+	var buf bytes.Buffer
+	if err := report.WriteLLM(&buf, r, report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, section := range []string{
+		"## Summary",
+		"## Surviving mutants",
+		"## Redundant test groups",
+		"## Zero-kill tests",
+		"## Test inventory",
+	} {
+		if !strings.Contains(out, section) {
+			t.Errorf("missing section %q in empty report:\n%s", section, out)
+		}
+	}
+	if !strings.Contains(out, "_None — every mutant was killed._") {
+		t.Errorf("empty-survivors placeholder missing:\n%s", out)
+	}
+}
+
+func TestWriteLLMMissingFuncRange(t *testing.T) {
+	// When FuncRanges has no entry for a survivor's function, the renderer
+	// should still emit the mutant entry — just without a snippet — instead
+	// of panicking or skipping.
+	results := []mutation.Result{
+		{
+			Mutation:      mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 5, Column: 1, Function: "Mystery", OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:        mutation.StatusSurvived,
+			CoveringTests: []string{"TestX"},
+		},
+	}
+	r := report.Build(results, map[string][]string{"p": {"TestX"}})
+	var buf bytes.Buffer
+	if err := report.WriteLLM(&buf, r, report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "**#1**") {
+		t.Errorf("mutant entry missing:\n%s", out)
+	}
+	if strings.Contains(out, "```go") {
+		t.Errorf("snippet should not appear when no FuncRange is provided:\n%s", out)
 	}
 }
 

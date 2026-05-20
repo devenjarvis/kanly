@@ -56,15 +56,17 @@ type runConfig struct {
 	jobs       int          // worker pool size for per-test coverage and the mutant loop; >= 1
 }
 
-func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) ([]mutation.Result, []string, error) {
+func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) ([]mutation.Result, []string, map[string]mutation.FuncRange, error) {
 	rew, err := schema.Rewrite(pkg, ops, cfg.filter)
 	if err != nil {
-		return nil, nil, fmt.Errorf("schema rewrite: %w", err)
+		return nil, nil, nil, fmt.Errorf("schema rewrite: %w", err)
 	}
 
 	if len(rew.Mutations) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
+
+	funcRanges := schema.FuncRanges(pkg)
 
 	// Narrow by --mutant IDs after schema assignment. The dispatcher keeps all
 	// cases; un-listed IDs simply never get activated.
@@ -78,19 +80,19 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		}
 		mutations = filtered
 		if len(mutations) == 0 {
-			return nil, nil, nil
+			return nil, nil, nil, nil
 		}
 	}
 
 	overlayPath, cleanOverlay, err := runner.BuildOverlay(rew, pkg.Dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build overlay: %w", err)
+		return nil, nil, nil, fmt.Errorf("build overlay: %w", err)
 	}
 	defer cleanOverlay()
 
 	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("compile test binary: %w", err)
+		return nil, nil, nil, fmt.Errorf("compile test binary: %w", err)
 	}
 	defer cleanBin()
 
@@ -98,19 +100,19 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// for per-test coverage collection. See CompileCoverageBinary for why.
 	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("compile coverage binary: %w", err)
+		return nil, nil, nil, fmt.Errorf("compile coverage binary: %w", err)
 	}
 	defer cleanCovBin()
 
 	inventory, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, cfg.timeout, cfg.testsRegex)
 	if err != nil {
-		return nil, nil, fmt.Errorf("baseline failed: %w", err)
+		return nil, nil, nil, fmt.Errorf("baseline failed: %w", err)
 	}
 
 	// Collect per-test coverage once; pays off across all mutants.
 	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.timeout, cfg.jobs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("collect coverage: %w", err)
+		return nil, nil, nil, fmt.Errorf("collect coverage: %w", err)
 	}
 
 	// Per-mutant covering tests are read out up front so the parallel loop
@@ -149,16 +151,17 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 				return fmt.Errorf("run mutant %d: %w", mut.ID, err)
 			}
 			results[i] = mutation.Result{
-				Mutation:     mut,
-				Status:       status,
-				KillingTests: killingTests,
-				Duration:     dur,
+				Mutation:      mut,
+				Status:        status,
+				KillingTests:  killingTests,
+				CoveringTests: tests,
+				Duration:      dur,
 			}
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// When a scope is active (filter or --mutant), drop tests from the reported
@@ -175,16 +178,16 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		inventory = narrowed
 	}
 
-	return results, inventory, nil
+	return results, inventory, funcRanges, nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--version] [--format=text|json] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly [--version] [--format=text|json|llm] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	versionFlag := fs.Bool("version", false, "print version and exit")
-	formatFlag := fs.String("format", "text", "output format: text|json")
+	formatFlag := fs.String("format", "text", "output format: text|json|llm")
 	timeoutFlag := fs.Duration("timeout", 30*time.Second, "per-mutant test timeout")
 	diffFlag := fs.Bool("diff", false, "only mutate lines changed since --diff-base")
 	diffBaseFlag := fs.String("diff-base", "HEAD", "git ref to diff against when --diff is set")
@@ -242,14 +245,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		diffPred = d.Includes
 		if len(d.Files()) == 0 {
-			return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil))
+			return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil), report.LLMSource{})
 		}
 		if len(specs) == 0 {
 			for _, p := range d.Patterns(cwd) {
 				specs = append(specs, selector.Spec{Pattern: p})
 			}
 			if len(specs) == 0 {
-				return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil))
+				return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil), report.LLMSource{})
 			}
 		}
 	} else if len(specs) == 0 {
@@ -266,6 +269,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	var allResults []mutation.Result
 	testInventory := make(map[string][]string)
+	funcRangesByPkg := make(map[string]map[string]mutation.FuncRange)
 
 	for _, spec := range specs {
 		pkgs, err := source.LoadAll("", spec.Pattern)
@@ -304,7 +308,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				jobs:       *jobsFlag,
 			}
 
-			results, inventory, err := runPackage(ctx, pkg, ops, cfg, stderr)
+			results, inventory, funcRanges, err := runPackage(ctx, pkg, ops, cfg, stderr)
 			if err != nil {
 				fmt.Fprintf(stderr, "error in %s: %v\n", pkg.ImportPath, err)
 				return 1
@@ -315,12 +319,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 			allResults = append(allResults, results...)
 			testInventory[pkg.ImportPath] = inventory
+			funcRangesByPkg[pkg.ImportPath] = funcRanges
 		}
 	}
 
 	rep := report.Build(allResults, testInventory)
 	rep.Scope = describeScope(specs, *diffFlag, *diffBaseFlag, *testsFlag, *mutantFlag)
-	return writeReport(stdout, stderr, *formatFlag, rep)
+	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg}
+	return writeReport(stdout, stderr, *formatFlag, rep, llmSrc)
 }
 
 // composeFilter combines an optional diff (file, line) predicate with an
@@ -477,11 +483,16 @@ func describeScope(specs []selector.Spec, diff bool, diffBase, tests, mutants st
 	return strings.Join(parts, " ")
 }
 
-func writeReport(stdout, stderr io.Writer, format string, r report.Report) int {
+func writeReport(stdout, stderr io.Writer, format string, r report.Report, llmSrc report.LLMSource) int {
 	switch format {
 	case "json":
 		if err := report.WriteJSON(stdout, r); err != nil {
 			fmt.Fprintf(stderr, "write JSON: %v\n", err)
+			return 1
+		}
+	case "llm":
+		if err := report.WriteLLM(stdout, r, llmSrc); err != nil {
+			fmt.Fprintf(stderr, "write llm: %v\n", err)
 			return 1
 		}
 	default:
