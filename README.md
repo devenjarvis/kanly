@@ -148,10 +148,15 @@ Every pull request on this repo runs Kanly against `./internal/report ./internal
 
 **Fork PRs:** `GITHUB_TOKEN` on fork pull requests does not receive `pull-requests: write` permission, so the comment step will silently no-op for contributions from forks.
 
+## LLM-driven test repair
+
+`--format=llm` emits a Markdown artifact designed to feed into an LLM that will write new tests for survivors and tighten weak assertions. Its layout is informed by Wang, Xu, Briand & Liu (2025): live (covered-but-survived) mutants and uncovered mutants get separate sections with different prompt-side guidance — sharpen an assertion vs. add a test that reaches the line — because they need different fixes. Each operator class drops in a one-line strategy hint on its first occurrence (boundary values for `int_cmp_boundary`, sign-changing inputs for `int_arith`, exact-string assertions for `string_literal`, and so on). The artifact closes with a `kanly --mutant=<ids>` command that re-runs only the survivor schema IDs — the iterative verify-after-edit loop validated in the same paper.
+
 ## References
 
 - DeMillo, R. A., Lipton, R. J., & Sayward, F. G. (1978). Hints on test data selection: Help for the practicing programmer. *IEEE Computer*, 11(4), 34–41.
 - Offutt, A. J., & Untch, R. H. (2001). Mutation 2000: Uniting the orthogonal. In *Mutation Testing for the New Century* (pp. 34–44). Springer.
 - Just, R., Jalali, D., Inozemtseva, L., Ernst, M. D., Holmes, R., & Fraser, G. (2014). Are mutants a valid substitute for real faults in software testing? In *Proceedings of FSE 2014* (pp. 654–665). ACM.
 - Coles, H., Laurent, T., Henard, C., Papadakis, M., & Ventresque, A. (2016). PIT: A practical mutation testing tool for Java. In *Proceedings of ISSTA 2016* (pp. 449–452). ACM.
+- Wang, G., Xu, Q., Briand, L., & Liu, K. (2025). Mutation-Guided Unit Test Generation with a Large Language Model. *arXiv preprint* [arXiv:2506.02954](https://arxiv.org/abs/2506.02954). Basis for the `--format=llm` artifact structure: live-vs-uncovered split, operator-class hints, and the `--mutant=<ids>` iterate-after-edit loop.
 - PIT mutator reference: https://pitest.org/quickstart/mutators/

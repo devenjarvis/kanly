@@ -335,8 +335,10 @@ func TestWriteLLMEmpty(t *testing.T) {
 	}
 	out := buf.String()
 	for _, section := range []string{
+		"## Task",
 		"## Summary",
-		"## Surviving mutants",
+		"## Live mutants",
+		"## Uncovered mutants",
 		"## Redundant test groups",
 		"## Zero-kill tests",
 		"## Test inventory",
@@ -345,8 +347,16 @@ func TestWriteLLMEmpty(t *testing.T) {
 			t.Errorf("missing section %q in empty report:\n%s", section, out)
 		}
 	}
-	if !strings.Contains(out, "_None — every mutant was killed._") {
-		t.Errorf("empty-survivors placeholder missing:\n%s", out)
+	if !strings.Contains(out, "_None — every covered mutant was killed._") {
+		t.Errorf("empty-live placeholder missing:\n%s", out)
+	}
+	if !strings.Contains(out, "_None — every mutation site is reached by at least one test._") {
+		t.Errorf("empty-uncovered placeholder missing:\n%s", out)
+	}
+	// With no survivors there is nothing to iterate on, so the closing
+	// section must NOT appear.
+	if strings.Contains(out, "## Next iteration") {
+		t.Errorf("empty report should not emit Next iteration section:\n%s", out)
 	}
 }
 
