@@ -32,17 +32,25 @@ type PackageSummary struct {
 }
 
 type Report struct {
-	Scope               string                       `json:"scope,omitempty"`
-	Summary             Summary                      `json:"summary"`
-	Packages            []PackageSummary             `json:"packages"`
-	Tests               []mutation.TestStats         `json:"tests"`
-	ZeroKillTests       []string                     `json:"zero_kill_tests"`
-	RedundantTestGroups [][]string                   `json:"redundant_test_groups"`
-	SurvivorsByFunction []mutation.FunctionSurvivors `json:"survivors_by_function"`
-	Mutants             []mutation.Result            `json:"mutants"`
+	Scope                   string                       `json:"scope,omitempty"`
+	Summary                 Summary                      `json:"summary"`
+	Packages                []PackageSummary             `json:"packages"`
+	Tests                   []mutation.TestStats         `json:"tests"`
+	ZeroKillTests           []string                     `json:"zero_kill_tests"`
+	IncidentalCoverageTests []string                     `json:"incidental_coverage_tests,omitempty"`
+	RedundantTestGroups     [][]string                   `json:"redundant_test_groups"`
+	SurvivorsByFunction     []mutation.FunctionSurvivors `json:"survivors_by_function"`
+	Mutants                 []mutation.Result            `json:"mutants"`
 }
 
-func Build(results []mutation.Result, testInventory map[string][]string) Report {
+// Build assembles a Report from per-mutant Results plus the per-package test
+// inventory and the per-package incidental-coverage list (tests that the
+// caller filtered out of the per-mutant runs because their statement coverage
+// of a scoped line looked like setup traffic rather than an assertion). Pass
+// nil for incidental on full / non-scoped runs to keep the report shape
+// byte-identical to prior behavior — the field is `omitempty` and the LLM
+// renderer's incidental section is silent when empty.
+func Build(results []mutation.Result, testInventory map[string][]string, incidental map[string][]string) Report {
 	var s Summary
 	s.Total = len(results)
 	for _, r := range results {
@@ -108,14 +116,23 @@ func Build(results []mutation.Result, testInventory map[string][]string) Report 
 	tests, zeroKill, redundant := buildTestAggregations(results, testInventory)
 	survivors := buildSurvivorsByFunction(results)
 
+	var incidentalFlat []string
+	for pkg, names := range incidental {
+		for _, n := range names {
+			incidentalFlat = append(incidentalFlat, qualifyTestName(pkg, n))
+		}
+	}
+	sort.Strings(incidentalFlat)
+
 	return Report{
-		Summary:             s,
-		Packages:            pkgSummaries,
-		Tests:               tests,
-		ZeroKillTests:       zeroKill,
-		RedundantTestGroups: redundant,
-		SurvivorsByFunction: survivors,
-		Mutants:             results,
+		Summary:                 s,
+		Packages:                pkgSummaries,
+		Tests:                   tests,
+		ZeroKillTests:           zeroKill,
+		IncidentalCoverageTests: incidentalFlat,
+		RedundantTestGroups:     redundant,
+		SurvivorsByFunction:     survivors,
+		Mutants:                 results,
 	}
 }
 
@@ -294,6 +311,7 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMUncoveredSection(&b, r, uncovered, src.FuncRanges, readFile)
 	writeLLMRedundant(&b, r.RedundantTestGroups)
 	writeLLMZeroKill(&b, r.ZeroKillTests)
+	writeLLMIncidental(&b, r.IncidentalCoverageTests)
 	writeLLMTestInventory(&b, r.Tests)
 	writeLLMNextIteration(&b, survivors, uncovered)
 
@@ -573,6 +591,24 @@ func writeLLMZeroKill(b *strings.Builder, tests []string) {
 	b.WriteString("\n")
 }
 
+// writeLLMIncidental renders the incidental-coverage section. Silent on empty
+// input so full / non-scoped runs render byte-identically to prior versions.
+// The wording emphasises that these tests still belong to the suite — kanly
+// only excluded them from this scoped run's per-mutant set because their
+// statement coverage of a scoped line looked like helper / setup traffic
+// rather than an assertion. They are NOT deletion candidates.
+func writeLLMIncidental(b *strings.Builder, tests []string) {
+	if len(tests) == 0 {
+		return
+	}
+	b.WriteString("## Incidental coverage (excluded from scope analysis)\n\n")
+	b.WriteString("These tests touched a scoped line via shared setup or a helper call but were not run against the targeted mutants — their single hit on the line, alongside another test hitting it harder, indicates the line is not what they're asserting on. They still run in the full suite; this section only documents the exclusion so they don't appear as zero-kill noise.\n\n")
+	for _, t := range tests {
+		fmt.Fprintf(b, "- `%s`\n", t)
+	}
+	b.WriteString("\n")
+}
+
 func writeLLMTestInventory(b *strings.Builder, tests []mutation.TestStats) {
 	b.WriteString("## Test inventory\n\n")
 	if len(tests) == 0 {
@@ -659,6 +695,17 @@ func WriteText(w io.Writer, r Report) error {
 			return err
 		}
 		for _, n := range r.ZeroKillTests {
+			if _, err := fmt.Fprintf(w, "  %s\n", n); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(r.IncidentalCoverageTests) > 0 {
+		if _, err := fmt.Fprintln(w, "\nIncidental coverage (excluded from kill analysis):"); err != nil {
+			return err
+		}
+		for _, n := range r.IncidentalCoverageTests {
 			if _, err := fmt.Fprintf(w, "  %s\n", n); err != nil {
 				return err
 			}
