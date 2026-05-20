@@ -94,6 +94,7 @@
       "killing_tests": [
         "TestAdd"
       ],
+      "covering_tests": null,
       "duration_ns": 0
     },
     {
@@ -112,6 +113,7 @@
       "killing_tests": [
         "TestSub"
       ],
+      "covering_tests": null,
       "duration_ns": 0
     },
     {
@@ -128,6 +130,7 @@
       },
       "status": "survived",
       "killing_tests": null,
+      "covering_tests": null,
       "duration_ns": 0
     }
   ]
