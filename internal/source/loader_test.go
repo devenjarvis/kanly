@@ -103,4 +103,17 @@ func TestLoadParsesPackageWithTypeInfo(t *testing.T) {
 	pkg.Fset.Iterate(func(f *token.File) bool {
 		return true
 	})
+
+	// Pkg field must be populated — operators use it for type lookups.
+	if pkg.Pkg == nil {
+		t.Error("Pkg is nil")
+	}
+}
+
+func TestLoadBrokenPackageReturnsError(t *testing.T) {
+	// A package with compile errors must return a non-nil error, not nil.
+	_, err := source.Load(relDir(t, "testdata/broken"))
+	if err == nil {
+		t.Fatal("expected error for broken package, got nil")
+	}
 }
