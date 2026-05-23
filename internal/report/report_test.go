@@ -550,3 +550,277 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+func TestBuildScoreExcludesNotViable(t *testing.T) {
+	// 3 total: 1 killed, 1 not-viable, 1 not-covered.
+	// denominator = 3 - 1 - 1 = 1; score = 1.0.
+	// If any `-` flips to `+` in the denominator expression the score would drop to ~0.33.
+	results := []mutation.Result{
+		{
+			Mutation:     mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestA"},
+		},
+		{
+			Mutation: mutation.Mutation{ID: 2, Package: "p", File: "p.go", Line: 2, OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Status:   mutation.StatusNotViable,
+		},
+		{
+			Mutation: mutation.Mutation{ID: 3, Package: "p", File: "p.go", Line: 3, OperatorName: "int_arith", Original: "*", Mutant: "/"},
+			Status:   mutation.StatusNotCovered,
+		},
+	}
+	inventory := map[string][]string{"p": {"TestA"}}
+	r := report.Build(results, inventory, nil)
+
+	if r.Summary.NotViable != 1 {
+		t.Errorf("NotViable: want 1, got %d", r.Summary.NotViable)
+	}
+	if r.Summary.NotCovered != 1 {
+		t.Errorf("NotCovered: want 1, got %d", r.Summary.NotCovered)
+	}
+	if r.Summary.Score != 1.0 {
+		t.Errorf("Score: want 1.0 (not-viable and not-covered excluded from denominator), got %v", r.Summary.Score)
+	}
+}
+
+func TestBuildScoreZeroDenominator(t *testing.T) {
+	// All mutations are not-covered: denominator = 1 - 1 - 0 = 0.
+	// Score must stay 0.0 (no divide-by-zero or NaN).
+	results := []mutation.Result{
+		{
+			Mutation: mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:   mutation.StatusNotCovered,
+		},
+	}
+	r := report.Build(results, nil, nil)
+	if r.Summary.Score != 0.0 {
+		t.Errorf("Score: want 0.0 when denominator is zero, got %v", r.Summary.Score)
+	}
+}
+
+func TestBuildPerPackageNotCoveredCount(t *testing.T) {
+	// Package "p" has 1 killed and 1 not-covered.
+	// Per-package NotCovered must be 1 and per-package score = 1/1 = 1.0.
+	results := []mutation.Result{
+		{
+			Mutation:     mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestA"},
+		},
+		{
+			Mutation: mutation.Mutation{ID: 2, Package: "p", File: "p.go", Line: 2, OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Status:   mutation.StatusNotCovered,
+		},
+	}
+	inventory := map[string][]string{"p": {"TestA"}}
+	r := report.Build(results, inventory, nil)
+
+	if len(r.Packages) != 1 {
+		t.Fatalf("Packages: want 1, got %d", len(r.Packages))
+	}
+	ps := r.Packages[0]
+	if ps.NotCovered != 1 {
+		t.Errorf("per-package NotCovered: want 1, got %d", ps.NotCovered)
+	}
+	if ps.Score != 1.0 {
+		t.Errorf("per-package Score: want 1.0, got %v", ps.Score)
+	}
+}
+
+func TestWriteJSONIndented(t *testing.T) {
+	// WriteJSON must use SetIndent so the output has 2-space-indented lines.
+	r := report.Build(makeResults(), makeInventory(), nil)
+	var buf bytes.Buffer
+	if err := report.WriteJSON(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "\n  ") {
+		t.Errorf("WriteJSON output is not indented with 2 spaces:\n%s", buf.String())
+	}
+}
+
+func TestBuildSurvivorsSortedByLine(t *testing.T) {
+	// Two survivors in the same function: line 10 added first, line 5 second.
+	// The output slice must be sorted by line ascending.
+	results := []mutation.Result{
+		{
+			Mutation: mutation.Mutation{ID: 2, Package: "p", File: "p.go", Line: 10, Column: 1, Function: "Foo", OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:   mutation.StatusSurvived,
+		},
+		{
+			Mutation: mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 5, Column: 1, Function: "Foo", OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Status:   mutation.StatusSurvived,
+		},
+	}
+	r := report.Build(results, nil, nil)
+
+	if len(r.SurvivorsByFunction) != 1 {
+		t.Fatalf("SurvivorsByFunction: want 1 group, got %d", len(r.SurvivorsByFunction))
+	}
+	muts := r.SurvivorsByFunction[0].Mutations
+	if len(muts) != 2 {
+		t.Fatalf("Mutations: want 2, got %d", len(muts))
+	}
+	if muts[0].Line != 5 || muts[1].Line != 10 {
+		t.Errorf("mutations not sorted by line: got %d, %d; want 5, 10", muts[0].Line, muts[1].Line)
+	}
+}
+
+func TestBuildSurvivorsSortedByFunction(t *testing.T) {
+	// Two survivors in the same package but different functions: Zap before Add in input.
+	// Output groups must be sorted by function name.
+	results := []mutation.Result{
+		{
+			Mutation: mutation.Mutation{ID: 2, Package: "p", File: "p.go", Line: 5, Column: 1, Function: "Zap", OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:   mutation.StatusSurvived,
+		},
+		{
+			Mutation: mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 10, Column: 1, Function: "Add", OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Status:   mutation.StatusSurvived,
+		},
+	}
+	r := report.Build(results, nil, nil)
+
+	if len(r.SurvivorsByFunction) != 2 {
+		t.Fatalf("SurvivorsByFunction: want 2 groups, got %d", len(r.SurvivorsByFunction))
+	}
+	if r.SurvivorsByFunction[0].Function != "Add" || r.SurvivorsByFunction[1].Function != "Zap" {
+		t.Errorf("groups not sorted by function: got %q, %q; want Add, Zap",
+			r.SurvivorsByFunction[0].Function, r.SurvivorsByFunction[1].Function)
+	}
+}
+
+func TestWriteTextTopKillersShowsBothKillers(t *testing.T) {
+	// Both TestAdd and TestSub each kill 1 mutant; both must appear in the
+	// top-killers section.  If the `len(topKillers) == 5` break fires too
+	// early (mutant: `!= 5`), only the first entry is emitted.
+	r := report.Build(makeResults(), makeInventory(), nil)
+	var buf bytes.Buffer
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "example.com/pkg/foo.TestSub (1)") {
+		t.Errorf("top killers section missing TestSub:\n%s", out)
+	}
+}
+
+func TestWriteTextNoTopKillersSection(t *testing.T) {
+	// When all tests have KillCount == 0, the section must be absent.
+	results := []mutation.Result{
+		{
+			Mutation: mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 5, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:   mutation.StatusSurvived,
+		},
+	}
+	inventory := map[string][]string{"p": {"TestA"}}
+	r := report.Build(results, inventory, nil)
+	var buf bytes.Buffer
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "Top tests by kill count:") {
+		t.Errorf("top-killers section must be absent when all tests have kill count 0:\n%s", buf.String())
+	}
+}
+
+func TestWriteTextNoZeroKillSection(t *testing.T) {
+	// When every inventory test kills at least one mutant, the zero-kill
+	// section must be absent.
+	results := []mutation.Result{
+		{
+			Mutation:     mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 5, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestA"},
+		},
+	}
+	inventory := map[string][]string{"p": {"TestA"}}
+	r := report.Build(results, inventory, nil)
+	var buf bytes.Buffer
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "Tests that killed nothing:") {
+		t.Errorf("zero-kill section must be absent when all tests kill at least one mutant:\n%s", buf.String())
+	}
+}
+
+func TestWriteTextNoRedundantSection(t *testing.T) {
+	// makeResults produces no redundant groups; the section must be absent.
+	r := report.Build(makeResults(), makeInventory(), nil)
+	var buf bytes.Buffer
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "Redundant test groups") {
+		t.Errorf("redundant section must be absent when no redundant groups exist:\n%s", buf.String())
+	}
+}
+
+func TestWriteTextTopKillersExactlyOne(t *testing.T) {
+	// Exactly 1 test kills a mutant: the section must still appear.
+	// If `len(topKillers) > 0` is mutated to `> 1`, the section would be absent.
+	results := []mutation.Result{
+		{
+			Mutation:     mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 5, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestA"},
+		},
+		{
+			Mutation: mutation.Mutation{ID: 2, Package: "p", File: "p.go", Line: 6, OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Status:   mutation.StatusSurvived,
+		},
+	}
+	inventory := map[string][]string{"p": {"TestA", "TestB"}}
+	r := report.Build(results, inventory, nil)
+	var buf bytes.Buffer
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "Top tests by kill count:") {
+		t.Errorf("top-killers section must appear when exactly one test kills a mutant:\n%s", buf.String())
+	}
+}
+
+func TestWriteTextRedundantSectionAppears(t *testing.T) {
+	// When exactly 1 redundant group exists, the section must appear.
+	// If `len(r.RedundantTestGroups) > 0` is mutated to `> 1`, the section
+	// would vanish for a report with a single group.
+	results := []mutation.Result{
+		{
+			Mutation:     mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestA", "TestB"},
+		},
+	}
+	inventory := map[string][]string{"p": {"TestA", "TestB"}}
+	r := report.Build(results, inventory, nil)
+	var buf bytes.Buffer
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "Redundant test groups") {
+		t.Errorf("redundant section must appear when tests share an identical kill set:\n%s", buf.String())
+	}
+}
+
+func TestQualifyTestNameEmptyPackage(t *testing.T) {
+	// qualifyTestName("", name) must return just name (no leading dot).
+	// Test indirectly: a zero-kill inventory test with empty package must appear
+	// in ZeroKillTests as the bare test name.
+	results := []mutation.Result{
+		{
+			Mutation: mutation.Mutation{ID: 1, Package: "", File: "f.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:   mutation.StatusSurvived,
+		},
+	}
+	inventory := map[string][]string{"": {"TestA"}}
+	r := report.Build(results, inventory, nil)
+	if len(r.ZeroKillTests) != 1 {
+		t.Fatalf("ZeroKillTests: want 1, got %d (%v)", len(r.ZeroKillTests), r.ZeroKillTests)
+	}
+	if r.ZeroKillTests[0] != "TestA" {
+		t.Errorf("ZeroKillTests[0]: want %q (no dot prefix), got %q", "TestA", r.ZeroKillTests[0])
+	}
+}
