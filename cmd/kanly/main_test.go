@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/devenjarvis/kanly/internal/selector"
 )
 
 func relDir(t *testing.T, sub string) string {
@@ -411,5 +414,160 @@ func TestRunMultiplePositionalArgs(t *testing.T) {
 		if m.Mutation.Package == "" {
 			t.Errorf("Mutants[%d].Mutation.Package is empty", i)
 		}
+	}
+}
+
+func TestLevenshtein(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"", "abc", 3},
+		{"abc", "", 3},
+		{"abc", "abc", 0},
+		{"a", "b", 1},
+		{"ab", "a", 1},
+		{"a", "ab", 1},
+		{"kitten", "sitting", 3},
+		{"abc", "xyz", 3},
+		{"ab", "ba", 2},
+		{"abc", "abd", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.a+"/"+tt.b, func(t *testing.T) {
+			if got := levenshtein(tt.a, tt.b); got != tt.want {
+				t.Errorf("levenshtein(%q, %q): want %d, got %d", tt.a, tt.b, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestMin3(t *testing.T) {
+	tests := []struct {
+		name    string
+		a, b, c int
+		want    int
+	}{
+		{"a smallest", 1, 2, 3, 1},
+		{"b smallest", 3, 1, 2, 1},
+		{"c smallest", 3, 2, 1, 1},
+		{"all equal", 5, 5, 5, 5},
+		{"a and b tie", 2, 2, 3, 2},
+		{"a and c tie", 2, 3, 2, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := min3(tt.a, tt.b, tt.c); got != tt.want {
+				t.Errorf("min3(%d,%d,%d): want %d, got %d", tt.a, tt.b, tt.c, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestParseMutantIDs(t *testing.T) {
+	tests := []struct {
+		name            string
+		input           string
+		want            map[int]bool
+		wantErrContains string
+	}{
+		{name: "empty", input: "", want: nil},
+		{name: "whitespace only", input: "  ", want: nil},
+		{name: "single id", input: "1", want: map[int]bool{1: true}},
+		{name: "multiple ids", input: "1,2,3", want: map[int]bool{1: true, 2: true, 3: true}},
+		{name: "spaces around ids", input: " 2 , 3 ", want: map[int]bool{2: true, 3: true}},
+		{name: "zero is invalid", input: "0", wantErrContains: "must be >= 1"},
+		{name: "negative is invalid", input: "-1", wantErrContains: "must be >= 1"},
+		{name: "non-integer", input: "abc", wantErrContains: "invalid id"},
+		{name: "empty part from comma", input: ",", wantErrContains: "empty id"},
+		{name: "trailing comma", input: "1,", wantErrContains: "empty id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseMutantIDs(tt.input)
+			if tt.wantErrContains != "" {
+				if err == nil {
+					t.Fatalf("parseMutantIDs(%q): expected error containing %q, got nil", tt.input, tt.wantErrContains)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("parseMutantIDs(%q): error %q does not contain %q", tt.input, err.Error(), tt.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseMutantIDs(%q): unexpected error: %v", tt.input, err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("parseMutantIDs(%q): want %v, got %v", tt.input, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestDescribeScope(t *testing.T) {
+	tests := []struct {
+		name     string
+		specs    []selector.Spec
+		diff     bool
+		diffBase string
+		tests    string
+		mutants  string
+		want     string
+	}{
+		{
+			name: "no filters",
+			want: "",
+		},
+		{
+			name:  "single spec no funcs",
+			specs: []selector.Spec{{Pattern: "./internal/foo"}},
+			want:  "./internal/foo",
+		},
+		{
+			name:  "single spec with one func",
+			specs: []selector.Spec{{Pattern: "./internal/foo", Funcs: []string{"Foo"}}},
+			want:  "./internal/foo:Foo",
+		},
+		{
+			name:  "single spec with multiple funcs",
+			specs: []selector.Spec{{Pattern: "./internal/foo", Funcs: []string{"Foo", "Bar"}}},
+			want:  "./internal/foo:Foo,Bar",
+		},
+		{
+			name:     "diff flag",
+			diff:     true,
+			diffBase: "HEAD",
+			want:     "--diff=HEAD",
+		},
+		{
+			name:  "tests flag",
+			tests: "^TestFoo$",
+			want:  "--tests=^TestFoo$",
+		},
+		{
+			name:    "mutants flag",
+			mutants: "1,2,3",
+			want:    "--mutant=1,2,3",
+		},
+		{
+			name:    "spec and tests together",
+			specs:   []selector.Spec{{Pattern: "./..."}},
+			tests:   "^TestFoo$",
+			want:    "./... --tests=^TestFoo$",
+		},
+		{
+			name:    "diff with custom base",
+			diff:    true,
+			diffBase: "origin/main",
+			want:    "--diff=origin/main",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := describeScope(tt.specs, tt.diff, tt.diffBase, tt.tests, tt.mutants)
+			if got != tt.want {
+				t.Errorf("describeScope: want %q, got %q", tt.want, got)
+			}
+		})
 	}
 }
