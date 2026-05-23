@@ -216,7 +216,12 @@ func TestEndToEndDiff(t *testing.T) {
 	}
 
 	binPath := buildBinary(t)
-	repo := t.TempDir()
+	rawRepo := t.TempDir()
+	// Resolve symlinks so kanly's path lookups match git's resolved paths (macOS: /var → /private/var).
+	repo, err := filepath.EvalSymlinks(rawRepo)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 
 	goMod := "module diffsample\n\ngo 1.23.0\n"
 	sampleGo := `package diffsample

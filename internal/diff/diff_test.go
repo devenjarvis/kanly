@@ -342,7 +342,12 @@ func TestComputeIntegration(t *testing.T) {
 		t.Skip("git binary not available")
 	}
 
-	repo := t.TempDir()
+	rawRepo := t.TempDir()
+	// Resolve symlinks so paths match what git rev-parse returns (macOS: /var → /private/var).
+	repo, err := filepath.EvalSymlinks(rawRepo)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
