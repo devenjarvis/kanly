@@ -127,6 +127,34 @@ rename to new.go
 `,
 			want: []want{{file: filepath.Join(root, "foo.go"), ranges: []diff.LineRange{{Start: 5, End: 5}, {Start: 21, End: 22}}}},
 		},
+		{
+			// Tab-separated commit info after the filename must be stripped.
+			// rest[:i] vs rest[:i+1] or rest[:i-1] would give the wrong path.
+			name: "tab suffix stripped from filename",
+			input: "diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\t2024-01-01 12:00\n@@ -5 +5,2 @@\n+x\n+y\n",
+			want: []want{{file: filepath.Join(root, "foo.go"), ranges: []diff.LineRange{{Start: 5, End: 6}}}},
+		},
+		{
+			// Tab at position 0 of rest (immediately after "+++ "): i==0 means
+			// i>=0 strips to "", filepath.Join(root,"") == root.
+			// With i>0 the rest would not be stripped, giving a different key.
+			name: "tab at position zero strips to empty rest",
+			input: "diff --git a/x.go b/x.go\n--- a/x.go\n+++ \tb/x.go\n@@ -1 +3,2 @@\n+a\n+b\n",
+			want: []want{{file: root, ranges: []diff.LineRange{{Start: 3, End: 4}}}},
+		},
+		{
+			// /dev/null with a non-zero added count must still be ignored because
+			// rest == "/dev/null" skips the file before the hunk is reached.
+			name: "dev-null with positive count is skipped",
+			input: `diff --git a/gone.go b/gone.go
+--- a/gone.go
++++ /dev/null
+@@ -1 +5,2 @@
++x
++y
+`,
+			want: nil,
+		},
 	}
 
 	for _, tc := range cases {
@@ -208,6 +236,80 @@ diff --git a/other/b.go b/other/b.go
 	want := []string{"./other", "./pkg"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Patterns() = %v, want %v", got, want)
+	}
+}
+
+func TestFilesOrder(t *testing.T) {
+	// Files() must return paths in sorted order regardless of map iteration order.
+	input := `diff --git a/z.go b/z.go
+--- a/z.go
++++ b/z.go
+@@ -1 +1 @@
++x
+diff --git a/m.go b/m.go
+--- a/m.go
++++ b/m.go
+@@ -1 +1 @@
++x
+diff --git a/a.go b/a.go
+--- a/a.go
++++ b/a.go
+@@ -1 +1 @@
++x
+`
+	d, err := diff.ParseDiff("/repo", strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := d.Files()
+	want := []string{"/repo/a.go", "/repo/m.go", "/repo/z.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Files() = %v, want %v (must be sorted)", got, want)
+	}
+}
+
+func TestPatternsRootDir(t *testing.T) {
+	// When a changed file is in the workdir itself, Patterns() must return ["."].
+	tmp := t.TempDir()
+	input := `diff --git a/a.go b/a.go
+--- a/a.go
++++ b/a.go
+@@ -1 +1 @@
++x
+`
+	d, err := diff.ParseDiff(tmp, strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := d.Patterns(tmp)
+	want := []string{"."}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Patterns() = %v, want %v (root dir must be \".\")", got, want)
+	}
+}
+
+func TestPatternsExcludesNonGoFiles(t *testing.T) {
+	// Non-.go files in a different directory must not contribute a pattern.
+	input := `diff --git a/docs/README.md b/docs/README.md
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -1 +1 @@
++x
+diff --git a/pkg/a.go b/pkg/a.go
+--- a/pkg/a.go
++++ b/pkg/a.go
+@@ -1 +1 @@
++x
+`
+	tmp := t.TempDir()
+	d, err := diff.ParseDiff(tmp, strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := d.Patterns(tmp)
+	want := []string{"./pkg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Patterns() = %v, want %v (non-.go file must be excluded)", got, want)
 	}
 }
 
