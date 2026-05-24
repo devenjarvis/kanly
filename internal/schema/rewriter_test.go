@@ -218,6 +218,77 @@ func TestFuncNames(t *testing.T) {
 	}
 }
 
+func TestFuncNamesSorted(t *testing.T) {
+	// FuncNames must return names in sorted order (sort.Strings must not be deleted).
+	pkg, err := source.Load(relDir(t, "../runner/testdata/sample"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	names := schema.FuncNames(pkg)
+	if len(names) < 2 {
+		t.Fatalf("expected at least 2 names, got %d", len(names))
+	}
+	if names[0] != "Add" || names[1] != "Sub" {
+		t.Errorf("FuncNames: want [Add Sub] in order, got %v", names)
+	}
+}
+
+func TestFuncNamesWithMethods(t *testing.T) {
+	// funcDeclName must format methods as "(T).Method" and "(*T).PtrMethod".
+	// Mutations on the "(" / ")." literals or the len(Recv.List)==0 check would
+	// produce wrong names; mutations on the == operator would skip the receiver check.
+	pkg, err := source.Load(relDir(t, "testdata/withmethod"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	names := schema.FuncNames(pkg)
+	want := map[string]bool{
+		"Plain":       true,
+		"(T).Method":  true,
+		"(*T).PtrMethod": true,
+	}
+	if len(names) != len(want) {
+		t.Fatalf("FuncNames: want %d entries, got %d (%v)", len(want), len(names), names)
+	}
+	for _, n := range names {
+		if !want[n] {
+			t.Errorf("unexpected name %q", n)
+		}
+	}
+}
+
+func TestRewriteMutationMetadata(t *testing.T) {
+	// Rewrite must populate every field of mutation.Mutation correctly.
+	// struct_field_zero mutations on File, Line, Column, Original, Mutant would zero them.
+	pkg, err := source.Load(relDir(t, "../source/testdata/simple"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}}, nil)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	if len(rew.Mutations) != 1 {
+		t.Fatalf("expected 1 mutation, got %d", len(rew.Mutations))
+	}
+	m := rew.Mutations[0]
+	if m.File == "" {
+		t.Errorf("mutation.File is empty")
+	}
+	if m.Line == 0 {
+		t.Errorf("mutation.Line is 0")
+	}
+	if m.Column == 0 {
+		t.Errorf("mutation.Column is 0")
+	}
+	if m.Original == "" {
+		t.Errorf("mutation.Original is empty")
+	}
+	if m.Mutant == "" {
+		t.Errorf("mutation.Mutant is empty")
+	}
+}
+
 // TestRewriteCallDeleteAndIntArithCoexist verifies that two operators with
 // different DispatcherKeys can target distinct nodes in the same file without
 // stomping on each other in the rewriter's node→group flattening.
