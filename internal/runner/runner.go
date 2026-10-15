@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"go/version"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,9 +58,27 @@ func parseTestNames(out []byte, prefixes ...string) []string {
 	return names
 }
 
+// minSchemaLang is the lowest language version the mutant schema compiles
+// under: the dispatcher uses generics, and its call sites rely on the
+// untyped-constant inference rules added in Go 1.21.
+const minSchemaLang = "go1.21"
+
+// schemaLangFlags returns the extra `go test` flags needed to compile the
+// schema for a module whose `go` directive is goVersion. Modules older than
+// minSchemaLang get the package's language version raised to it; newer (or
+// non-module, "") packages are left alone. Raising never crosses go1.22, so
+// the loop-variable semantics of the user's code are unchanged.
+func schemaLangFlags(pkgPath, goVersion string) []string {
+	if goVersion == "" || version.Compare("go"+goVersion, minSchemaLang) >= 0 {
+		return nil
+	}
+	return []string{"-gcflags=" + pkgPath + "=-lang=" + minSchemaLang}
+}
+
 // CompileTestBinary compiles a test binary for pkgPath using the given overlay file.
-// Returns the binary path and a cleanup function.
-func CompileTestBinary(ctx context.Context, pkgPath, overlayPath string) (binaryPath string, cleanup func(), err error) {
+// goVersion is the package's module `go` directive (source.Package.GoVersion);
+// see schemaLangFlags. Returns the binary path and a cleanup function.
+func CompileTestBinary(ctx context.Context, pkgPath, overlayPath, goVersion string) (binaryPath string, cleanup func(), err error) {
 	tmpDir, err := os.MkdirTemp("", "kanly-bin-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp dir: %w", err)
@@ -72,13 +91,10 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath string) (binary
 	}()
 
 	binPath := filepath.Join(tmpDir, "testbin")
-	cmd := exec.CommandContext(ctx,
-		"go", "test", "-c",
-		"-vet=off",
-		"-overlay="+overlayPath,
-		"-o", binPath,
-		pkgPath,
-	)
+	args := []string{"test", "-c", "-vet=off", "-overlay=" + overlayPath}
+	args = append(args, schemaLangFlags(pkgPath, goVersion)...)
+	args = append(args, "-o", binPath, pkgPath)
+	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {

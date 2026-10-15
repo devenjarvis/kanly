@@ -90,7 +90,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanOverlay()
 
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("compile test binary: %w", err)
 	}

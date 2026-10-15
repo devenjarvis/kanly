@@ -19,6 +19,10 @@ type Package struct {
 	Fset       *token.FileSet
 	TypesInfo  *types.Info
 	Pkg        *types.Package
+	// GoVersion is the `go` directive of the package's module (e.g. "1.16"),
+	// or "" when the package is not part of a module. A module without a
+	// `go` directive reports "1.16", matching the go command's default.
+	GoVersion string
 }
 
 const loadMode = packages.NeedName |
@@ -28,7 +32,8 @@ const loadMode = packages.NeedName |
 	packages.NeedTypesInfo |
 	packages.NeedDeps |
 	packages.NeedImports |
-	packages.NeedCompiledGoFiles
+	packages.NeedCompiledGoFiles |
+	packages.NeedModule
 
 func fromPackage(raw *packages.Package) (*Package, error) {
 	if len(raw.Errors) > 0 {
@@ -46,7 +51,15 @@ func fromPackage(raw *packages.Package) (*Package, error) {
 		pos := raw.Fset.Position(f.Pos())
 		files[pos.Filename] = f
 	}
+	goVersion := ""
+	if raw.Module != nil {
+		goVersion = raw.Module.GoVersion
+		if goVersion == "" {
+			goVersion = "1.16"
+		}
+	}
 	return &Package{
+		GoVersion:  goVersion,
 		Dir:        absDir,
 		ImportPath: raw.PkgPath,
 		Files:      files,
