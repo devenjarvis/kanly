@@ -20,11 +20,11 @@ func TestCallDeleteFindsAllVoidCallStmts(t *testing.T) {
 		candidates = append(candidates, CallDelete{}.Find(f, pkg.TypesInfo)...)
 	}
 
-	// Expected positives (10):
-	//   BareCall/MethodCall/GenericCall/IfInit/CloseCh/DeleteEntry/ClearSlice/RecoverCall/
+	// Expected positives (9):
+	//   BareCall/MethodCall/GenericCall/IfInit/CloseCh/DeleteEntry/ClearSlice/
 	//   NestedCall/MixedOps
-	if len(candidates) != 10 {
-		t.Fatalf("expected 10 candidates, got %d", len(candidates))
+	if len(candidates) != 9 {
+		t.Fatalf("expected 9 candidates, got %d", len(candidates))
 	}
 	for _, c := range candidates {
 		if c.Mutant != "" {
@@ -109,8 +109,8 @@ func TestCallDeleteRewriteEmitsCallSkip(t *testing.T) {
 
 	for path, src := range rew.Files {
 		count := strings.Count(src, "__cMutCallSkip(")
-		if count != 10 {
-			t.Errorf("%s: expected 10 __cMutCallSkip calls, got %d:\n%s", path, count, src)
+		if count != 9 {
+			t.Errorf("%s: expected 9 __cMutCallSkip calls, got %d:\n%s", path, count, src)
 		}
 		// Spot-check that the wrapped method call body is preserved inside the closure.
 		if !strings.Contains(src, "r.method()") {
@@ -130,8 +130,9 @@ func TestCallDeleteRewriteEmitsCallSkip(t *testing.T) {
 		if !strings.Contains(src, "clear(s)") {
 			t.Errorf("%s: expected `clear(s)` preserved inside closure:\n%s", path, src)
 		}
-		if !strings.Contains(src, "recover()") {
-			t.Errorf("%s: expected `recover()` preserved inside closure:\n%s", path, src)
+		// recover() must stay a direct call of the deferred function.
+		if !strings.Contains(src, "defer func() {\n\t\trecover()\n\t}()") {
+			t.Errorf("%s: expected `recover()` left unwrapped:\n%s", path, src)
 		}
 	}
 }

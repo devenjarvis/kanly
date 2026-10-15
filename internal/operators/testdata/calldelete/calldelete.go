@@ -52,8 +52,9 @@ func ClearSlice() {
 	clear(s)
 }
 
-// RecoverCall has recover() in a deferred function (1 candidate) and panic() in the body
-// (0 candidates — panic excluded). Expected: 1 candidate.
+// RecoverCall has recover() in a deferred function and panic() in the body.
+// Expected: 0 candidates — panic is excluded, and recover is excluded because
+// wrapping it in the __cMutCallSkip closure would stop it recovering.
 func RecoverCall() {
 	defer func() {
 		recover()

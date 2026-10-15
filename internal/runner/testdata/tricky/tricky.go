@@ -69,3 +69,18 @@ func ConstPositions(i int) []string {
 func At(s []int, i, j int) int     { return s[i+j] }
 func Tail(s []int, i int) []int    { return s[i+1:] }
 func From(s, a []int, i int) []int { return s[a[i]:] }
+
+// recover() only works as a direct call from the deferred function; wrapping
+// it in a dispatcher closure makes the baseline itself panic.
+func Recovered() (ok bool) {
+	defer func() {
+		recover()
+	}()
+	defer func() {
+		if r := recover(); r != nil && !ok {
+			ok = true
+			panic(r)
+		}
+	}()
+	panic("boom")
+}

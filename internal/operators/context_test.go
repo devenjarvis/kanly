@@ -31,9 +31,13 @@ func findInSource(t *testing.T, src string, op mutation.Operator) []mutation.Can
 	return op.Find(file, info)
 }
 
+// ifaceDecls declares an interface R implemented by *T.
+const ifaceDecls = "type R interface{ M() }; type T struct{}; func (*T) M() {};"
+
 // TestOperatorsSkipContextsTheirDispatcherCannotFill pins the positions where
-// a rewrite would no longer compile: the dispatcher's result type doesn't
-// match the context, or Go requires a constant there.
+// a rewrite would not compile or would not do what the report says: the
+// dispatcher's result type doesn't match the context, Go requires a constant
+// there, or the rewrite changes behaviour while no mutant is active.
 func TestOperatorsSkipContextsTheirDispatcherCannotFill(t *testing.T) {
 	tests := []struct {
 		name string
@@ -59,6 +63,15 @@ func TestOperatorsSkipContextsTheirDispatcherCannotFill(t *testing.T) {
 		{"logic: recover in right operand skipped", BoolLogic{}, `func f(ok bool) bool { return ok && recover() != nil }`, 0},
 		{"not: named typed operand mutated", BoolNot{}, `type B bool; func f(a B) B { return !a }`, 1},
 		{"not: untyped operand in named context skipped", BoolNot{}, `type B bool; func f(n int) B { var b B = !(n < 1); return b }`, 0},
+		{"return: same-type pointer mutated", ReturnZero{}, ifaceDecls + `func f(t *T) *T { return t }`, 1},
+		{"return: concrete into interface slot skipped", ReturnZero{}, ifaceDecls + `func f(t *T) R { return t }`, 0},
+		{"return: concrete into interface slot in func literal skipped", ReturnZero{}, ifaceDecls + `var g = func(t *T) R { return t }`, 0},
+		{"return: interface into same interface mutated", ReturnZero{}, ifaceDecls + `func f(r R) R { return r }`, 1},
+		{"return: int boxed into any mutated", ReturnZero{}, `func f(x int) any { return x }`, 1},
+		{"field: same-type pointer mutated", StructFieldZero{}, ifaceDecls + `type S struct{ P *T }; func f(t *T) S { return S{P: t} }`, 1},
+		{"field: concrete into interface field skipped", StructFieldZero{}, ifaceDecls + `type S struct{ R R }; func f(t *T) S { return S{R: t} }`, 0},
+		{"call: plain call mutated", CallDelete{}, `func g() {}; func f() { g() }`, 1},
+		{"call: recover not wrapped in a closure", CallDelete{}, `func f() { defer func() { recover() }() }`, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

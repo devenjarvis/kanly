@@ -42,7 +42,13 @@ func (ReturnZero) WrapsExpr() {}
 
 func (ReturnZero) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 	var candidates []mutation.Candidate
+	var stack []ast.Node
 	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
 		ret, ok := n.(*ast.ReturnStmt)
 		if !ok {
 			return true
@@ -59,8 +65,13 @@ func (ReturnZero) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 				}
 			}
 		}
-		for _, expr := range ret.Results {
-			c, ok := returnZeroCandidate(info, expr)
+		results := enclosingResults(info, stack)
+		for i, expr := range ret.Results {
+			var slot types.Type
+			if results != nil && results.Len() == len(ret.Results) {
+				slot = results.At(i).Type()
+			}
+			c, ok := returnZeroCandidate(info, expr, slot)
 			if !ok {
 				continue
 			}
@@ -69,6 +80,29 @@ func (ReturnZero) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 		return true
 	})
 	return candidates
+}
+
+// enclosingResults returns the result tuple of the innermost function
+// (declaration or literal) in stack, or nil if it cannot be determined.
+func enclosingResults(info *types.Info, stack []ast.Node) *types.Tuple {
+	for i := len(stack) - 1; i >= 0; i-- {
+		var t types.Type
+		switch f := stack[i].(type) {
+		case *ast.FuncLit:
+			t = info.TypeOf(f)
+		case *ast.FuncDecl:
+			if obj := info.Defs[f.Name]; obj != nil {
+				t = obj.Type()
+			}
+		default:
+			continue
+		}
+		if sig, ok := t.(*types.Signature); ok {
+			return sig.Results()
+		}
+		return nil
+	}
+	return nil
 }
 
 // Rewrite wraps the result expression in __cMutRetZero(expr, mutIDs...).
@@ -85,7 +119,11 @@ func (ReturnZero) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 
 // returnZeroCandidate decides whether expr is an eligible return value and, if
 // so, builds the candidate. Returns (zero, false) when expr should be skipped.
-func returnZeroCandidate(info *types.Info, expr ast.Expr) (mutation.Candidate, bool) {
+// slot is the type of the result or field expr is assigned to, or nil when
+// unknown. __cMutRetZero infers its type from expr, so when a concrete value
+// fills an interface slot its "nil" is a typed nil — a non-nil interface —
+// and such candidates are skipped.
+func returnZeroCandidate(info *types.Info, expr ast.Expr, slot types.Type) (mutation.Candidate, bool) {
 	// Skip AST shapes targeted by other operators on the same node.
 	switch expr.(type) {
 	case *ast.BinaryExpr, *ast.UnaryExpr, *ast.BasicLit, *ast.FuncLit:
@@ -107,6 +145,9 @@ func returnZeroCandidate(info *types.Info, expr ast.Expr) (mutation.Candidate, b
 	}
 	mutant := returnZeroMutant(t)
 	if mutant == "" {
+		return mutation.Candidate{}, false
+	}
+	if mutant == "nil" && slot != nil && !types.Identical(t, slot) {
 		return mutation.Candidate{}, false
 	}
 	return mutation.Candidate{

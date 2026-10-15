@@ -55,7 +55,13 @@ func (StructFieldZero) Find(file *ast.File, info *types.Info) []mutation.Candida
 			if !ok {
 				continue
 			}
-			c, ok := returnZeroCandidate(info, kv.Value)
+			var slot types.Type
+			if key, ok := kv.Key.(*ast.Ident); ok {
+				if field := info.ObjectOf(key); field != nil {
+					slot = field.Type()
+				}
+			}
+			c, ok := returnZeroCandidate(info, kv.Value, slot)
 			if !ok {
 				continue
 			}
