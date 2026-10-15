@@ -140,13 +140,18 @@ go test ./...
 # Run unit tests only (skips e2e)
 go test -short ./...
 
+# Check the schema against pinned real-world modules (downloads them)
+KANLY_CORPUS=1 go test -timeout 30m ./internal/corpus/
+
 # Regenerate JSON golden files
 GOLDEN_UPDATE=1 go test ./internal/report
 ```
 
+Every pull request runs the [ci](.github/workflows/ci.yml) workflow: gofmt, `go vet`, staticcheck, `go test -race ./...`, and the real-world corpus. All of them must pass.
+
 ## Dogfooding
 
-Every pull request on this repo runs Kanly against `./internal/report ./internal/mutation` via the [mutation-test](.github/workflows/mutation-test.yml) GitHub Actions workflow. The workflow posts the result as a single PR comment (updated in-place on re-pushes) and never fails the check — it is informational only.
+Every pull request on this repo runs Kanly against `./internal/...`, and again against just the lines the PR changes (`--diff`), via the [mutation-test](.github/workflows/mutation-test.yml) GitHub Actions workflow. The workflow posts each result as a PR comment (updated in-place on re-pushes) and never fails the check — it is informational only.
 
 **Fork PRs:** `GITHUB_TOKEN` on fork pull requests does not receive `pull-requests: write` permission, so the comment step will silently no-op for contributions from forks.
 
