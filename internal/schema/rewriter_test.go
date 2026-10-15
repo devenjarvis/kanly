@@ -334,3 +334,53 @@ func TestRewriteCallDeleteAndIntArithCoexist(t *testing.T) {
 		t.Errorf("expected __cMutCallSkip in dispatcher")
 	}
 }
+
+// TestRewriteComposesOperatorsOnSameNode guards against mutants that are
+// recorded but never placed in the schema: when two operators with different
+// dispatchers target one node, both rewrites must land, or the missing
+// mutants are reported as survivors they can never be killed as.
+func TestRewriteComposesOperatorsOnSameNode(t *testing.T) {
+	ops := []mutation.Operator{operators.IntArith{}, operators.SliceIndex{}, operators.SliceRange{}, operators.ReturnZero{}}
+	// Map iteration order once decided which operator won, so repeat.
+	// Rewrite edits the package's AST in place, so reload each time.
+	for run := 0; run < 10; run++ {
+		pkg, err := source.Load(relDir(t, "testdata/collide"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		rew, err := schema.Rewrite(pkg, ops, nil)
+		if err != nil {
+			t.Fatalf("Rewrite: %v", err)
+		}
+		var src string
+		for _, s := range rew.Files {
+			src = s
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), "collide.go", src, 0)
+		if err != nil {
+			t.Fatalf("rewritten source does not parse: %v\n%s", err, src)
+		}
+		placed := make(map[string]bool)
+		ast.Inspect(file, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				for _, a := range call.Args {
+					if lit, ok := a.(*ast.BasicLit); ok && lit.Kind == token.INT {
+						placed[lit.Value] = true
+					}
+				}
+			}
+			return true
+		})
+		for _, m := range rew.Mutations {
+			if !placed[fmt.Sprint(m.ID)] {
+				t.Fatalf("run %d: mutation %d (%s %s→%s, line %d) is missing from the schema:\n%s",
+					run, m.ID, m.OperatorName, m.Original, m.Mutant, m.Line, src)
+			}
+		}
+		// The slice_range bound on a[i] must offset the whole bound, not
+		// reuse slice_index's rewrite of i inside it.
+		if !strings.Contains(src, "s[__cMutIdx(a[__cMutIdx(i,") {
+			t.Fatalf("run %d: slice_range on a[i] not composed around slice_index:\n%s", run, src)
+		}
+	}
+}

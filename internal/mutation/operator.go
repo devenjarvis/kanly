@@ -26,6 +26,16 @@ type Operator interface {
 	Rewrite(c Candidate, mutIDs []int) ast.Node
 }
 
+// Wrapper is implemented by operators whose Rewrite wraps the candidate
+// expression in a dispatcher call without inspecting its shape (for example
+// return_zero's __cMutRetZero(expr, ...)). Such an operator can share a node
+// with one shape-specific operator: the rewriter applies the shape-specific
+// rewrite first and then wraps its result, so every mutant reaches the schema.
+type Wrapper interface {
+	Operator
+	WrapsExpr()
+}
+
 var registry []Operator
 
 func Register(op Operator) {

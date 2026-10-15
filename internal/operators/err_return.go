@@ -22,6 +22,11 @@ type ErrReturnNil struct{}
 func (ErrReturnNil) Name() string          { return "err_return_nil" }
 func (ErrReturnNil) DispatcherKey() string { return "err_return" }
 
+// WrapsExpr marks ErrReturnNil as a mutation.Wrapper: Rewrite wraps the candidate
+// expression whatever its shape, so it composes with other operators on the
+// same node.
+func (ErrReturnNil) WrapsExpr() {}
+
 func (ErrReturnNil) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 	var candidates []mutation.Candidate
 	ast.Inspect(file, func(n ast.Node) bool {

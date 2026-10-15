@@ -114,6 +114,11 @@ func FuncNames(pkg *source.Package) []string {
 	return out
 }
 
+func isWrapper(op mutation.Operator) bool {
+	_, ok := op.(mutation.Wrapper)
+	return ok
+}
+
 // Rewritten holds the results of schema rewriting: rewritten file sources and the dispatcher.
 type Rewritten struct {
 	Files      map[string]string // absolute file path → rewritten source
@@ -180,20 +185,32 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 			cand   mutation.Candidate
 		}
 		groups := make(map[groupKey]*rewriteGroup)
+		// nodeGroups lists every group on a node in first-seen order, which
+		// is deterministic because entries are.
+		nodeGroups := make(map[ast.Node][]*rewriteGroup)
 		for _, e := range entries {
 			key := groupKey{node: e.node, dispatcherKey: e.op.DispatcherKey()}
 			g, ok := groups[key]
 			if !ok {
 				g = &rewriteGroup{op: e.op, cand: e.cand}
 				groups[key] = g
+				nodeGroups[e.node] = append(nodeGroups[e.node], g)
 			}
 			g.mutIDs = append(g.mutIDs, e.id)
 		}
 
-		// Build a flat node→group lookup for the Apply callback.
-		nodeMap := make(map[ast.Node]*rewriteGroup, len(groups))
-		for key, g := range groups {
-			nodeMap[key.node] = g
+		// When several dispatchers target one node, the shape-specific
+		// rewrite (which type-asserts the original node) must run first and
+		// every mutation.Wrapper then wraps the result. Two shape-specific
+		// rewrites cannot compose, so refuse rather than drop mutants.
+		for node, gs := range nodeGroups {
+			sort.SliceStable(gs, func(i, j int) bool {
+				return !isWrapper(gs[i].op) && isWrapper(gs[j].op)
+			})
+			if len(gs) > 1 && !isWrapper(gs[1].op) {
+				return nil, fmt.Errorf("%s: operators %s and %s both rewrite the same expression",
+					pkg.Fset.Position(node.Pos()), gs[0].op.Name(), gs[1].op.Name())
+			}
 		}
 
 		// Post-order rewrite: children are visited (and possibly replaced) before
@@ -204,11 +221,17 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 		// stranded inner replacements on the detached subtree (they never
 		// reached the new outer call).
 		newFile := astutil.Apply(file, nil, func(cursor *astutil.Cursor) bool {
-			g, ok := nodeMap[cursor.Node()]
+			gs, ok := nodeGroups[cursor.Node()]
 			if !ok {
 				return true
 			}
-			cursor.Replace(g.op.Rewrite(g.cand, g.mutIDs))
+			cur := cursor.Node()
+			for _, g := range gs {
+				c := g.cand
+				c.Node = cur
+				cur = g.op.Rewrite(c, g.mutIDs)
+			}
+			cursor.Replace(cur)
 			return true
 		})
 

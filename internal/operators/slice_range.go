@@ -20,10 +20,16 @@ type SliceRange struct{}
 
 func (SliceRange) Name() string { return "slice_range" }
 
-// DispatcherKey is shared with SliceIndex — both rewrite their target index
-// expression via __cMutIdx, so colocated range/index mutations can share a
-// single dispatcher.
-func (SliceRange) DispatcherKey() string { return "slice_index" }
+// WrapsExpr marks SliceRange as a mutation.Wrapper: Rewrite wraps the candidate
+// expression whatever its shape, so it composes with other operators on the
+// same node.
+func (SliceRange) WrapsExpr() {}
+
+// DispatcherKey is distinct from SliceIndex's even though both emit
+// __cMutIdx: a bound like a[i] in s[a[i]:] is itself a slice_index target,
+// and sharing a key would merge the two into one group that applies only
+// slice_index's rewrite. With separate keys the rewriter composes them.
+func (SliceRange) DispatcherKey() string { return "slice_range" }
 
 // rangeIndex identifies which of the slice-expression's three bounds a
 // candidate targets; carried in the Original/Mutant strings for grouping
@@ -33,15 +39,6 @@ const (
 	rangeHigh = "hi"
 	rangeMax  = "max"
 )
-
-// rangeKey wraps the operand expression so multiple candidates on the same
-// SliceExpr (e.g. mutating both Low and High) don't collide in the rewriter's
-// (node, dispatcherKey) grouping. We use the operand pointer itself as the
-// Candidate.Node, so each bound gets its own group.
-type rangeOperand struct {
-	parent *ast.SliceExpr
-	which  string // rangeLow / rangeHigh / rangeMax
-}
 
 func (SliceRange) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 	var candidates []mutation.Candidate

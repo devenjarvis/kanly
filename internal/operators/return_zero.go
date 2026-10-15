@@ -35,6 +35,11 @@ type ReturnZero struct{}
 func (ReturnZero) Name() string          { return "return_zero" }
 func (ReturnZero) DispatcherKey() string { return "return_zero" }
 
+// WrapsExpr marks ReturnZero as a mutation.Wrapper: Rewrite wraps the candidate
+// expression whatever its shape, so it composes with other operators on the
+// same node.
+func (ReturnZero) WrapsExpr() {}
+
 func (ReturnZero) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 	var candidates []mutation.Candidate
 	ast.Inspect(file, func(n ast.Node) bool {

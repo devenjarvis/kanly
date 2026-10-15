@@ -64,3 +64,8 @@ func ConstPositions(i int) []string {
 	m := map[string]int{"k": arr[i]}
 	return append(s, string(rune('a'+m["k"])))
 }
+
+// Nodes targeted by a shape-specific operator and a wrapper at once.
+func At(s []int, i, j int) int     { return s[i+j] }
+func Tail(s []int, i int) []int    { return s[i+1:] }
+func From(s, a []int, i int) []int { return s[a[i]:] }

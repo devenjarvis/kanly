@@ -11,4 +11,6 @@ func TestCompiles(t *testing.T) {
 	_ = LocalBool(3)
 	_ = ImportedBool(true, false)
 	_ = ConstPositions(0)
+	s := []int{1, 2, 3}
+	_, _, _ = At(s, 0, 1), Tail(s, 0), From(s, s, 0)
 }
