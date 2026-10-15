@@ -87,15 +87,26 @@ func Load(dir string) (*Package, error) {
 	return fromPackage(pkgs[0])
 }
 
+// LoadError reports a matched package that could not be loaded, for example
+// because it does not type-check.
+type LoadError struct {
+	ImportPath string
+	Err        error
+}
+
 // LoadAll loads all packages matching the given patterns relative to workDir.
 // If workDir is empty the current working directory is used.
 // A single pattern that names an existing directory is treated as a direct
 // package load (equivalent to Load), keeping single-package behaviour intact.
-func LoadAll(workDir string, patterns ...string) ([]*Package, error) {
+//
+// A package that fails to load is returned in the LoadError slice rather than
+// failing the whole load, so callers can still process its healthy siblings.
+// The error result is reserved for failures of the load itself.
+func LoadAll(workDir string, patterns ...string) ([]*Package, []LoadError, error) {
 	if workDir == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return nil, fmt.Errorf("getwd: %w", err)
+			return nil, nil, fmt.Errorf("getwd: %w", err)
 		}
 		workDir = cwd
 	}
@@ -108,7 +119,7 @@ func LoadAll(workDir string, patterns ...string) ([]*Package, error) {
 		if info, err := os.Stat(patterns[0]); err == nil && info.IsDir() {
 			absPath, err := filepath.Abs(patterns[0])
 			if err != nil {
-				return nil, fmt.Errorf("abs path: %w", err)
+				return nil, nil, fmt.Errorf("abs path: %w", err)
 			}
 			cfgDir = absPath
 			loadPatterns = []string{"."}
@@ -118,19 +129,25 @@ func LoadAll(workDir string, patterns ...string) ([]*Package, error) {
 	cfg := &packages.Config{Mode: loadMode, Dir: cfgDir, Tests: false}
 	rawPkgs, err := packages.Load(cfg, loadPatterns...)
 	if err != nil {
-		return nil, fmt.Errorf("packages.Load: %w", err)
+		return nil, nil, fmt.Errorf("packages.Load: %w", err)
 	}
 
 	var result []*Package
+	var loadErrs []LoadError
 	for _, raw := range rawPkgs {
 		pkg, err := fromPackage(raw)
 		if err != nil {
-			return nil, err
+			path := raw.PkgPath
+			if path == "" {
+				path = raw.ID
+			}
+			loadErrs = append(loadErrs, LoadError{ImportPath: path, Err: err})
+			continue
 		}
 		if pkg == nil {
 			continue // test-only package, nothing to mutate
 		}
 		result = append(result, pkg)
 	}
-	return result, nil
+	return result, loadErrs, nil
 }

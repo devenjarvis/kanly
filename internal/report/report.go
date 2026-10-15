@@ -31,10 +31,21 @@ type PackageSummary struct {
 	Summary
 }
 
+// PackageError records a package that was matched but not mutation-tested.
+// Stage names the pipeline step that failed: "load", "rewrite", "compile",
+// "baseline", "coverage" or "mutants". A failed baseline means the package's
+// tests fail before any mutant is applied.
+type PackageError struct {
+	Package string `json:"package"`
+	Stage   string `json:"stage"`
+	Error   string `json:"error"`
+}
+
 type Report struct {
 	Scope                   string                       `json:"scope,omitempty"`
 	Summary                 Summary                      `json:"summary"`
 	Packages                []PackageSummary             `json:"packages"`
+	Errors                  []PackageError               `json:"errors,omitempty"`
 	Tests                   []mutation.TestStats         `json:"tests"`
 	ZeroKillTests           []string                     `json:"zero_kill_tests"`
 	IncidentalCoverageTests []string                     `json:"incidental_coverage_tests,omitempty"`
@@ -314,6 +325,7 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMZeroKill(&b, r.ZeroKillTests)
 	writeLLMIncidental(&b, r.IncidentalCoverageTests)
 	writeLLMTestInventory(&b, r.Tests)
+	writeLLMErrors(&b, r.Errors)
 	writeLLMNextIteration(&b, survivors, uncovered)
 
 	out := b.String()
@@ -606,6 +618,31 @@ func writeLLMZeroKill(b *strings.Builder, tests []string) {
 // only excluded them from this scoped run's per-mutant set because their
 // statement coverage of a scoped line looked like helper / setup traffic
 // rather than an assertion. They are NOT deletion candidates.
+// errorExcerptLines caps how much of a package's error the text and llm
+// renderers print; the JSON report carries the full message.
+const errorExcerptLines = 15
+
+// errorExcerpt returns the first maxLines lines of msg, noting how many were
+// dropped.
+func errorExcerpt(msg string, maxLines int) string {
+	lines := strings.Split(strings.TrimRight(msg, "\n"), "\n")
+	if len(lines) <= maxLines {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[:maxLines], "\n") + fmt.Sprintf("\n… (%d more lines; see --format=json)", len(lines)-maxLines)
+}
+
+func writeLLMErrors(b *strings.Builder, errs []PackageError) {
+	if len(errs) == 0 {
+		return
+	}
+	b.WriteString("## Packages not tested\n\n")
+	b.WriteString("These packages matched but produced no mutation results, so the scores above do not cover them. A `baseline` failure means the package's tests fail before any mutant is applied — fix those first.\n\n")
+	for _, e := range errs {
+		fmt.Fprintf(b, "### %s (%s)\n\n```\n%s\n```\n\n", e.Package, e.Stage, errorExcerpt(e.Error, errorExcerptLines))
+	}
+}
+
 func writeLLMIncidental(b *strings.Builder, tests []string) {
 	if len(tests) == 0 {
 		return
@@ -675,6 +712,18 @@ func WriteText(w io.Writer, r Report) error {
 		r.Summary.Score*100,
 	); err != nil {
 		return err
+	}
+
+	if len(r.Errors) > 0 {
+		if _, err := fmt.Fprintf(w, "\nPackages not tested (%d):\n", len(r.Errors)); err != nil {
+			return err
+		}
+		for _, e := range r.Errors {
+			excerpt := strings.ReplaceAll(errorExcerpt(e.Error, errorExcerptLines), "\n", "\n    ")
+			if _, err := fmt.Fprintf(w, "  %s [%s]: %s\n", e.Package, e.Stage, excerpt); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Top tests by kill count — up to 5 entries with at least one kill.

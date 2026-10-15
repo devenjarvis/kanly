@@ -109,9 +109,12 @@ func checkModule(t *testing.T, dir string, knownBaselineFailures map[string]stri
 	}
 	defer os.Chdir(wd)
 
-	pkgs, err := source.LoadAll(dir, "./...")
+	pkgs, loadErrs, err := source.LoadAll(dir, "./...")
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
+	}
+	for _, le := range loadErrs {
+		t.Errorf("%s: does not load: %v", le.ImportPath, le.Err)
 	}
 	checked := 0
 	for _, pkg := range pkgs {

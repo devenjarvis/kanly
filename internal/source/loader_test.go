@@ -28,9 +28,9 @@ func TestLoadAllExpandsDotDotDot(t *testing.T) {
 	// testdata/multipkg has foo/, bar/, and testonly/ (only _test.go files).
 	// LoadAll must skip testonly/ — it has no non-test source files — and
 	// return exactly 2 packages.
-	pkgs, err := source.LoadAll(relDir(t, "testdata/multipkg"), "./...")
-	if err != nil {
-		t.Fatalf("LoadAll: %v", err)
+	pkgs, loadErrs, err := source.LoadAll(relDir(t, "testdata/multipkg"), "./...")
+	if err != nil || len(loadErrs) > 0 {
+		t.Fatalf("LoadAll: %v %v", err, loadErrs)
 	}
 	if len(pkgs) != 2 {
 		t.Fatalf("expected 2 packages (testonly dir must be skipped), got %d", len(pkgs))
@@ -51,9 +51,9 @@ func TestLoadAllExpandsDotDotDot(t *testing.T) {
 }
 
 func TestLoadAllSingleDirPath(t *testing.T) {
-	pkgs, err := source.LoadAll("", relDir(t, "testdata/simple"))
-	if err != nil {
-		t.Fatalf("LoadAll: %v", err)
+	pkgs, loadErrs, err := source.LoadAll("", relDir(t, "testdata/simple"))
+	if err != nil || len(loadErrs) > 0 {
+		t.Fatalf("LoadAll: %v %v", err, loadErrs)
 	}
 	if len(pkgs) != 1 {
 		t.Fatalf("expected 1 package, got %d", len(pkgs))
@@ -115,5 +115,25 @@ func TestLoadBrokenPackageReturnsError(t *testing.T) {
 	_, err := source.Load(relDir(t, "testdata/broken"))
 	if err == nil {
 		t.Fatal("expected error for broken package, got nil")
+	}
+}
+
+// TestLoadAllIsolatesBrokenPackages guards against one package that does not
+// type-check failing the load of its healthy siblings.
+func TestLoadAllIsolatesBrokenPackages(t *testing.T) {
+	pkgs, loadErrs, err := source.LoadAll(relDir(t, "../runner/testdata/partial"), "./...")
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	const base = "github.com/devenjarvis/kanly/internal/runner/testdata/partial/"
+	got := make(map[string]bool)
+	for _, p := range pkgs {
+		got[p.ImportPath] = true
+	}
+	if !got[base+"good"] || !got[base+"broken"] || len(pkgs) != 2 {
+		t.Errorf("packages: want good and broken, got %v", got)
+	}
+	if len(loadErrs) != 1 || loadErrs[0].ImportPath != base+"typeerr" || loadErrs[0].Err == nil {
+		t.Errorf("load errors: want one for %stypeerr, got %+v", base, loadErrs)
 	}
 }

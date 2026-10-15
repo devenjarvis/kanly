@@ -183,7 +183,7 @@ func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Du
 		return nil, fmt.Errorf("baseline run timed out after %v", timeout)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("baseline tests fail (package is already broken):\n%s", out)
+		return nil, fmt.Errorf("tests fail with no mutant applied:\n%s", failureOutput(out))
 	}
 
 	raw := parseTestNames(out, "--- PASS: ", "--- FAIL: ", "--- SKIP: ")
@@ -198,6 +198,23 @@ func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Du
 	}
 	sort.Strings(inventory)
 	return inventory, nil
+}
+
+// failureOutput strips the `-test.v` progress lines (=== RUN/PAUSE/CONT and
+// passing or skipped results) from a failed run's output, leaving the
+// failure messages, panics and FAIL summary.
+func failureOutput(out []byte) string {
+	var keep []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		trimmed := strings.TrimLeft(line, " ")
+		if strings.HasPrefix(trimmed, "=== ") ||
+			strings.HasPrefix(trimmed, "--- PASS: ") ||
+			strings.HasPrefix(trimmed, "--- SKIP: ") {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.Join(keep, "\n")
 }
 
 // RunMutant executes the compiled test binary with KANLY_MUTANT=mutID.

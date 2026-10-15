@@ -611,3 +611,55 @@ func TestRunKillsPackageInitMutants(t *testing.T) {
 		}
 	}
 }
+
+// TestRunReportsHealthyPackagesWhenOthersFail guards against one bad package
+// discarding the whole run: the healthy package's results must be reported,
+// each failure listed with the stage it failed in, and the exit code must
+// still signal that the run is incomplete.
+func TestRunReportsHealthyPackagesWhenOthersFail(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/partial")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--format=json", dir + "/..."}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit code: want 1 (incomplete run), got %d; stderr: %s", code, stderr.String())
+	}
+
+	var result struct {
+		Packages []struct {
+			Package string `json:"package"`
+			Killed  int    `json:"killed"`
+		} `json:"packages"`
+		Errors []struct {
+			Package string `json:"package"`
+			Stage   string `json:"stage"`
+			Error   string `json:"error"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON output: %v\n%s", err, stdout.String())
+	}
+
+	const base = "github.com/devenjarvis/kanly/internal/runner/testdata/partial/"
+	if len(result.Packages) != 1 || result.Packages[0].Package != base+"good" || result.Packages[0].Killed != 1 {
+		t.Errorf("packages: want only %sgood with 1 kill, got %+v", base, result.Packages)
+	}
+	stages := make(map[string]string)
+	for _, e := range result.Errors {
+		stages[e.Package] = e.Stage
+		if e.Error == "" {
+			t.Errorf("%s: empty error message", e.Package)
+		}
+	}
+	want := map[string]string{base + "broken": "baseline", base + "typeerr": "load"}
+	for pkg, stage := range want {
+		if stages[pkg] != stage {
+			t.Errorf("errors[%s].stage: want %q, got %q (all errors: %+v)", pkg, stage, stages[pkg], result.Errors)
+		}
+	}
+	if len(result.Errors) != len(want) {
+		t.Errorf("errors: want %d entries, got %+v", len(want), result.Errors)
+	}
+}

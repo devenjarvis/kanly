@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -56,10 +57,20 @@ type runConfig struct {
 	jobs       int          // worker pool size for per-test coverage and the mutant loop; >= 1
 }
 
+// stageError tags a runPackage failure with the pipeline stage it came from;
+// see report.PackageError for the stage names.
+type stageError struct {
+	stage string
+	err   error
+}
+
+func (e *stageError) Error() string { return e.stage + ": " + e.err.Error() }
+func (e *stageError) Unwrap() error { return e.err }
+
 func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) ([]mutation.Result, []string, []string, map[string]mutation.FuncRange, error) {
 	rew, err := schema.Rewrite(pkg, ops, cfg.filter)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("schema rewrite: %w", err)
+		return nil, nil, nil, nil, &stageError{"rewrite", err}
 	}
 
 	if len(rew.Mutations) == 0 {
@@ -86,13 +97,13 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 
 	overlayPath, cleanOverlay, err := runner.BuildOverlay(rew, pkg.Dir)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("build overlay: %w", err)
+		return nil, nil, nil, nil, &stageError{"rewrite", fmt.Errorf("build overlay: %w", err)}
 	}
 	defer cleanOverlay()
 
 	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("compile test binary: %w", err)
+		return nil, nil, nil, nil, &stageError{"compile", err}
 	}
 	defer cleanBin()
 
@@ -100,19 +111,19 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// for per-test coverage collection. See CompileCoverageBinary for why.
 	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("compile coverage binary: %w", err)
+		return nil, nil, nil, nil, &stageError{"compile", fmt.Errorf("coverage binary: %w", err)}
 	}
 	defer cleanCovBin()
 
 	inventory, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, cfg.timeout, cfg.testsRegex)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("baseline failed: %w", err)
+		return nil, nil, nil, nil, &stageError{"baseline", err}
 	}
 
 	// Collect per-test coverage once; pays off across all mutants.
 	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.timeout, cfg.jobs)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("collect coverage: %w", err)
+		return nil, nil, nil, nil, &stageError{"coverage", err}
 	}
 
 	// Per-test profile across the kept mutation set: how many distinct
@@ -211,7 +222,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, &stageError{"mutants", err}
 	}
 
 	// When a scope is active (filter or --mutant), drop tests from the reported
@@ -322,19 +333,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 	incidentalByPkg := make(map[string][]string)
 	funcRangesByPkg := make(map[string]map[string]mutation.FuncRange)
 
+	// A package that fails is recorded and the run moves on, so one broken
+	// package cannot discard its siblings' results.
+	var pkgErrors []report.PackageError
+	recordFailure := func(pkg, stage string, err error) {
+		msg := err.Error()
+		first, rest, multiline := strings.Cut(msg, "\n")
+		if multiline && strings.TrimSpace(rest) != "" {
+			first += " … (details in the report)"
+		}
+		fmt.Fprintf(stderr, "error in %s (%s): %s\n", pkg, stage, first)
+		pkgErrors = append(pkgErrors, report.PackageError{Package: pkg, Stage: stage, Error: msg})
+	}
+
 	for _, spec := range specs {
-		pkgs, err := source.LoadAll("", spec.Pattern)
+		pkgs, loadErrs, err := source.LoadAll("", spec.Pattern)
 		if err != nil {
 			fmt.Fprintf(stderr, "error loading packages for %q: %v\n", spec.Pattern, err)
 			return 1
 		}
-		if len(pkgs) == 0 {
+		if len(pkgs) == 0 && len(loadErrs) == 0 {
 			fmt.Fprintf(stderr, "no packages matched %q\n", spec.Pattern)
 			return 1
 		}
-		if len(spec.Funcs) > 0 && len(pkgs) != 1 {
-			fmt.Fprintf(stderr, "selector %q with function filter must resolve to one package; got %d\n", spec.Pattern, len(pkgs))
+		if n := len(pkgs) + len(loadErrs); len(spec.Funcs) > 0 && n != 1 {
+			fmt.Fprintf(stderr, "selector %q with function filter must resolve to one package; got %d\n", spec.Pattern, n)
 			return 1
+		}
+		for _, le := range loadErrs {
+			recordFailure(le.ImportPath, "load", le.Err)
 		}
 
 		for _, pkg := range pkgs {
@@ -361,8 +388,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 			results, inventory, incidental, funcRanges, err := runPackage(ctx, pkg, ops, cfg, stderr)
 			if err != nil {
-				fmt.Fprintf(stderr, "error in %s: %v\n", pkg.ImportPath, err)
-				return 1
+				var se *stageError
+				if errors.As(err, &se) {
+					recordFailure(pkg.ImportPath, se.stage, se.err)
+				} else {
+					recordFailure(pkg.ImportPath, "mutants", err)
+				}
+				continue
 			}
 			if len(results) == 0 {
 				fmt.Fprintf(stderr, "skip %s: no mutations\n", pkg.ImportPath)
@@ -379,8 +411,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	rep := report.Build(allResults, testInventory, incidentalByPkg)
 	rep.Scope = describeScope(specs, *diffFlag, *diffBaseFlag, *testsFlag, *mutantFlag)
+	rep.Errors = pkgErrors
 	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg}
-	return writeReport(stdout, stderr, *formatFlag, rep, llmSrc)
+	if code := writeReport(stdout, stderr, *formatFlag, rep, llmSrc); code != 0 {
+		return code
+	}
+	if len(pkgErrors) > 0 {
+		// The report is complete for every other package, but the run is
+		// not: never let a partial result pass as success.
+		return 1
+	}
+	return 0
 }
 
 // composeFilter combines an optional diff (file, line) predicate with an
