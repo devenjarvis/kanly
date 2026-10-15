@@ -571,3 +571,43 @@ func TestDescribeScope(t *testing.T) {
 		})
 	}
 }
+
+// TestRunKillsPackageInitMutants guards mutants that execute during package
+// initialization: in package-level var initializers (outside every coverage
+// block) and in init() functions (which can run before the dispatcher's own
+// init). Both are asserted on precisely, so every mutant must be killed.
+func TestRunKillsPackageInitMutants(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/initsample")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Mutants []struct {
+			Mutation struct {
+				Line     int    `json:"line"`
+				Function string `json:"function"`
+				Operator string `json:"operator"`
+				Mutant   string `json:"mutant"`
+			} `json:"mutation"`
+			Status string `json:"status"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON output: %v\n%s", err, stdout.String())
+	}
+	if len(result.Mutants) == 0 {
+		t.Fatal("no mutants generated")
+	}
+	for _, m := range result.Mutants {
+		// base = 3 is only read through Total and Inited; every value
+		// change is observable.
+		if m.Status != "killed" {
+			t.Errorf("line %d (%q) %s→%s: status %s, want killed",
+				m.Mutation.Line, m.Mutation.Function, m.Mutation.Operator, m.Mutation.Mutant, m.Status)
+		}
+	}
+}

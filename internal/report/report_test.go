@@ -180,6 +180,29 @@ func TestBuildRedundantTestGroups(t *testing.T) {
 	}
 }
 
+// TestBuildRedundantTestGroupsArePerPackage guards against grouping tests
+// from different packages: mutation IDs restart in every package, so two
+// tests that each killed "mutant 1" of their own package are unrelated.
+func TestBuildRedundantTestGroupsArePerPackage(t *testing.T) {
+	results := []mutation.Result{
+		{
+			Mutation:     mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestP"},
+		},
+		{
+			Mutation:     mutation.Mutation{ID: 1, Package: "q", File: "q.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
+			KillingTests: []string{"TestQ"},
+		},
+	}
+	inventory := map[string][]string{"p": {"TestP"}, "q": {"TestQ"}}
+	r := report.Build(results, inventory, nil)
+	if len(r.RedundantTestGroups) != 0 {
+		t.Errorf("RedundantTestGroups: want none across packages, got %v", r.RedundantTestGroups)
+	}
+}
+
 func TestBuildSurvivorsByFunction(t *testing.T) {
 	r := report.Build(makeResults(), makeInventory(), nil)
 

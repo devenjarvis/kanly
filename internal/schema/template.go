@@ -43,20 +43,18 @@ type __cBoolean interface {
 	~bool
 }
 
-var __kanlyActiveMutant int
+// __kanlyActiveMutant is set by a variable initializer, not an init(): Go
+// initializes package variables in dependency order before running any
+// init(), so it is ready for every mutated var initializer and init() body
+// that reaches a dispatcher, whatever file they live in.
+var __kanlyActiveMutant = __kanlyReadActiveMutant()
 
-func init() {
-	s := os.Getenv("KANLY_MUTANT")
-	if s == "" {
-		__kanlyActiveMutant = -1
-		return
-	}
-	v, err := strconv.Atoi(s)
+func __kanlyReadActiveMutant() int {
+	v, err := strconv.Atoi(os.Getenv("KANLY_MUTANT"))
 	if err != nil || v < 1 {
-		__kanlyActiveMutant = -1
-		return
+		return -1
 	}
-	__kanlyActiveMutant = v
+	return v
 }
 
 // __cMutInt executes either the mutant or the original integer binary operation.
@@ -116,9 +114,11 @@ func __cMutIntCmp[T __cInteger](a, b T, op int, mutIDs ...int) bool {
 }
 {{end}}{{if .BoolLogicMuts}}
 // __cMutBool executes either the mutant or the original boolean binary operation.
-// Operands are passed as closures to preserve short-circuit semantics.
+// a is the already-evaluated left operand (Go evaluates it first under both
+// && and ||) and fixes T, so named bools need no type name at the call site.
+// b is a closure so the right operand keeps its short-circuit semantics.
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
-func __cMutBool[T __cBoolean](a, b func() T, op int, mutIDs ...int) T {
+func __cMutBool[T __cBoolean](a T, b func() bool, op int, mutIDs ...int) T {
 	for _, id := range mutIDs {
 		if id == __kanlyActiveMutant {
 			switch id {
@@ -130,9 +130,9 @@ func __cMutBool[T __cBoolean](a, b func() T, op int, mutIDs ...int) T {
 	}
 	switch op {
 	case __cAnd:
-		return a() && b()
+		return T(bool(a) && b())
 	case __cOr:
-		return a() || b()
+		return T(bool(a) || b())
 	}
 	panic("__cMutBool: unknown op")
 }

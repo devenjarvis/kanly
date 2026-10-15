@@ -31,6 +31,11 @@ type StructFieldZero struct{}
 func (StructFieldZero) Name() string          { return "struct_field_zero" }
 func (StructFieldZero) DispatcherKey() string { return "return_zero" }
 
+// WrapsExpr marks StructFieldZero as a mutation.Wrapper: Rewrite wraps the candidate
+// expression whatever its shape, so it composes with other operators on the
+// same node.
+func (StructFieldZero) WrapsExpr() {}
+
 func (StructFieldZero) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 	var candidates []mutation.Candidate
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -50,7 +55,13 @@ func (StructFieldZero) Find(file *ast.File, info *types.Info) []mutation.Candida
 			if !ok {
 				continue
 			}
-			c, ok := returnZeroCandidate(info, kv.Value)
+			var slot types.Type
+			if key, ok := kv.Key.(*ast.Ident); ok {
+				if field := info.ObjectOf(key); field != nil {
+					slot = field.Type()
+				}
+			}
+			c, ok := returnZeroCandidate(info, kv.Value, slot)
 			if !ok {
 				continue
 			}

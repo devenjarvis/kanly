@@ -17,8 +17,10 @@ import (
 // Exclusions: defer/go-wrapped calls are *ast.DeferStmt / *ast.GoStmt, not
 // *ast.ExprStmt, and are naturally skipped. The builtins panic, print, and
 // println are excluded by Find — deleting panic gives a low-signal flip
-// (crash-or-not-crash); print/println are debug-only. close, delete, clear,
-// and recover are kept: they have observable semantics worth catching.
+// (crash-or-not-crash); print/println are debug-only. recover is excluded
+// because it only works when called directly by a deferred function, which
+// the closure wrapper breaks. close, delete, and clear are kept: they have
+// observable semantics worth catching.
 //
 // Rewriter interaction: this operator targets *ast.CallExpr nodes whose parent
 // is an *ast.ExprStmt. The schema rewriter's node→group flattening
@@ -115,6 +117,11 @@ func isExcludedBuiltin(info *types.Info, fn ast.Expr) bool {
 	}
 	switch builtin.Name() {
 	case "panic", "print", "println":
+		return true
+	case "recover":
+		// recover only stops a panic when called directly by the deferred
+		// function; the __cMutCallSkip closure would break it even while
+		// the mutant is inactive.
 		return true
 	}
 	return false

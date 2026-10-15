@@ -75,6 +75,27 @@ func enclosingFunc(spans []funcSpan, pos token.Pos) string {
 	return ""
 }
 
+// collectFileScopeFuncLits returns the ranges of function literals outside
+// any FuncDecl (e.g. `var h = func() {...}`). Their bodies run when called,
+// not during package initialization.
+func collectFileScopeFuncLits(file *ast.File) []funcSpan {
+	var spans []funcSpan
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		ast.Inspect(gd, func(n ast.Node) bool {
+			if fl, ok := n.(*ast.FuncLit); ok {
+				spans = append(spans, funcSpan{start: fl.Pos(), end: fl.End()})
+				return false
+			}
+			return true
+		})
+	}
+	return spans
+}
+
 // FuncRanges returns the source range of every top-level FuncDecl in pkg,
 // keyed by the canonical funcDeclName form ("Foo", "(T).Bar", "(*T).Bar").
 // Used by the LLM renderer to slice the enclosing function's source out of
@@ -114,6 +135,20 @@ func FuncNames(pkg *source.Package) []string {
 	return out
 }
 
+func inSpans(spans []funcSpan, pos token.Pos) bool {
+	for _, s := range spans {
+		if pos >= s.start && pos < s.end {
+			return true
+		}
+	}
+	return false
+}
+
+func isWrapper(op mutation.Operator) bool {
+	_, ok := op.(mutation.Wrapper)
+	return ok
+}
+
 // Rewritten holds the results of schema rewriting: rewritten file sources and the dispatcher.
 type Rewritten struct {
 	Files      map[string]string // absolute file path → rewritten source
@@ -122,6 +157,12 @@ type Rewritten struct {
 }
 
 // Rewrite transforms pkg's source files into a mutant schema using the provided operators.
+//
+// Mutation IDs are deterministic: files are visited in path order, and every
+// candidate is numbered before the filter runs. A mutant therefore keeps its
+// ID across runs and across scopes (a --diff or pkg:func run reports the same
+// IDs as a full run), so `--mutant=<ids>` re-runs exactly what was reported.
+// IDs are unique within the package only.
 // If filter is non-nil, only candidates whose (absolute file path, 1-based line
 // number, enclosing function name) satisfy filter are emitted; passing nil disables
 // filtering. The function name is the canonical funcDeclName form ("Foo",
@@ -131,7 +172,14 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 	var mutations []mutation.Mutation
 	rewrittenFiles := make(map[string]string)
 
-	for filePath, file := range pkg.Files {
+	filePaths := make([]string, 0, len(pkg.Files))
+	for p := range pkg.Files {
+		filePaths = append(filePaths, p)
+	}
+	sort.Strings(filePaths)
+
+	for _, filePath := range filePaths {
+		file := pkg.Files[filePath]
 		type entry struct {
 			node ast.Node
 			cand mutation.Candidate
@@ -141,15 +189,16 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 		var entries []entry
 
 		funcSpans := collectFuncSpans(file)
+		litSpans := collectFileScopeFuncLits(file)
 
 		for _, op := range ops {
 			for _, c := range op.Find(file, pkg.TypesInfo) {
 				pos := pkg.Fset.Position(c.Pos)
 				funcName := enclosingFunc(funcSpans, c.Pos)
+				mutID++
 				if filter != nil && !filter(filePath, pos.Line, funcName) {
 					continue
 				}
-				mutID++
 				mutations = append(mutations, mutation.Mutation{
 					ID:           mutID,
 					Package:      pkg.ImportPath,
@@ -160,6 +209,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 					OperatorName: op.Name(),
 					Original:     c.Original,
 					Mutant:       c.Mutant,
+					PackageInit:  funcName == "" && !inSpans(litSpans, c.Pos),
 				})
 				entries = append(entries, entry{node: c.Node, cand: c, id: mutID, op: op})
 			}
@@ -180,20 +230,32 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 			cand   mutation.Candidate
 		}
 		groups := make(map[groupKey]*rewriteGroup)
+		// nodeGroups lists every group on a node in first-seen order, which
+		// is deterministic because entries are.
+		nodeGroups := make(map[ast.Node][]*rewriteGroup)
 		for _, e := range entries {
 			key := groupKey{node: e.node, dispatcherKey: e.op.DispatcherKey()}
 			g, ok := groups[key]
 			if !ok {
 				g = &rewriteGroup{op: e.op, cand: e.cand}
 				groups[key] = g
+				nodeGroups[e.node] = append(nodeGroups[e.node], g)
 			}
 			g.mutIDs = append(g.mutIDs, e.id)
 		}
 
-		// Build a flat node→group lookup for the Apply callback.
-		nodeMap := make(map[ast.Node]*rewriteGroup, len(groups))
-		for key, g := range groups {
-			nodeMap[key.node] = g
+		// When several dispatchers target one node, the shape-specific
+		// rewrite (which type-asserts the original node) must run first and
+		// every mutation.Wrapper then wraps the result. Two shape-specific
+		// rewrites cannot compose, so refuse rather than drop mutants.
+		for node, gs := range nodeGroups {
+			sort.SliceStable(gs, func(i, j int) bool {
+				return !isWrapper(gs[i].op) && isWrapper(gs[j].op)
+			})
+			if len(gs) > 1 && !isWrapper(gs[1].op) {
+				return nil, fmt.Errorf("%s: operators %s and %s both rewrite the same expression",
+					pkg.Fset.Position(node.Pos()), gs[0].op.Name(), gs[1].op.Name())
+			}
 		}
 
 		// Post-order rewrite: children are visited (and possibly replaced) before
@@ -204,11 +266,17 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 		// stranded inner replacements on the detached subtree (they never
 		// reached the new outer call).
 		newFile := astutil.Apply(file, nil, func(cursor *astutil.Cursor) bool {
-			g, ok := nodeMap[cursor.Node()]
+			gs, ok := nodeGroups[cursor.Node()]
 			if !ok {
 				return true
 			}
-			cursor.Replace(g.op.Rewrite(g.cand, g.mutIDs))
+			cur := cursor.Node()
+			for _, g := range gs {
+				c := g.cand
+				c.Node = cur
+				cur = g.op.Rewrite(c, g.mutIDs)
+			}
+			cursor.Replace(cur)
 			return true
 		})
 

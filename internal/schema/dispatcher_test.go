@@ -99,10 +99,10 @@ func TestRenderDispatcherEmitsBoolFuncs(t *testing.T) {
 	}
 
 	checks := []string{
-		"func __cMutBool[T __cBoolean](a, b func() T, op int, mutIDs ...int) T",
+		"func __cMutBool[T __cBoolean](a T, b func() bool, op int, mutIDs ...int) T",
 		"func __cMutNot[T __cBoolean](x T, mutIDs ...int) T",
 		"case 21:",
-		"return a() || b()",
+		"return T(bool(a) || b())",
 		"case 22:",
 		"return x",
 		"return !x",
@@ -471,9 +471,9 @@ func TestMutantExprReturnAMinusB(t *testing.T) {
 }
 
 func TestBoolLogicExprReturnsOrExpr(t *testing.T) {
-	// boolLogicExpr must return "a() || b()" for Mutant=="||".
-	// The hardcoded "case __cOr: return a() || b()" in the template is a different
-	// occurrence; the mutant case "case 199: return a() || b()" proves the function
+	// boolLogicExpr must return "T(bool(a) || b())" for Mutant=="||".
+	// The hardcoded "case __cOr: return T(bool(a) || b())" in the template is a
+	// different occurrence; the mutant case "case 199: ..." proves the function
 	// returns the right string.
 	muts := []mutation.Mutation{
 		{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"},
@@ -483,8 +483,8 @@ func TestBoolLogicExprReturnsOrExpr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDispatcher: %v", err)
 	}
-	if !strings.Contains(src, "case 199: return a() || b()") {
-		t.Errorf("expected 'case 199: return a() || b()', got:\n%s", src)
+	if !strings.Contains(src, "case 199: return T(bool(a) || b())") {
+		t.Errorf("expected 'case 199: return T(bool(a) || b())', got:\n%s", src)
 	}
 }
 

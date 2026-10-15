@@ -10,7 +10,9 @@ import (
 )
 
 // BoolLogic finds boolean binary expressions and swaps && ↔ ||.
-// Short-circuit semantics are preserved by wrapping each operand in a closure.
+// Short-circuit semantics are preserved by wrapping the right operand in a
+// closure; the left operand is always evaluated first, so it is passed as a
+// plain argument and fixes the dispatcher's result type.
 type BoolLogic struct{}
 
 func (BoolLogic) Name() string          { return "bool_logic" }
@@ -26,7 +28,12 @@ func (BoolLogic) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 		if expr.Op != token.LAND && expr.Op != token.LOR {
 			return true
 		}
-		if !boolOperands(info, expr.X, expr.Y) {
+		if !boolOperands(info, expr.X, expr.Y) || !boolResultInferable(info, expr, expr.X) {
+			return true
+		}
+		if containsRecover(info, expr.Y) {
+			// recover() only works when called directly by a deferred
+			// function; inside the closure it would always return nil.
 			return true
 		}
 		var mutOp token.Token
@@ -38,13 +45,11 @@ func (BoolLogic) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 		// Capture operand type so Rewrite can emit closures with the right
 		// return type (e.g. `func() MyBool` for named-bool operands). Both
 		// operands share the same type by boolOperands' Identical check.
-		operandType := info.Types[expr.X].Type
 		candidates = append(candidates, mutation.Candidate{
 			Node:     expr,
 			Pos:      expr.OpPos,
 			Original: expr.Op.String(),
 			Mutant:   mutOp.String(),
-			Type:     operandType,
 		})
 		return true
 	})
@@ -63,10 +68,9 @@ func (BoolLogic) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	} else {
 		opcode = "__cOr"
 	}
-	typeName := boolReturnTypeName(c.Type)
 	args := []ast.Expr{
-		boolFuncLit(expr.X, typeName),
-		boolFuncLit(expr.Y, typeName),
+		expr.X,
+		boolFuncLit(expr.Y),
 		&ast.Ident{Name: opcode},
 	}
 	for _, id := range mutIDs {
@@ -91,7 +95,7 @@ func (BoolNot) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 		if expr.Op != token.NOT {
 			return true
 		}
-		if !boolOperand(info, expr.X) {
+		if !boolOperand(info, expr.X) || !boolResultInferable(info, expr, expr.X) {
 			return true
 		}
 		candidates = append(candidates, mutation.Candidate{
@@ -115,49 +119,25 @@ func (BoolNot) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	return &ast.CallExpr{Fun: &ast.Ident{Name: "__cMutNot"}, Args: args}
 }
 
-// boolFuncLit wraps expr in func() T { return expr } where T is the operand
-// type (typically `bool`, but possibly a named wrapper). Preserves the
-// original node pointer so astutil.Apply can recurse into nested bool
+// boolFuncLit wraps expr in func() bool { return bool(expr) }. The conversion
+// accepts plain and named bools alike, so no type name is needed. Preserves
+// the original node pointer so astutil.Apply can recurse into nested bool
 // expressions and rewrite them too.
-func boolFuncLit(expr ast.Expr, typeName ast.Expr) *ast.FuncLit {
+func boolFuncLit(expr ast.Expr) *ast.FuncLit {
+	conv := &ast.CallExpr{Fun: &ast.Ident{Name: "bool"}, Args: []ast.Expr{expr}}
 	return &ast.FuncLit{
 		Type: &ast.FuncType{
+			Params: &ast.FieldList{},
 			Results: &ast.FieldList{
 				List: []*ast.Field{
-					{Type: typeName},
+					{Type: &ast.Ident{Name: "bool"}},
 				},
 			},
 		},
 		Body: &ast.BlockStmt{
 			List: []ast.Stmt{
-				&ast.ReturnStmt{Results: []ast.Expr{expr}},
+				&ast.ReturnStmt{Results: []ast.Expr{conv}},
 			},
 		},
 	}
 }
-
-// boolReturnTypeName renders t as an ast.Expr suitable for use as a func()
-// return type. Handles plain bool, named types in the current package
-// (`MyBool`), and qualified named types from imports (`pkg.MyBool`). Falls
-// back to plain `bool` when t is nil — backwards-compatible with operators
-// that don't set Candidate.Type yet.
-func boolReturnTypeName(t types.Type) ast.Expr {
-	if t == nil {
-		return &ast.Ident{Name: "bool"}
-	}
-	if basic, ok := t.(*types.Basic); ok && basic.Kind() == types.Bool {
-		return &ast.Ident{Name: "bool"}
-	}
-	if named, ok := t.(*types.Named); ok {
-		obj := named.Obj()
-		if obj.Pkg() == nil {
-			return &ast.Ident{Name: obj.Name()}
-		}
-		return &ast.SelectorExpr{
-			X:   &ast.Ident{Name: obj.Pkg().Name()},
-			Sel: &ast.Ident{Name: obj.Name()},
-		}
-	}
-	return &ast.Ident{Name: "bool"}
-}
-

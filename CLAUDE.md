@@ -61,8 +61,19 @@ if !types.Identical(lv.Type, rv.Type) { return false }
 redundant for non-constant binary operands (Go's type-checker enforces it
 already) but is kept as defensive backstop.
 
-The literal operators `int_literal` and `bool_literal` are exceptions —
-they keep the strict-identity check (`lv.Type == types.Typ[types.Int]`)
-because the rewriter cannot infer the contextual type at an untyped-literal
-call site. Sized/named literal coverage is tracked in
+The literal operators `int_literal`, `bool_literal`, and `string_literal`
+are exceptions — they keep the strict-identity check
+(`lv.Type == types.Typ[types.Int]`) because the rewriter cannot infer the
+contextual type at an untyped-literal call site. Sized/named literal coverage is tracked in
 `README.md`'s "Upcoming operators" section.
+
+### A rewrite that doesn't compile aborts the whole package
+
+Every dispatcher returns a concrete or inferred type, so check that it fits
+the candidate's *contextual* type (`info.Types[expr].Type`, which records
+what an untyped expression was converted to). Never emit a type name at the
+call site — local, aliased, and same-package types can't be spelled
+reliably; let generic inference do it (see `__cMutBool`). Skip positions Go
+requires to be constant via `inConstantPosition`. Add any new hazard to
+`internal/runner/testdata/tricky`, which `TestSchemaCompilesTrickyConstructs`
+rewrites with every operator and compiles.

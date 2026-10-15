@@ -36,7 +36,7 @@ func TestCompileTestBinaryErrorDoesNotPanic(t *testing.T) {
 	}
 	ctx := context.Background()
 	// Pass a nonexistent overlay — go test -c will fail immediately.
-	_, cleanup, err := runner.CompileTestBinary(ctx, "github.com/devenjarvis/kanly/internal/runner", "/nonexistent/overlay.json")
+	_, cleanup, err := runner.CompileTestBinary(ctx, "github.com/devenjarvis/kanly/internal/runner", "/nonexistent/overlay.json", "")
 	if err == nil {
 		t.Fatal("expected error for bad overlay, got nil")
 	}
@@ -180,7 +180,7 @@ func TestRunMutantKillsAndSurvives(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
 	if err != nil {
 		t.Fatalf("CompileTestBinary: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestRunMutantKillsBooleanMutants(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
 	if err != nil {
 		t.Fatalf("CompileTestBinary: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestRunMutantBoolSurvivesWeakTest(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
 	if err != nil {
 		t.Fatalf("CompileTestBinary: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestRunMutantKillsComparisonMutants(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
 	if err != nil {
 		t.Fatalf("CompileTestBinary: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestRunMutantHonorsTestFilter(t *testing.T) {
 	defer cleanOverlay()
 
 	ctx := context.Background()
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath)
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
 	if err != nil {
 		t.Fatalf("CompileTestBinary: %v", err)
 	}
@@ -434,5 +434,90 @@ func TestRunMutantHonorsTestFilter(t *testing.T) {
 	}
 	if status != mutation.StatusSurvived {
 		t.Errorf("Add mutant filtered to TestSub: want Survived, got %s", status)
+	}
+}
+
+// TestCompileTestBinaryOldGoDirective guards against modules whose go.mod
+// predates generics: the schema dispatcher is generic, so without a language
+// override `go test -c` rejects it and the whole package is skipped.
+func TestCompileTestBinaryOldGoDirective(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "testdata/oldgo")
+	pkg, err := source.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if pkg.GoVersion != "1.16" {
+		t.Fatalf("GoVersion = %q, want %q", pkg.GoVersion, "1.16")
+	}
+
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}}, nil)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	overlayPath, cleanup, err := runner.BuildOverlay(rew, dir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanup()
+
+	// go test resolves the fixture module from its own directory.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	ctx := context.Background()
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
+	if err != nil {
+		t.Fatalf("CompileTestBinary: %v", err)
+	}
+	defer cleanBin()
+
+	status, _, _, err := runner.RunMutant(ctx, binaryPath, rew.Mutations[0].ID, dir, nil, 30*time.Second)
+	if err != nil {
+		t.Fatalf("RunMutant: %v", err)
+	}
+	if status != mutation.StatusKilled {
+		t.Errorf("Add +→- in a go1.16 module: expected Killed, got %s", status)
+	}
+}
+
+// TestSchemaCompilesTrickyConstructs rewrites a fixture of historically
+// non-compiling constructs with every registered operator and requires the
+// schema to build and pass its baseline. A single bad rewrite aborts mutation
+// testing for the entire package, so this is the cheapest regression net.
+func TestSchemaCompilesTrickyConstructs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "testdata/tricky")
+	pkg, err := source.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rew, err := schema.Rewrite(pkg, mutation.Operators(), nil)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	overlayPath, cleanup, err := runner.BuildOverlay(rew, dir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanup()
+
+	ctx := context.Background()
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
+	if err != nil {
+		t.Fatalf("CompileTestBinary: %v", err)
+	}
+	defer cleanBin()
+	if _, err := runner.RunBaseline(ctx, binaryPath, dir, 30*time.Second, ""); err != nil {
+		t.Fatalf("RunBaseline: %v", err)
 	}
 }

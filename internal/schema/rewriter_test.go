@@ -334,3 +334,100 @@ func TestRewriteCallDeleteAndIntArithCoexist(t *testing.T) {
 		t.Errorf("expected __cMutCallSkip in dispatcher")
 	}
 }
+
+// TestRewriteComposesOperatorsOnSameNode guards against mutants that are
+// recorded but never placed in the schema: when two operators with different
+// dispatchers target one node, both rewrites must land, or the missing
+// mutants are reported as survivors they can never be killed as.
+func TestRewriteComposesOperatorsOnSameNode(t *testing.T) {
+	ops := []mutation.Operator{operators.IntArith{}, operators.SliceIndex{}, operators.SliceRange{}, operators.ReturnZero{}}
+	// Map iteration order once decided which operator won, so repeat.
+	// Rewrite edits the package's AST in place, so reload each time.
+	for run := 0; run < 10; run++ {
+		pkg, err := source.Load(relDir(t, "testdata/collide"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		rew, err := schema.Rewrite(pkg, ops, nil)
+		if err != nil {
+			t.Fatalf("Rewrite: %v", err)
+		}
+		var src string
+		for _, s := range rew.Files {
+			src = s
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), "collide.go", src, 0)
+		if err != nil {
+			t.Fatalf("rewritten source does not parse: %v\n%s", err, src)
+		}
+		placed := make(map[string]bool)
+		ast.Inspect(file, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				for _, a := range call.Args {
+					if lit, ok := a.(*ast.BasicLit); ok && lit.Kind == token.INT {
+						placed[lit.Value] = true
+					}
+				}
+			}
+			return true
+		})
+		for _, m := range rew.Mutations {
+			if !placed[fmt.Sprint(m.ID)] {
+				t.Fatalf("run %d: mutation %d (%s %s→%s, line %d) is missing from the schema:\n%s",
+					run, m.ID, m.OperatorName, m.Original, m.Mutant, m.Line, src)
+			}
+		}
+		// The slice_range bound on a[i] must offset the whole bound, not
+		// reuse slice_index's rewrite of i inside it.
+		if !strings.Contains(src, "s[__cMutIdx(a[__cMutIdx(i,") {
+			t.Fatalf("run %d: slice_range on a[i] not composed around slice_index:\n%s", run, src)
+		}
+	}
+}
+
+// TestRewriteIDsAreStable guards the `--mutant=<ids>` re-run loop: IDs must
+// not depend on map iteration order, and a filtered (scoped) rewrite must
+// report the same ID for a mutant as an unfiltered one.
+func TestRewriteIDsAreStable(t *testing.T) {
+	type key struct {
+		file string
+		line int
+		op   string
+		mut  string
+	}
+	idsOf := func(filter func(string, int, string) bool) map[key]int {
+		pkg, err := source.Load(relDir(t, "../runner/testdata/multifile"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}, operators.IntLiteral{}}, filter)
+		if err != nil {
+			t.Fatalf("Rewrite: %v", err)
+		}
+		out := make(map[key]int)
+		for _, m := range rew.Mutations {
+			out[key{filepath.Base(m.File), m.Line, m.OperatorName, m.Mutant}] = m.ID
+		}
+		return out
+	}
+
+	full := idsOf(nil)
+	for run := 0; run < 10; run++ {
+		got := idsOf(nil)
+		for k, id := range full {
+			if got[k] != id {
+				t.Fatalf("run %d: %v has ID %d, first run gave %d", run, k, got[k], id)
+			}
+		}
+	}
+
+	scoped := idsOf(func(file string, _ int, _ string) bool { return filepath.Base(file) == "d.go" })
+	if len(scoped) == 0 {
+		t.Fatal("scoped rewrite kept no mutations")
+	}
+	for k, id := range scoped {
+		if full[k] != id {
+			t.Errorf("%v: scoped ID %d, unscoped ID %d", k, id, full[k])
+		}
+	}
+}

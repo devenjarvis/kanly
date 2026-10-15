@@ -10,9 +10,9 @@ import (
 func boolLogicExpr(m mutation.Mutation) string {
 	switch m.Mutant {
 	case "&&":
-		return "a() && b()"
+		return "T(bool(a) && b())"
 	}
-	return "a() || b()"
+	return "T(bool(a) || b())"
 }
 
 func mutantExpr(m mutation.Mutation) string {
@@ -106,11 +106,11 @@ func RenderDispatcher(pkgName string, muts []mutation.Mutation) (string, error) 
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, map[string]interface{}{
-		"PkgName":       pkgName,
-		"IntArithMuts":  byOperator(muts, "int_arith"),
-		"IntCmpMuts":    byOperator(muts, "int_cmp_boundary", "int_cmp_negate"),
-		"BoolLogicMuts": byOperator(muts, "bool_logic"),
-		"BoolNotMuts":   byOperator(muts, "bool_not"),
+		"PkgName":        pkgName,
+		"IntArithMuts":   byOperator(muts, "int_arith"),
+		"IntCmpMuts":     byOperator(muts, "int_cmp_boundary", "int_cmp_negate"),
+		"BoolLogicMuts":  byOperator(muts, "bool_logic"),
+		"BoolNotMuts":    byOperator(muts, "bool_not"),
 		"ErrReturnMuts":  byOperator(muts, "err_return_nil"),
 		"CallDeleteMuts": byOperator(muts, "call_delete"),
 		"StringLitMuts":  byOperator(muts, "string_literal"),

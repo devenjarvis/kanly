@@ -6,17 +6,11 @@ import (
 	"go/types"
 )
 
-
 type Candidate struct {
 	Node     ast.Node
 	Pos      token.Pos // raw position; resolve with the package FileSet
 	Original string
 	Mutant   string
-	// Type is the static type of the candidate's operand, when the operator
-	// needs it to render type-bearing AST forms (e.g. bool_logic uses it to
-	// emit `func() MyBool` closures over named-bool operands). Optional —
-	// nil for operators whose Rewrite doesn't depend on the operand type.
-	Type types.Type
 }
 
 type Operator interface {
@@ -30,6 +24,16 @@ type Operator interface {
 	// Rewrite returns the replacement AST node for the given candidate.
 	// mutIDs contains all mutation IDs assigned to this call site (≥1).
 	Rewrite(c Candidate, mutIDs []int) ast.Node
+}
+
+// Wrapper is implemented by operators whose Rewrite wraps the candidate
+// expression in a dispatcher call without inspecting its shape (for example
+// return_zero's __cMutRetZero(expr, ...)). Such an operator can share a node
+// with one shape-specific operator: the rewriter applies the shape-specific
+// rewrite first and then wraps its result, so every mutant reaches the schema.
+type Wrapper interface {
+	Operator
+	WrapsExpr()
 }
 
 var registry []Operator
