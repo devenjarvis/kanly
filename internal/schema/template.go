@@ -116,9 +116,11 @@ func __cMutIntCmp[T __cInteger](a, b T, op int, mutIDs ...int) bool {
 }
 {{end}}{{if .BoolLogicMuts}}
 // __cMutBool executes either the mutant or the original boolean binary operation.
-// Operands are passed as closures to preserve short-circuit semantics.
+// a is the already-evaluated left operand (Go evaluates it first under both
+// && and ||) and fixes T, so named bools need no type name at the call site.
+// b is a closure so the right operand keeps its short-circuit semantics.
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
-func __cMutBool[T __cBoolean](a, b func() T, op int, mutIDs ...int) T {
+func __cMutBool[T __cBoolean](a T, b func() bool, op int, mutIDs ...int) T {
 	for _, id := range mutIDs {
 		if id == __kanlyActiveMutant {
 			switch id {
@@ -130,9 +132,9 @@ func __cMutBool[T __cBoolean](a, b func() T, op int, mutIDs ...int) T {
 	}
 	switch op {
 	case __cAnd:
-		return a() && b()
+		return T(bool(a) && b())
 	case __cOr:
-		return a() || b()
+		return T(bool(a) || b())
 	}
 	panic("__cMutBool: unknown op")
 }

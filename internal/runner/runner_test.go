@@ -487,3 +487,37 @@ func TestCompileTestBinaryOldGoDirective(t *testing.T) {
 		t.Errorf("Add +→- in a go1.16 module: expected Killed, got %s", status)
 	}
 }
+
+// TestSchemaCompilesTrickyConstructs rewrites a fixture of historically
+// non-compiling constructs with every registered operator and requires the
+// schema to build and pass its baseline. A single bad rewrite aborts mutation
+// testing for the entire package, so this is the cheapest regression net.
+func TestSchemaCompilesTrickyConstructs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "testdata/tricky")
+	pkg, err := source.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rew, err := schema.Rewrite(pkg, mutation.Operators(), nil)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	overlayPath, cleanup, err := runner.BuildOverlay(rew, dir)
+	if err != nil {
+		t.Fatalf("BuildOverlay: %v", err)
+	}
+	defer cleanup()
+
+	ctx := context.Background()
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
+	if err != nil {
+		t.Fatalf("CompileTestBinary: %v", err)
+	}
+	defer cleanBin()
+	if _, err := runner.RunBaseline(ctx, binaryPath, dir, 30*time.Second, ""); err != nil {
+		t.Fatalf("RunBaseline: %v", err)
+	}
+}

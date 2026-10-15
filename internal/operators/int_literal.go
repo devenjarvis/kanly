@@ -20,6 +20,7 @@ import (
 //   - Const declarations — initializers must be constant expressions.
 //   - Struct field tags (string-only, but defensive).
 //   - Array type lengths (e.g. `[10]int{}`) — must be a constant expression.
+//   - Array/slice composite-literal keys (e.g. `[]string{0: "a"}`) — likewise.
 //
 // Strict-identity type policy: the literal's typed value in context must be
 // exactly types.Typ[types.Int] — named ints (`type MyInt int`), sized ints
@@ -50,7 +51,7 @@ func (IntLiteral) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 			return true
 		}
 		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.INT {
-			if litMutable(stack) && intLitOperand(info, lit) {
+			if litMutable(stack) && !inConstantPosition(info, stack, lit) && intLitOperand(info, lit) {
 				for _, m := range intLitMutants(lit.Value) {
 					candidates = append(candidates, mutation.Candidate{
 						Node:     lit,

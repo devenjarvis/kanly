@@ -68,7 +68,9 @@ func (IntCmpBoundary) Find(file *ast.File, info *types.Info) []mutation.Candidat
 		if !ok {
 			return true
 		}
-		if !intOperands(info, expr.X, expr.Y) {
+		// __cMutIntCmp returns plain bool, which does not fit a named-bool
+		// context such as `var b MyBool = n < 5`.
+		if !intOperands(info, expr.X, expr.Y) || !isPlainBoolResult(info, expr) {
 			return true
 		}
 		candidates = append(candidates, mutation.Candidate{
@@ -104,7 +106,9 @@ func (IntCmpNegate) Find(file *ast.File, info *types.Info) []mutation.Candidate 
 		if !ok {
 			return true
 		}
-		if !intOperands(info, expr.X, expr.Y) {
+		// __cMutIntCmp returns plain bool, which does not fit a named-bool
+		// context such as `var b MyBool = n < 5`.
+		if !intOperands(info, expr.X, expr.Y) || !isPlainBoolResult(info, expr) {
 			return true
 		}
 		candidates = append(candidates, mutation.Candidate{
