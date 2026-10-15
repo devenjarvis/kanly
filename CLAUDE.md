@@ -36,7 +36,7 @@ KANLY_CORPUS=1 go test -timeout 30m ./internal/corpus/
 GOLDEN_UPDATE=1 go test ./internal/report
 ```
 
-CI (`.github/workflows/ci.yml`) runs gofmt (excluding `testdata/`), `go vet`, staticcheck, `go test -race ./...`, and the corpus on every PR.
+CI (`.github/workflows/ci.yml`) runs gofmt (excluding `testdata/`), `go vet`, staticcheck, `go test -race ./...`, and the corpus on every PR; the tests and corpus run on both the go.mod Go version and the latest stable release.
 
 ## Conventions
 
@@ -82,4 +82,6 @@ call site — local, aliased, and same-package types can't be spelled
 reliably; let generic inference do it (see `__cMutBool`). Skip positions Go
 requires to be constant via `inConstantPosition`. Add any new hazard to
 `internal/runner/testdata/tricky`, which `TestSchemaCompilesTrickyConstructs`
-rewrites with every operator and compiles.
+rewrites with every operator and compiles. Toolchains differ here (a
+`//go:build go1.6` line sets that file's language version, and go1.23.0
+enforces it), so run the suite on the go.mod Go version too, as CI does.

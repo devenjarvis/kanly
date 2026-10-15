@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/devenjarvis/kanly/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/schema"
 )
 
 // FileLine identifies a source location by absolute file path and 1-based line.
@@ -58,21 +59,16 @@ func parseTestNames(out []byte, prefixes ...string) []string {
 	return names
 }
 
-// minSchemaLang is the lowest language version the mutant schema compiles
-// under: the dispatcher uses generics, and its call sites rely on the
-// untyped-constant inference rules added in Go 1.21.
-const minSchemaLang = "go1.21"
-
 // schemaLangFlags returns the extra `go test` flags needed to compile the
 // schema for a module whose `go` directive is goVersion. Modules older than
-// minSchemaLang get the package's language version raised to it; newer (or
+// schema.MinLang get the package's language version raised to it; newer (or
 // non-module, "") packages are left alone. Raising never crosses go1.22, so
 // the loop-variable semantics of the user's code are unchanged.
 func schemaLangFlags(pkgPath, goVersion string) []string {
-	if goVersion == "" || version.Compare("go"+goVersion, minSchemaLang) >= 0 {
+	if goVersion == "" || version.Compare("go"+goVersion, schema.MinLang) >= 0 {
 		return nil
 	}
-	return []string{"-gcflags=" + pkgPath + "=-lang=" + minSchemaLang}
+	return []string{"-gcflags=" + pkgPath + "=-lang=" + schema.MinLang}
 }
 
 // CompileTestBinary compiles a test binary for pkgPath using the given overlay file.
