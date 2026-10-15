@@ -26,6 +26,18 @@ type Summary struct {
 	Score      float64 `json:"score"`
 }
 
+// score is the mutation score: the fraction of covered, viable mutants the
+// tests detected. A timeout counts as detected, as in PIT and Stryker: the
+// mutant stopped the test suite from passing (usually by hanging it), and
+// counting it otherwise would make the score depend on how long Kanly waits.
+func score(s Summary) float64 {
+	denominator := s.Total - s.NotCovered - s.NotViable
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(s.Killed+s.Timeout) / float64(denominator)
+}
+
 type PackageSummary struct {
 	Package string `json:"package"`
 	Summary
@@ -78,10 +90,7 @@ func Build(results []mutation.Result, testInventory map[string][]string, inciden
 			s.NotCovered++
 		}
 	}
-	denominator := s.Total - s.NotCovered - s.NotViable
-	if denominator > 0 {
-		s.Score = float64(s.Killed) / float64(denominator)
-	}
+	s.Score = score(s)
 
 	// Build per-package summaries.
 	pkgMap := make(map[string]*Summary)
@@ -117,10 +126,7 @@ func Build(results []mutation.Result, testInventory map[string][]string, inciden
 	pkgSummaries := make([]PackageSummary, 0, len(pkgNames))
 	for _, name := range pkgNames {
 		ps := pkgMap[name]
-		denom := ps.Total - ps.NotCovered - ps.NotViable
-		if denom > 0 {
-			ps.Score = float64(ps.Killed) / float64(denom)
-		}
+		ps.Score = score(*ps)
 		pkgSummaries = append(pkgSummaries, PackageSummary{Package: name, Summary: *ps})
 	}
 
@@ -701,8 +707,8 @@ func WriteText(w io.Writer, r Report) error {
 		}
 	}
 	for _, ps := range r.Packages {
-		if _, err := fmt.Fprintf(w, "Package: %s | Total: %d | Killed: %d | Survived: %d | Score: %.1f%%\n",
-			ps.Package, ps.Total, ps.Killed, ps.Survived, ps.Score*100,
+		if _, err := fmt.Fprintf(w, "Package: %s | Total: %d | Killed: %d | Survived: %d | Timeout: %d | Score: %.1f%%\n",
+			ps.Package, ps.Total, ps.Killed, ps.Survived, ps.Timeout, ps.Score*100,
 		); err != nil {
 			return err
 		}

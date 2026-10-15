@@ -113,6 +113,30 @@ func TestBuildComputesScore(t *testing.T) {
 	}
 }
 
+// TestBuildScoreCountsTimeoutsAsDetected pins the score definition: killed
+// and timed-out mutants are detected; not-covered and not-viable mutants are
+// left out of the denominator.
+func TestBuildScoreCountsTimeoutsAsDetected(t *testing.T) {
+	statuses := []mutation.Status{
+		mutation.StatusKilled, mutation.StatusTimeout, mutation.StatusSurvived,
+		mutation.StatusSurvived, mutation.StatusNotCovered, mutation.StatusNotViable,
+	}
+	var results []mutation.Result
+	for i, st := range statuses {
+		results = append(results, mutation.Result{
+			Mutation: mutation.Mutation{ID: i + 1, Package: "p", File: "p.go", Line: i + 1},
+			Status:   st,
+		})
+	}
+	r := report.Build(results, nil, nil)
+	if want := 2.0 / 4.0; math.Abs(r.Summary.Score-want) > 1e-9 {
+		t.Errorf("Summary.Score: want %v, got %v", want, r.Summary.Score)
+	}
+	if len(r.Packages) != 1 || math.Abs(r.Packages[0].Score-0.5) > 1e-9 {
+		t.Errorf("Packages[0].Score: want 0.5, got %+v", r.Packages)
+	}
+}
+
 func TestBuildAggregatesTestStats(t *testing.T) {
 	r := report.Build(makeResults(), makeInventory(), nil)
 
@@ -430,10 +454,10 @@ func TestWriteText(t *testing.T) {
 	}
 
 	// Per-package summary lines must appear.
-	if !strings.Contains(out, "Package: example.com/pkg/foo | Total: 2 | Killed: 2 | Survived: 0 | Score: 100.0%") {
+	if !strings.Contains(out, "Package: example.com/pkg/foo | Total: 2 | Killed: 2 | Survived: 0 | Timeout: 0 | Score: 100.0%") {
 		t.Errorf("per-package foo summary missing or malformed:\n%s", out)
 	}
-	if !strings.Contains(out, "Package: example.com/pkg/bar | Total: 1 | Killed: 0 | Survived: 1 | Score: 0.0%") {
+	if !strings.Contains(out, "Package: example.com/pkg/bar | Total: 1 | Killed: 0 | Survived: 1 | Timeout: 0 | Score: 0.0%") {
 		t.Errorf("per-package bar summary missing or malformed:\n%s", out)
 	}
 
