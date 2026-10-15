@@ -190,7 +190,8 @@ func buildTestAggregations(results []mutation.Result, testInventory map[string][
 	}
 	sort.Strings(zeroKill)
 
-	// Group tests sharing identical non-empty kill-sets.
+	// Group tests sharing identical non-empty kill-sets. Mutation IDs are
+	// unique per package only, so the package is part of the key.
 	byHash := make(map[string][]string)
 	for _, ts := range tests {
 		if ts.KillCount == 0 {
@@ -200,7 +201,7 @@ func buildTestAggregations(results []mutation.Result, testInventory map[string][
 		for i, id := range ts.KilledMutants {
 			ids[i] = strconv.Itoa(id)
 		}
-		h := strings.Join(ids, ",")
+		h := ts.Package + "\x00" + strings.Join(ids, ",")
 		byHash[h] = append(byHash[h], qualifyTestName(ts.Package, ts.Name))
 	}
 	var redundant [][]string
@@ -479,29 +480,37 @@ func writeLLMUncoveredSection(b *strings.Builder, r Report, groups []mutation.Fu
 // `--mutant=<ids>` re-verification loop. Skipped when there's nothing to
 // iterate on, so a clean-suite artifact ends on the inventory.
 func writeLLMNextIteration(b *strings.Builder, survived, notCovered []mutation.FunctionSurvivors) {
-	var ids []int
-	for _, g := range survived {
-		for _, m := range g.Mutations {
-			ids = append(ids, m.ID)
+	// Mutation IDs are unique per package only, so each package gets its own
+	// re-run command.
+	idsByPkg := make(map[string][]int)
+	for _, groups := range [][]mutation.FunctionSurvivors{survived, notCovered} {
+		for _, g := range groups {
+			for _, m := range g.Mutations {
+				idsByPkg[m.Package] = append(idsByPkg[m.Package], m.ID)
+			}
 		}
 	}
-	for _, g := range notCovered {
-		for _, m := range g.Mutations {
-			ids = append(ids, m.ID)
-		}
-	}
-	if len(ids) == 0 {
+	if len(idsByPkg) == 0 {
 		return
 	}
-	sort.Ints(ids)
-	idStrs := make([]string, len(ids))
-	for i, id := range ids {
-		idStrs[i] = strconv.Itoa(id)
+	pkgs := make([]string, 0, len(idsByPkg))
+	for p := range idsByPkg {
+		pkgs = append(pkgs, p)
 	}
+	sort.Strings(pkgs)
+
 	b.WriteString("## Next iteration\n\n")
-	b.WriteString("After editing tests, re-run only the targeted mutants to verify each is now killed — this skips the compile + baseline + per-test coverage passes for unaffected mutants and is the iterative loop validated in arXiv:2506.02954:\n\n")
+	b.WriteString("After editing tests, re-run only the targeted mutants to verify each is now killed — the other mutants in the package are skipped, which is the iterative loop validated in arXiv:2506.02954:\n\n")
 	b.WriteString("```\n")
-	fmt.Fprintf(b, "kanly --mutant=%s <pkg>\n", strings.Join(idStrs, ","))
+	for _, pkg := range pkgs {
+		ids := idsByPkg[pkg]
+		sort.Ints(ids)
+		idStrs := make([]string, len(ids))
+		for i, id := range ids {
+			idStrs[i] = strconv.Itoa(id)
+		}
+		fmt.Fprintf(b, "kanly --mutant=%s %s\n", strings.Join(idStrs, ","), pkg)
+	}
 	b.WriteString("```\n\n")
 	b.WriteString("Any survivor still listed after the re-run is a real assertion gap — feed it back through this artifact and iterate.\n\n")
 }

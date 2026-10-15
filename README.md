@@ -77,6 +77,8 @@ $ kanly --mutant=7,12 ./internal/foo
 $ kanly --diff ./internal/foo:Compute
 ```
 
+Mutant IDs are stable: the same source produces the same IDs on every run, and a scoped run (`--diff`, `pkg:Func`) reports the same ID for a mutant as a full run would, so IDs from one report can be passed straight to `--mutant`. IDs are unique within a package only — pass `--mutant` together with the package the IDs came from (the `--format=llm` report prints one such command per package).
+
 When a scope is active (`pkg:Func`, `--tests`, `--mutant`, or `--diff`), the report's `scope` field and the text-mode `Scope:` header announce exactly what was tested. The inventory used for `zero_kill_tests` / `redundant_test_groups` is also narrowed to tests that touch a kept mutation, so the signal stays focused on the targeted change.
 
 ## How it works

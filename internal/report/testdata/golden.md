@@ -73,10 +73,11 @@ These tests killed no mutants within the current scope. Consider deleting or rew
 
 ## Next iteration
 
-After editing tests, re-run only the targeted mutants to verify each is now killed — this skips the compile + baseline + per-test coverage passes for unaffected mutants and is the iterative loop validated in arXiv:2506.02954:
+After editing tests, re-run only the targeted mutants to verify each is now killed — the other mutants in the package are skipped, which is the iterative loop validated in arXiv:2506.02954:
 
 ```
-kanly --mutant=2,3 <pkg>
+kanly --mutant=3 example.com/pkg/bar
+kanly --mutant=2 example.com/pkg/foo
 ```
 
 Any survivor still listed after the re-run is a real assertion gap — feed it back through this artifact and iterate.

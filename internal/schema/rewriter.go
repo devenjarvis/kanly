@@ -127,6 +127,12 @@ type Rewritten struct {
 }
 
 // Rewrite transforms pkg's source files into a mutant schema using the provided operators.
+//
+// Mutation IDs are deterministic: files are visited in path order, and every
+// candidate is numbered before the filter runs. A mutant therefore keeps its
+// ID across runs and across scopes (a --diff or pkg:func run reports the same
+// IDs as a full run), so `--mutant=<ids>` re-runs exactly what was reported.
+// IDs are unique within the package only.
 // If filter is non-nil, only candidates whose (absolute file path, 1-based line
 // number, enclosing function name) satisfy filter are emitted; passing nil disables
 // filtering. The function name is the canonical funcDeclName form ("Foo",
@@ -136,7 +142,14 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 	var mutations []mutation.Mutation
 	rewrittenFiles := make(map[string]string)
 
-	for filePath, file := range pkg.Files {
+	filePaths := make([]string, 0, len(pkg.Files))
+	for p := range pkg.Files {
+		filePaths = append(filePaths, p)
+	}
+	sort.Strings(filePaths)
+
+	for _, filePath := range filePaths {
+		file := pkg.Files[filePath]
 		type entry struct {
 			node ast.Node
 			cand mutation.Candidate
@@ -151,10 +164,10 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 			for _, c := range op.Find(file, pkg.TypesInfo) {
 				pos := pkg.Fset.Position(c.Pos)
 				funcName := enclosingFunc(funcSpans, c.Pos)
+				mutID++
 				if filter != nil && !filter(filePath, pos.Line, funcName) {
 					continue
 				}
-				mutID++
 				mutations = append(mutations, mutation.Mutation{
 					ID:           mutID,
 					Package:      pkg.ImportPath,
