@@ -13,14 +13,15 @@ go install github.com/devenjarvis/kanly/cmd/kanly@latest
 ## Usage
 
 ```
-kanly [--version] [--format=text|json|llm] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<ids>] [--jobs=N] <pattern>[:<func-list>]...
+kanly [--version] [--format=text|json|llm] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<ids>] [--jobs=N] <pattern>[:<func-list>]...
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--version` | off | Print version and exit |
 | `--format` | `text` | Output format: `text`, `json`, or `llm` (Markdown artifact tailored for feeding to an LLM) |
-| `--timeout` | `30s` | Per-mutant test timeout |
+| `--timeout` | derived | Fixed per-mutant test timeout. By default each mutant's timeout is derived from the baseline: `--timeout-factor` × (the baseline run time of the tests it runs + process start-up) + 2s |
+| `--timeout-factor` | `3` | Multiple of the baseline run time a mutant may take before it counts as `Timeout` (ignored when `--timeout` is set) |
 | `--diff` | off | Only mutate lines changed since `--diff-base` |
 | `--diff-base` | `HEAD` | Git ref to diff against when `--diff` is set |
 | `--tests` | (all) | Regex narrowing the test inventory used by baseline and per-test coverage |
@@ -44,7 +45,7 @@ A package that cannot be mutation-tested — it doesn't load or type-check, its 
 ```
 $ kanly ./internal/runner/testdata/sample
 internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+
-Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Score: 50.0%
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Score: 50.0%
 
 Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Score: 50.0%
 ```
@@ -58,8 +59,8 @@ Pass multiple patterns or use `./...` to mutate all packages in a module in a si
 ```
 $ kanly ./internal/runner/testdata/sample ./internal/runner/testdata/cmpsample
 internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+
-Package: github.com/devenjarvis/kanly/internal/runner/testdata/cmpsample | Total: 2 | Killed: 2 | Survived: 0 | Score: 100.0%
-Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Score: 50.0%
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/cmpsample | Total: 2 | Killed: 2 | Survived: 0 | Timeout: 0 | Score: 100.0%
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Score: 50.0%
 
 Total: 4 | Killed: 3 | Survived: 1 | Timeout: 0 | Score: 75.0%
 ```
@@ -90,6 +91,10 @@ $ kanly --diff ./internal/foo:Compute
 Mutant IDs are stable: the same source produces the same IDs on every run, and a scoped run (`--diff`, `pkg:Func`) reports the same ID for a mutant as a full run would, so IDs from one report can be passed straight to `--mutant`. IDs are unique within a package only — pass `--mutant` together with the package the IDs came from (the `--format=llm` report prints one such command per package).
 
 When a scope is active (`pkg:Func`, `--tests`, `--mutant`, or `--diff`), the report's `scope` field and the text-mode `Scope:` header announce exactly what was tested. The inventory used for `zero_kill_tests` / `redundant_test_groups` is also narrowed to tests that touch a kept mutation, so the signal stays focused on the targeted change.
+
+### Mutation score
+
+Score = (killed + timeout) / (total − not covered − not viable). A mutant that makes the tests fail or hang has been detected; one no test executes (`not_covered`) is reported separately rather than counted as a survivor.
 
 ## How it works
 
@@ -135,7 +140,7 @@ largest remaining gap in Kanly's coverage:
 
 ## Limitations
 
-- **Narrow operator surface.** Today Kanly mutates arithmetic operators (expression and statement forms — `+ - * / %` and `+= -= *= /= %=`), integer comparisons, integer bitwise/shift operators (binary and compound), boolean logic, integer increment/decrement, integer-literal values, `error`-typed return values, full return-value zeroing for integer/string/bool/nilable types, void-discarded call statements, non-empty string literals, slice/map indices, and slice-range bounds. Float arithmetic and channel/switch operators are not yet covered — see [Upcoming operators](#upcoming-operators). Deleting side-effecting calls (e.g. `close(ch)`, locks, or sync primitives) can cause hangs in concurrent code, and inverting a loop counter (`i++→i--`) likewise loops forever; the per-mutant `--timeout` bounds these and surfaces them as `Timeout` rather than `Survived`.
+- **Narrow operator surface.** Today Kanly mutates arithmetic operators (expression and statement forms — `+ - * / %` and `+= -= *= /= %=`), integer comparisons, integer bitwise/shift operators (binary and compound), boolean logic, integer increment/decrement, integer-literal values, `error`-typed return values, full return-value zeroing for integer/string/bool/nilable types, void-discarded call statements, non-empty string literals, slice/map indices, and slice-range bounds. Float arithmetic and channel/switch operators are not yet covered — see [Upcoming operators](#upcoming-operators). Deleting side-effecting calls (e.g. `close(ch)`, locks, or sync primitives) can cause hangs in concurrent code, and inverting a loop counter (`i++→i--`) likewise loops forever; the per-mutant timeout — a few times the tests' normal run time, see `--timeout-factor` — bounds these and surfaces them as `Timeout` rather than `Survived`. A timeout counts as detected in the score, as in PIT and Stryker. The baseline and coverage runs execute unmutated code and get at least 10 minutes. If a busy machine produces timeouts for mutants that should be killed or survive, raise `--timeout-factor`.
 - **Test-centric signals depend on operator coverage.** The `tests`, `zero_kill_tests`, and `survivors_by_function` views in the JSON report are only as sharp as the underlying operator set. Today, many entries in `zero_kill_tests` are tests exercising code that has no mutable operators in it — not tests with weak assertions. Read these views as exploration aids; broadening the operator set will turn them into a reliable test-quality signal.
 - **Some assertions are structurally unkillable.** A few test patterns can't be expressed as MSG mutants no matter how many operators are added — most notably tests that assert on struct field tags (e.g., JSON tag names read via reflection), because Go syntax requires struct tags to be uninterpreted string literals that cannot be rewritten to runtime-conditional expressions. Such tests will always appear in `zero_kill_tests`; treat them as "structurally unkillable" rather than weak.
 - **"Identical kill-sets" is not the same as "redundant tests."** Two tests can land in the same `redundant_test_groups` entry because they coincidentally trip the same mutated lines while asserting on entirely different concerns. Treat the grouping as a "look here" prompt, not a "delete one" recommendation.

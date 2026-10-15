@@ -50,11 +50,38 @@ func resolveVersion() string {
 
 // runConfig collects the per-package knobs threaded from CLI flags into runPackage.
 type runConfig struct {
-	filter     func(file string, line int, funcName string) bool
-	timeout    time.Duration
-	testsRegex string       // if non-empty, narrows baseline + per-test coverage
-	mutantIDs  map[int]bool // if non-nil, only these schema-assigned IDs run
-	jobs       int          // worker pool size for per-test coverage and the mutant loop; >= 1
+	filter        func(file string, line int, funcName string) bool
+	timeout       time.Duration // fixed per-mutant timeout; 0 derives it from the baseline
+	timeoutFactor float64       // multiplier on baseline test time for derived timeouts
+	testsRegex    string        // if non-empty, narrows baseline + per-test coverage
+	mutantIDs     map[int]bool  // if non-nil, only these schema-assigned IDs run
+	jobs          int           // worker pool size for per-test coverage and the mutant loop; >= 1
+}
+
+const (
+	// defaultTimeoutFactor allows a mutant run three times its tests'
+	// baseline time — headroom for --jobs contention and noisy CI machines.
+	defaultTimeoutFactor = 3.0
+	// timeoutSlack is added to every derived timeout so that tests whose
+	// baseline rounds to 0.00s still get a usable budget.
+	timeoutSlack = 2 * time.Second
+	// minSetupTimeout bounds the baseline and per-test coverage runs. They
+	// execute unmutated code, so they should finish; the limit only stops a
+	// hung test suite from stalling the run forever.
+	minSetupTimeout = 10 * time.Minute
+)
+
+// mutantTimeout is the timeout for running tests against one mutant.
+func (c runConfig) mutantTimeout(b runner.Baseline, tests []string) time.Duration {
+	if c.timeout > 0 {
+		return c.timeout
+	}
+	return b.MutantTimeout(tests, c.timeoutFactor, timeoutSlack)
+}
+
+// setupTimeout bounds the baseline and coverage runs.
+func (c runConfig) setupTimeout() time.Duration {
+	return max(c.timeout, minSetupTimeout)
 }
 
 // stageError tags a runPackage failure with the pipeline stage it came from;
@@ -115,13 +142,15 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanCovBin()
 
-	inventory, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, cfg.timeout, cfg.testsRegex)
+	baseline, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, cfg.setupTimeout(), cfg.testsRegex)
 	if err != nil {
 		return nil, nil, nil, nil, &stageError{"baseline", err}
 	}
 
+	inventory := baseline.Tests
+
 	// Collect per-test coverage once; pays off across all mutants.
-	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.timeout, cfg.jobs)
+	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.setupTimeout(), cfg.jobs)
 	if err != nil {
 		return nil, nil, nil, nil, &stageError{"coverage", err}
 	}
@@ -207,7 +236,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 			continue
 		}
 		g.Go(func() error {
-			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.timeout)
+			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.mutantTimeout(baseline, tests))
 			if err != nil {
 				return fmt.Errorf("run mutant %d: %w", mut.ID, err)
 			}
@@ -243,13 +272,14 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--version] [--format=text|json|llm] [--timeout=30s] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly [--version] [--format=text|json|llm] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	versionFlag := fs.Bool("version", false, "print version and exit")
 	formatFlag := fs.String("format", "text", "output format: text|json|llm")
-	timeoutFlag := fs.Duration("timeout", 30*time.Second, "per-mutant test timeout")
+	timeoutFlag := fs.Duration("timeout", 0, "fixed per-mutant test timeout; 0 derives each mutant's timeout from the baseline run time of the tests it runs")
+	timeoutFactorFlag := fs.Float64("timeout-factor", defaultTimeoutFactor, "for derived timeouts, the multiple of the tests' baseline run time a mutant may take")
 	diffFlag := fs.Bool("diff", false, "only mutate lines changed since --diff-base")
 	diffBaseFlag := fs.String("diff-base", "HEAD", "git ref to diff against when --diff is set")
 	testsFlag := fs.String("tests", "", "regex narrowing the test inventory used by baseline and per-test coverage")
@@ -264,6 +294,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *versionFlag {
 		fmt.Fprintf(stdout, "kanly %s\n", resolveVersion())
 		return 0
+	}
+
+	if *timeoutFlag < 0 {
+		fmt.Fprintf(stderr, "--timeout: must be >= 0, got %v\n", *timeoutFlag)
+		return 2
+	}
+	if *timeoutFactorFlag < 1 {
+		fmt.Fprintf(stderr, "--timeout-factor: must be >= 1, got %v\n", *timeoutFactorFlag)
+		return 2
 	}
 
 	if *jobsFlag < 1 {
@@ -379,11 +418,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 
 			cfg := runConfig{
-				filter:     composeFilter(diffPred, spec.Funcs),
-				timeout:    *timeoutFlag,
-				testsRegex: *testsFlag,
-				mutantIDs:  mutantIDs,
-				jobs:       *jobsFlag,
+				filter:        composeFilter(diffPred, spec.Funcs),
+				timeout:       *timeoutFlag,
+				timeoutFactor: *timeoutFactorFlag,
+				testsRegex:    *testsFlag,
+				mutantIDs:     mutantIDs,
+				jobs:          *jobsFlag,
 			}
 
 			results, inventory, incidental, funcRanges, err := runPackage(ctx, pkg, ops, cfg, stderr)

@@ -160,13 +160,52 @@ func CompileCoverageBinary(ctx context.Context, pkgPath string) (binaryPath stri
 	return binPath, cleanup, nil
 }
 
+// Baseline is the result of running a package's tests with no mutant active.
+type Baseline struct {
+	// Tests is the sorted, deduplicated list of top-level tests that ran.
+	Tests []string
+	// Durations is each top-level test's elapsed time as reported by -test.v.
+	Durations map[string]time.Duration
+	// Wall is the elapsed time of the whole baseline process.
+	Wall time.Duration
+}
+
+// Overhead estimates the per-process cost outside test bodies — binary
+// start-up, package init and TestMain — as Wall minus the summed test
+// durations, floored at zero (parallel tests can sum to more than Wall).
+func (b Baseline) Overhead() time.Duration {
+	var sum time.Duration
+	for _, d := range b.Durations {
+		sum += d
+	}
+	if over := b.Wall - sum; over > 0 {
+		return over
+	}
+	return 0
+}
+
+// MutantTimeout returns the timeout for a mutant run of tests (all baseline
+// tests when tests is empty): factor × (their baseline time + Overhead) +
+// slack. Mutants that loop forever then cost a small multiple of the time
+// the tests normally take, instead of a fixed worst case.
+func (b Baseline) MutantTimeout(tests []string, factor float64, slack time.Duration) time.Duration {
+	if len(tests) == 0 {
+		tests = b.Tests
+	}
+	expected := b.Overhead()
+	for _, name := range tests {
+		expected += b.Durations[name]
+	}
+	return time.Duration(factor*float64(expected)) + slack
+}
+
 // RunBaseline executes the compiled test binary with no active mutant (KANLY_MUTANT unset)
-// and `-test.v`, returning the sorted, deduplicated list of test names that ran.
+// and `-test.v`, returning the tests that ran and how long they took.
 // If testRunRegex is non-empty it is passed as `-test.run=<regex>`, narrowing
 // the baseline to a subset of tests — useful when callers know which tests
 // exercise the focused mutation set and want to skip the rest of the package.
 // Returns an error if the baseline tests fail, indicating the package is already broken.
-func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration, testRunRegex string) ([]string, error) {
+func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration, testRunRegex string) (Baseline, error) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -177,13 +216,15 @@ func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Du
 	cmd := exec.CommandContext(tctx, binaryPath, args...)
 	cmd.Dir = pkgDir
 	cmd.Env = os.Environ()
+	start := time.Now()
 	out, err := cmd.CombinedOutput()
+	wall := time.Since(start)
 
 	if tctx.Err() == context.DeadlineExceeded {
-		return nil, fmt.Errorf("baseline run timed out after %v", timeout)
+		return Baseline{}, fmt.Errorf("baseline run timed out after %v", timeout)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("tests fail with no mutant applied:\n%s", failureOutput(out))
+		return Baseline{}, fmt.Errorf("tests fail with no mutant applied:\n%s", failureOutput(out))
 	}
 
 	raw := parseTestNames(out, "--- PASS: ", "--- FAIL: ", "--- SKIP: ")
@@ -197,7 +238,35 @@ func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Du
 		inventory = append(inventory, n)
 	}
 	sort.Strings(inventory)
-	return inventory, nil
+	return Baseline{Tests: inventory, Durations: parseTestDurations(out), Wall: wall}, nil
+}
+
+// parseTestDurations extracts each top-level test's elapsed time from
+// `-test.v` output lines such as "--- PASS: TestFoo (0.12s)". Subtests are
+// indented and already counted in their parent's time.
+func parseTestDurations(out []byte) map[string]time.Duration {
+	durations := make(map[string]time.Duration)
+	for _, line := range strings.Split(string(out), "\n") {
+		var rest string
+		switch {
+		case strings.HasPrefix(line, "--- PASS: "):
+			rest = strings.TrimPrefix(line, "--- PASS: ")
+		case strings.HasPrefix(line, "--- SKIP: "):
+			rest = strings.TrimPrefix(line, "--- SKIP: ")
+		default:
+			continue
+		}
+		open := strings.LastIndex(rest, " (")
+		if open < 0 || !strings.HasSuffix(rest, "s)") {
+			continue
+		}
+		d, err := time.ParseDuration(rest[open+2 : len(rest)-1])
+		if err != nil {
+			continue
+		}
+		durations[strings.TrimSpace(rest[:open])] = d
+	}
+	return durations
 }
 
 // failureOutput strips the `-test.v` progress lines (=== RUN/PAUSE/CONT and

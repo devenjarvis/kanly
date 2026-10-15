@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/devenjarvis/kanly/internal/selector"
 )
@@ -661,5 +662,56 @@ func TestRunReportsHealthyPackagesWhenOthersFail(t *testing.T) {
 	}
 	if len(result.Errors) != len(want) {
 		t.Errorf("errors: want %d entries, got %+v", len(want), result.Errors)
+	}
+}
+
+// TestRunDerivesMutantTimeoutFromBaseline guards against every hanging mutant
+// costing a fixed worst-case timeout: TestCount takes milliseconds, so the
+// infinite-loop mutant must be cut off after a few seconds, not 30.
+func TestRunDerivesMutantTimeoutFromBaseline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/loopsample")
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	if code := run([]string{"--format=json", dir + ":Count"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Errorf("run took %v; the looping mutant should time out within a few seconds", elapsed)
+	}
+	var result struct {
+		Mutants []struct {
+			Mutation struct {
+				Operator string `json:"operator"`
+				Original string `json:"original"`
+			} `json:"mutation"`
+			Status string `json:"status"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON output: %v\n%s", err, stdout.String())
+	}
+	timeouts := 0
+	for _, m := range result.Mutants {
+		if m.Status == "timeout" {
+			timeouts++
+			if m.Mutation.Operator != "inc_dec" {
+				t.Errorf("unexpected timeout for %s %s", m.Mutation.Operator, m.Mutation.Original)
+			}
+		}
+	}
+	if timeouts != 1 {
+		t.Errorf("want exactly the i++→i-- mutant to time out, got %d timeouts: %+v", timeouts, result.Mutants)
+	}
+}
+
+func TestRunRejectsInvalidTimeoutFlags(t *testing.T) {
+	for _, args := range [][]string{{"--timeout=-1s", "."}, {"--timeout-factor=0.5", "."}} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 2 {
+			t.Errorf("run(%v) = %d, want 2; stderr: %s", args, code, stderr.String())
+		}
 	}
 }
