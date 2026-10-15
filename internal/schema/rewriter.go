@@ -75,6 +75,27 @@ func enclosingFunc(spans []funcSpan, pos token.Pos) string {
 	return ""
 }
 
+// collectFileScopeFuncLits returns the ranges of function literals outside
+// any FuncDecl (e.g. `var h = func() {...}`). Their bodies run when called,
+// not during package initialization.
+func collectFileScopeFuncLits(file *ast.File) []funcSpan {
+	var spans []funcSpan
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		ast.Inspect(gd, func(n ast.Node) bool {
+			if fl, ok := n.(*ast.FuncLit); ok {
+				spans = append(spans, funcSpan{start: fl.Pos(), end: fl.End()})
+				return false
+			}
+			return true
+		})
+	}
+	return spans
+}
+
 // FuncRanges returns the source range of every top-level FuncDecl in pkg,
 // keyed by the canonical funcDeclName form ("Foo", "(T).Bar", "(*T).Bar").
 // Used by the LLM renderer to slice the enclosing function's source out of
@@ -112,6 +133,15 @@ func FuncNames(pkg *source.Package) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func inSpans(spans []funcSpan, pos token.Pos) bool {
+	for _, s := range spans {
+		if pos >= s.start && pos < s.end {
+			return true
+		}
+	}
+	return false
 }
 
 func isWrapper(op mutation.Operator) bool {
@@ -159,6 +189,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 		var entries []entry
 
 		funcSpans := collectFuncSpans(file)
+		litSpans := collectFileScopeFuncLits(file)
 
 		for _, op := range ops {
 			for _, c := range op.Find(file, pkg.TypesInfo) {
@@ -178,6 +209,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 					OperatorName: op.Name(),
 					Original:     c.Original,
 					Mutant:       c.Mutant,
+					PackageInit:  funcName == "" && !inSpans(litSpans, c.Pos),
 				})
 				entries = append(entries, entry{node: c.Node, cand: c, id: mutID, op: op})
 			}

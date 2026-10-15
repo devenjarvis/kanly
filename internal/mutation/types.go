@@ -24,6 +24,10 @@ type Mutation struct {
 	OperatorName string `json:"operator"`
 	Original     string `json:"original"`
 	Mutant       string `json:"mutant"`
+	// PackageInit marks a mutation in a package-level variable initializer
+	// (outside any function body). It runs once per test process, but Go's
+	// coverage instrumentation never attributes it to a test.
+	PackageInit bool `json:"-"`
 }
 
 type Result struct {

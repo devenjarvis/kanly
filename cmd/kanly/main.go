@@ -141,6 +141,13 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	incidental := make(map[string]bool)
 	for i, mut := range mutations {
 		hits := covMap[runner.FileLine{File: mut.File, Line: mut.Line}]
+		if mut.PackageInit && len(hits) == 0 {
+			// Package-level var initializers run in every test process
+			// but sit outside every cover block, so any test may kill them.
+			for _, name := range inventory {
+				hits = append(hits, runner.TestHit{Name: name})
+			}
+		}
 		maxHits := 0
 		for _, th := range hits {
 			if th.Hits > maxHits {

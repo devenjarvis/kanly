@@ -43,20 +43,18 @@ type __cBoolean interface {
 	~bool
 }
 
-var __kanlyActiveMutant int
+// __kanlyActiveMutant is set by a variable initializer, not an init(): Go
+// initializes package variables in dependency order before running any
+// init(), so it is ready for every mutated var initializer and init() body
+// that reaches a dispatcher, whatever file they live in.
+var __kanlyActiveMutant = __kanlyReadActiveMutant()
 
-func init() {
-	s := os.Getenv("KANLY_MUTANT")
-	if s == "" {
-		__kanlyActiveMutant = -1
-		return
-	}
-	v, err := strconv.Atoi(s)
+func __kanlyReadActiveMutant() int {
+	v, err := strconv.Atoi(os.Getenv("KANLY_MUTANT"))
 	if err != nil || v < 1 {
-		__kanlyActiveMutant = -1
-		return
+		return -1
 	}
-	__kanlyActiveMutant = v
+	return v
 }
 
 // __cMutInt executes either the mutant or the original integer binary operation.
