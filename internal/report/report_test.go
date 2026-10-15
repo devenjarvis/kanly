@@ -847,3 +847,46 @@ func TestQualifyTestNameEmptyPackage(t *testing.T) {
 		t.Errorf("ZeroKillTests[0]: want %q (no dot prefix), got %q", "TestA", r.ZeroKillTests[0])
 	}
 }
+
+// TestPackageErrorsRendered guards that a package which was not tested is
+// visible in every format, so a partial run cannot read as a full one.
+func TestPackageErrorsRendered(t *testing.T) {
+	long := "tests fail with no mutant applied:\n" + strings.Repeat("    x_test.go:1: boom\n", 40)
+	r := report.Build(nil, nil, nil)
+	r.Errors = []report.PackageError{{Package: "example.com/p", Stage: "baseline", Error: long}}
+
+	var text bytes.Buffer
+	if err := report.WriteText(&text, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "Packages not tested (1):") || !strings.Contains(text.String(), "example.com/p [baseline]") {
+		t.Errorf("text output missing package error:\n%s", text.String())
+	}
+	if !strings.Contains(text.String(), "more lines; see --format=json") {
+		t.Errorf("text output should excerpt a long error:\n%s", text.String())
+	}
+
+	var llm bytes.Buffer
+	if err := report.WriteLLM(&llm, r, report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(llm.String(), "## Packages not tested") || !strings.Contains(llm.String(), "### example.com/p (baseline)") {
+		t.Errorf("llm output missing package error:\n%s", llm.String())
+	}
+
+	var js bytes.Buffer
+	if err := report.WriteJSON(&js, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js.String(), `"stage": "baseline"`) || !strings.Contains(js.String(), strings.Repeat(`    x_test.go:1: boom\n`, 40)) {
+		t.Errorf("json output should carry the full error:\n%s", js.String())
+	}
+
+	var empty bytes.Buffer
+	if err := report.WriteJSON(&empty, report.Build(nil, nil, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(empty.String(), `"errors"`) {
+		t.Errorf("json output should omit errors when there are none:\n%s", empty.String())
+	}
+}

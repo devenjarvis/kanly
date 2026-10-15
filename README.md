@@ -29,6 +29,16 @@ kanly [--version] [--format=text|json|llm] [--timeout=30s] [--diff [--diff-base=
 
 Positional arguments take the form `<pkg-pattern>[:<func-list>]`. The optional function list selects mutants by enclosing function — accepts plain names (`Foo`), method receivers in dotted form (`Server.Handle` matches both `(Server).Handle` and `(*Server).Handle`), or the explicit canonical form (`(*Server).Handle`). A function filter requires the pattern to resolve to a single package (no `./...`).
 
+### Exit status and failed packages
+
+A package that cannot be mutation-tested — it doesn't load or type-check, its schema doesn't compile, or its tests fail before any mutant is applied — is recorded and skipped; the other packages still run and are reported. Failed packages appear under `Packages not tested` in text and `--format=llm` output and in the JSON `errors` array (`package`, `stage`, `error`), where `stage` is one of `load`, `rewrite`, `compile`, `baseline`, `coverage`, `mutants`. A `baseline` failure means the package's own tests fail without Kanly; a `compile` failure is most likely a Kanly bug worth reporting.
+
+| Exit | Meaning |
+|------|---------|
+| `0` | Every matched package was tested (survivors do not change the exit status) |
+| `1` | At least one package was not tested — the report covers the rest — or Kanly itself failed |
+| `2` | Invalid flags or arguments |
+
 ### Worked example
 
 ```
