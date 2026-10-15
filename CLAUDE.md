@@ -11,9 +11,10 @@ Kanly is a Go mutation tester that uses Mutant Schema Generation (MSG): all muta
 - **`internal/selector`** — parses positional CLI args of the form `<pkg-pattern>[:<func-list>]` into `Spec`s and matches user-supplied function names against the canonical `funcDeclName` form (`Foo`, `(T).Bar`, `(*T).Bar`). Matching is lenient: `Server.Handle` matches both pointer and value receivers; `*T.Bar` normalises to `(*T).Bar`. Glob patterns (`./...`) cannot carry a function filter. See `internal/selector/selector.go:26`.
 - **`internal/mutation`** — core types: `Operator` interface, `Candidate`, `Mutation`, `Result`, and the global operator registry (`Register`/`Operators`). See `internal/mutation/operator.go:17` and `internal/mutation/types.go:17`.
 - **`internal/operators`** — concrete operator implementations; each file registers itself via `init()` in `internal/operators/register.go:5`. Currently contains `IntArith` (`int_arith`: `+↔-`, `*↔/`, `%→*`), `IntCmpBoundary` (`int_cmp_boundary`: `<↔<=`, `>↔>=`), `IntCmpNegate` (`int_cmp_negate`: six comparison flips), `BoolLogic` (`bool_logic`: `&&↔||`), `BoolNot` (`bool_not`: `!→⌀`), `ErrReturnNil` (`err_return_nil`: `err→nil`), `CallDelete` (`call_delete`: `f(...)→⌀`), `StringLiteral` (`string_literal`: non-empty `"x"`→`""`), `SliceIndex` (`slice_index`: `a[i]→a[i±1]`), `SliceRange` (`slice_range`: `s[lo:hi]→s[lo±1:hi]`/`s[lo:hi±1]` and three-index `:max` bounds; shares the `slice_index` dispatcher), `IncDec` (`inc_dec`: `x++↔x--`), `IntCompoundAssign` (`int_compound_assign`: arithmetic + bitwise compound-op flips — `+=↔-=`, `*=↔/=`, `%=→*=`, `&=↔|=`, `^=→&=`, `<<=↔>>=`, `&^=→&=`), `IntBitwise` (`int_bitwise`: `&↔|`, `^→&`, `<<↔>>`, `&^→&`), `IntLiteral` (`int_literal`: `n→0,1,-n,n±1` — plain `int` contexts only), `ReturnZero` (`return_zero`: `int→0`, `string→""`, `bool→false`, ptr/slice/map/chan/func/iface→`nil`), `BoolLiteral` (`bool_literal`: `true↔false` for predeclared keywords whose contextual type is exactly `bool`), and `StructFieldZero` (`struct_field_zero`: keyed struct-literal field value → zero of T; shares the `return_zero` dispatcher). Shared type guards live in `internal/operators/typecheck.go`; type-bearing dispatchers in `internal/schema/template.go` are generic so the integer/boolean operators fire on sized predeclared types (`int32`, `uint8`, …) and named wrappers (`type UserID int64`, `time.Duration`, `type MyBool bool`).
-- **`internal/schema`** — AST rewriter that produces the mutant schema (one file per source file, plus a dispatcher `init()` file). The `Rewrite` filter has signature `func(file string, line int, funcName string) bool` so callers can scope mutants by line range (diff) AND enclosing function in one predicate. `FuncNames(pkg)` exposes the package's canonical function names for CLI validation and "did you mean" hints; `FuncRanges(pkg)` returns each canonical name's source `{file, startLine, endLine}` for the LLM renderer's snippet extraction. See `internal/schema/rewriter.go:108` and `internal/schema/template.go:3`.
+- **`internal/schema`** — AST rewriter that produces the mutant schema (one file per source file, plus a generated `kanly_schema.go` dispatcher file). The `Rewrite` filter has signature `func(file string, line int, funcName string) bool` so callers can scope mutants by line range (diff) AND enclosing function in one predicate. `FuncNames(pkg)` exposes the package's canonical function names for CLI validation and "did you mean" hints; `FuncRanges(pkg)` returns each canonical name's source `{file, startLine, endLine}` for the LLM renderer's snippet extraction. See `internal/schema/rewriter.go:108` and `internal/schema/template.go:3`.
 - **`internal/runner`** — assembles the overlay JSON, calls `go test -c` to compile the schema binary, and executes it once per mutant ID. `RunBaseline` accepts an optional `testRunRegex` so callers can pre-narrow which tests participate in the baseline + per-test coverage pass (used by `--tests`). See `internal/runner/runner.go:139`.
 - **`internal/report`** — aggregates `[]mutation.Result` into a `Report` + `Summary`, then renders as plain text, JSON, or `llm` (Markdown artifact for prompting an LLM with surviving mutants + redundant/zero-kill tests). The LLM renderer takes an `LLMSource` carrying `FuncRanges` (per-package canonical-name → source range, from `schema.FuncRanges`) and a `ReadFile` (defaults to `os.ReadFile`; faked in tests) so it can slice the enclosing function source out for each survivor. Structure follows arXiv:2506.02954: a `## Task` preamble framing mutation score (not coverage) as the goal, separate `## Live mutants` (status=survived) and `## Uncovered mutants` (status=not_covered) sections with differentiated guidance, the `operatorHints` legend emitted once per operator class, and a closing `## Next iteration` block pointing at `--mutant=<ids>`. The shape is locked in by `testdata/golden.md` — regenerate with `GOLDEN_UPDATE=1`. Exposes a top-level `Scope` field (`omitempty`) describing the active filters; text output prefixes a `Scope:` header line. See `internal/report/report.go:33`.
+- **`internal/corpus`** — downloads pinned real-world modules and requires every package's schema (all operators) to compile and pass its baseline. Runs only with `KANLY_CORPUS=1`; known baseline failures are listed with a reason, and one that starts passing fails the test. Add a module here when you find a construct the fixtures missed.
 - **`internal/e2e`** — integration test that builds the CLI binary and runs it against `internal/runner/testdata/sample`, validating the JSON output against a pinned ledger. See `internal/e2e/e2e_test.go:25`.
 
 ## Build & test
@@ -28,9 +29,14 @@ go test ./...
 # Unit tests only (skips e2e and other slow tests)
 go test -short ./...
 
+# Real-world corpus: schema must compile + pass baseline (downloads modules)
+KANLY_CORPUS=1 go test -timeout 30m ./internal/corpus/
+
 # Regenerate the JSON golden file for internal/report
 GOLDEN_UPDATE=1 go test ./internal/report
 ```
+
+CI (`.github/workflows/ci.yml`) runs gofmt (excluding `testdata/`), `go vet`, staticcheck, `go test -race ./...`, and the corpus on every PR; the tests and corpus run on both the go.mod Go version and the latest stable release.
 
 ## Conventions
 
@@ -76,4 +82,6 @@ call site — local, aliased, and same-package types can't be spelled
 reliably; let generic inference do it (see `__cMutBool`). Skip positions Go
 requires to be constant via `inConstantPosition`. Add any new hazard to
 `internal/runner/testdata/tricky`, which `TestSchemaCompilesTrickyConstructs`
-rewrites with every operator and compiles.
+rewrites with every operator and compiles. Toolchains differ here (a
+`//go:build go1.6` line sets that file's language version, and go1.23.0
+enforces it), so run the suite on the go.mod Go version too, as CI does.

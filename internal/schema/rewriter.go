@@ -284,7 +284,7 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 		if err := format.Node(&buf, pkg.Fset, newFile); err != nil {
 			return nil, fmt.Errorf("format %s: %w", filePath, err)
 		}
-		rewrittenFiles[filePath] = buf.String()
+		rewrittenFiles[filePath] = raiseFileGoVersion(buf.String())
 	}
 
 	dispatcher, err := RenderDispatcher(pkg.Pkg.Name(), mutations)

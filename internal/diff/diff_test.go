@@ -130,17 +130,17 @@ rename to new.go
 		{
 			// Tab-separated commit info after the filename must be stripped.
 			// rest[:i] vs rest[:i+1] or rest[:i-1] would give the wrong path.
-			name: "tab suffix stripped from filename",
+			name:  "tab suffix stripped from filename",
 			input: "diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\t2024-01-01 12:00\n@@ -5 +5,2 @@\n+x\n+y\n",
-			want: []want{{file: filepath.Join(root, "foo.go"), ranges: []diff.LineRange{{Start: 5, End: 6}}}},
+			want:  []want{{file: filepath.Join(root, "foo.go"), ranges: []diff.LineRange{{Start: 5, End: 6}}}},
 		},
 		{
 			// Tab at position 0 of rest (immediately after "+++ "): i==0 means
 			// i>=0 strips to "", filepath.Join(root,"") == root.
 			// With i>0 the rest would not be stripped, giving a different key.
-			name: "tab at position zero strips to empty rest",
+			name:  "tab at position zero strips to empty rest",
 			input: "diff --git a/x.go b/x.go\n--- a/x.go\n+++ \tb/x.go\n@@ -1 +3,2 @@\n+a\n+b\n",
-			want: []want{{file: root, ranges: []diff.LineRange{{Start: 3, End: 4}}}},
+			want:  []want{{file: root, ranges: []diff.LineRange{{Start: 3, End: 4}}}},
 		},
 		{
 			// /dev/null with a non-zero added count must still be ignored because

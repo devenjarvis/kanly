@@ -243,8 +243,8 @@ func TestFuncNamesWithMethods(t *testing.T) {
 	}
 	names := schema.FuncNames(pkg)
 	want := map[string]bool{
-		"Plain":       true,
-		"(T).Method":  true,
+		"Plain":          true,
+		"(T).Method":     true,
 		"(*T).PtrMethod": true,
 	}
 	if len(names) != len(want) {

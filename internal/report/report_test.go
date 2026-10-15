@@ -30,13 +30,13 @@ func relDir(t *testing.T, sub string) string {
 func makeResults() []mutation.Result {
 	return []mutation.Result{
 		{
-			Mutation: mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, Function: "Add", OperatorName: "int_arith", Original: "+", Mutant: "-"},
-			Status:   mutation.StatusKilled,
+			Mutation:     mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, Function: "Add", OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:       mutation.StatusKilled,
 			KillingTests: []string{"TestAdd"},
 		},
 		{
-			Mutation: mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 10, Column: 3, Function: "Sub", OperatorName: "int_arith", Original: "-", Mutant: "+"},
-			Status:   mutation.StatusKilled,
+			Mutation:     mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 10, Column: 3, Function: "Sub", OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Status:       mutation.StatusKilled,
 			KillingTests: []string{"TestSub"},
 		},
 		{

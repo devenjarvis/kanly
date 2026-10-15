@@ -13,6 +13,7 @@ func TestCompiles(t *testing.T) {
 	_ = ConstPositions(0)
 	s := []int{1, 2, 3}
 	_, _, _ = At(s, 0, 1), Tail(s, 0), From(s, s, 0)
+	_ = OldTag(1, 2)
 	if !Recovered() {
 		t.Fatal("Recovered")
 	}

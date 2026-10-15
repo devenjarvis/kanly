@@ -74,4 +74,3 @@ func (IntArith) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 
 	return candidates
 }
-
