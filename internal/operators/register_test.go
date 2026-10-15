@@ -3,8 +3,8 @@ package operators_test
 import (
 	"testing"
 
-	_ "github.com/devenjarvis/kanly/internal/operators"
 	"github.com/devenjarvis/kanly/internal/mutation"
+	_ "github.com/devenjarvis/kanly/internal/operators"
 )
 
 func TestRegistryIncludesBoolOperators(t *testing.T) {

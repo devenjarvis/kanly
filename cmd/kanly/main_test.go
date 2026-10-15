@@ -109,8 +109,8 @@ func TestRunFunctionSelector(t *testing.T) {
 	}
 
 	var result struct {
-		Scope    string `json:"scope"`
-		Summary  struct {
+		Scope   string `json:"scope"`
+		Summary struct {
 			Total  int `json:"total"`
 			Killed int `json:"killed"`
 		} `json:"summary"`
@@ -550,16 +550,16 @@ func TestDescribeScope(t *testing.T) {
 			want:    "--mutant=1,2,3",
 		},
 		{
-			name:    "spec and tests together",
-			specs:   []selector.Spec{{Pattern: "./..."}},
-			tests:   "^TestFoo$",
-			want:    "./... --tests=^TestFoo$",
+			name:  "spec and tests together",
+			specs: []selector.Spec{{Pattern: "./..."}},
+			tests: "^TestFoo$",
+			want:  "./... --tests=^TestFoo$",
 		},
 		{
-			name:    "diff with custom base",
-			diff:    true,
+			name:     "diff with custom base",
+			diff:     true,
 			diffBase: "origin/main",
-			want:    "--diff=origin/main",
+			want:     "--diff=origin/main",
 		},
 	}
 	for _, tt := range tests {
