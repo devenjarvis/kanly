@@ -7,6 +7,15 @@ permissions:
   contents: read
   pull-requests: write
 
+# Kanly gates its own pull requests. Raise these as the scores improve; never
+# lower one to get a PR through. A mutant that should not be killed is accepted
+# in the package's .kanlyignore with a reason instead.
+env:
+  # Mutants on the lines a PR changes, including ones no test reaches.
+  KANLY_DIFF_MIN_SCORE: "80"
+  # The whole of ./internal/...: a floor that stops the score sliding back.
+  KANLY_FULL_MIN_SCORE: "70"
+
 jobs:
   kanly:
     runs-on: ubuntu-latest
@@ -21,10 +30,15 @@ jobs:
       - name: Build kanly
         run: go build -o kanly ./cmd/kanly
 
+      # The exit status is recorded rather than failing here, so the report is
+      # still posted; the last step enforces it.
       - name: Run kanly on internal packages
         id: run
-        continue-on-error: true
-        run: ./kanly --quiet --format=text ./internal/... 2>&1 | tee kanly-report.txt
+        run: |
+          set +e
+          ./kanly --quiet --min-score="$KANLY_FULL_MIN_SCORE" --format=text ./internal/... > kanly-report.txt 2> kanly-stderr.txt
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+          cat kanly-report.txt kanly-stderr.txt
 
       - name: Build comment body
         run: |
@@ -32,14 +46,26 @@ jobs:
             echo "<!-- kanly-report -->"
             echo "### 🧪 Kanly mutation report — ./internal/..."
             echo ""
+            if [ "${{ steps.run.outputs.exit }}" = 0 ]; then
+              echo "✅ At or above the ${KANLY_FULL_MIN_SCORE}% floor."
+            else
+              echo "❌ Failed (exit ${{ steps.run.outputs.exit }}): $(tail -n 1 kanly-stderr.txt)"
+            fi
+            echo ""
+            echo "<details><summary>Full report</summary>"
+            echo ""
             echo '```text'
-            cat kanly-report.txt
+            head -c 60000 kanly-report.txt
             echo '```'
+            echo "</details>"
           } > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Find existing comment
         id: fc
         uses: peter-evans/find-comment@v3
+        # Fork PRs get a read-only token; the job summary still has the report.
+        continue-on-error: true
         with:
           issue-number: ${{ github.event.pull_request.number }}
           comment-author: 'github-actions[bot]'
@@ -47,11 +73,18 @@ jobs:
 
       - name: Post or update comment
         uses: peter-evans/create-or-update-comment@v4
+        continue-on-error: true
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number }}
           body-path: comment.md
           edit-mode: replace
+
+      - name: Enforce minimum score
+        if: steps.run.outputs.exit != '0'
+        run: |
+          echo "::error::kanly exited ${{ steps.run.outputs.exit }} (3 = score below ${KANLY_FULL_MIN_SCORE}%, 1 = a package was not tested). See the report above."
+          exit 1
 
   kanly-diff:
     runs-on: ubuntu-latest
@@ -71,10 +104,16 @@ jobs:
       - name: Fetch PR base ref
         run: git fetch --no-tags origin ${{ github.base_ref }}
 
+      # --format=llm is Markdown: it renders in the PR comment, and it is the
+      # brief an agent working on the PR acts on (kill, simplify or accept each
+      # surviving mutant, then re-run them with --mutant).
       - name: Run kanly --diff against PR base
         id: run
-        continue-on-error: true
-        run: ./kanly --quiet --diff --diff-base=origin/${{ github.base_ref }} --format=text 2>&1 | tee kanly-diff-report.txt
+        run: |
+          set +e
+          ./kanly --quiet --diff --diff-base=origin/${{ github.base_ref }} --min-score="$KANLY_DIFF_MIN_SCORE" --format=llm > kanly-diff-report.md 2> kanly-diff-stderr.txt
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+          cat kanly-diff-report.md kanly-diff-stderr.txt
 
       - name: Build comment body
         run: |
@@ -82,14 +121,24 @@ jobs:
             echo "<!-- kanly-diff-report -->"
             echo "### 🧪 Kanly mutation report — PR diff vs \`${{ github.base_ref }}\`"
             echo ""
-            echo '```text'
-            cat kanly-diff-report.txt
-            echo '```'
+            if [ "${{ steps.run.outputs.exit }}" = 0 ]; then
+              echo "✅ At or above ${KANLY_DIFF_MIN_SCORE}% on the changed lines."
+            else
+              echo "❌ Failed (exit ${{ steps.run.outputs.exit }}): $(tail -n 1 kanly-diff-stderr.txt)"
+            fi
+            echo ""
+            echo "<details open><summary>Report</summary>"
+            echo ""
+            head -c 60000 kanly-diff-report.md
+            echo ""
+            echo "</details>"
           } > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Find existing comment
         id: fc
         uses: peter-evans/find-comment@v3
+        continue-on-error: true
         with:
           issue-number: ${{ github.event.pull_request.number }}
           comment-author: 'github-actions[bot]'
@@ -97,8 +146,15 @@ jobs:
 
       - name: Post or update comment
         uses: peter-evans/create-or-update-comment@v4
+        continue-on-error: true
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number }}
           body-path: comment.md
           edit-mode: replace
+
+      - name: Enforce minimum score
+        if: steps.run.outputs.exit != '0'
+        run: |
+          echo "::error::kanly exited ${{ steps.run.outputs.exit }} (3 = changed lines score below ${KANLY_DIFF_MIN_SCORE}%, 1 = a package was not tested). Kill, simplify or accept each mutant in the report."
+          exit 1

@@ -38,6 +38,16 @@ GOLDEN_UPDATE=1 go test ./internal/report
 
 CI (`.github/workflows/ci.yml`) runs gofmt (excluding `testdata/`), `go vet`, staticcheck, `go test -race ./...`, and the corpus on every PR; the tests and corpus run on both the go.mod Go version and the latest stable release.
 
+## Mutation-test your own changes
+
+Before calling a change done, run Kanly on it and act on the brief it prints:
+
+```bash
+go run ./cmd/kanly --diff --diff-base=origin/main --format=llm
+```
+
+For each surviving or uncovered mutant: kill it with a test of observable behaviour, delete the dead code it exposes, or accept it in the package's `.kanlyignore` with a reason. Re-run the listed `--fail-fast --mutant=<ids>` command until nothing is left to decide. CI fails a PR whose changed lines score below 80% (`KANLY_DIFF_MIN_SCORE` in `.github/workflows/mutation-test.yml`); its PR comment carries the same brief.
+
 ## Conventions
 
 - **Table-driven tests** using the stdlib `testing` package only — no testify or other assertion libraries.
