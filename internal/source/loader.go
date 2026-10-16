@@ -23,6 +23,9 @@ type Package struct {
 	// or "" when the package is not part of a module. A module without a
 	// `go` directive reports "1.16", matching the go command's default.
 	GoVersion string
+	// ModuleDir is the root directory of the package's module, or "" when
+	// the package is not part of a module.
+	ModuleDir string
 }
 
 const loadMode = packages.NeedName |
@@ -51,8 +54,9 @@ func fromPackage(raw *packages.Package) (*Package, error) {
 		pos := raw.Fset.Position(f.Pos())
 		files[pos.Filename] = f
 	}
-	goVersion := ""
+	goVersion, moduleDir := "", ""
 	if raw.Module != nil {
+		moduleDir = raw.Module.Dir
 		goVersion = raw.Module.GoVersion
 		if goVersion == "" {
 			goVersion = "1.16"
@@ -60,6 +64,7 @@ func fromPackage(raw *packages.Package) (*Package, error) {
 	}
 	return &Package{
 		GoVersion:  goVersion,
+		ModuleDir:  moduleDir,
 		Dir:        absDir,
 		ImportPath: raw.PkgPath,
 		Files:      files,

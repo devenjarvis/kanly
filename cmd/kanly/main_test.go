@@ -232,6 +232,57 @@ func TestRunMutantIDFilter(t *testing.T) {
 	}
 }
 
+func TestRunMutantFingerprintFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	sampleDir := relDir(t, "../../internal/runner/testdata/sample")
+	type report struct {
+		Mutants []struct {
+			Mutation struct {
+				Function    string `json:"function"`
+				Fingerprint string `json:"fingerprint"`
+			} `json:"mutation"`
+		} `json:"mutants"`
+		UnmatchedMutants []string `json:"unmatched_mutants"`
+	}
+	runJSON := func(args ...string) (report, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run(append(append([]string{"--quiet", "--format=json"}, args...), sampleDir), &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v returned %d; stderr: %s", args, code, stderr.String())
+		}
+		var r report
+		if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		return r, stderr.String()
+	}
+
+	probe, _ := runJSON()
+	var subFP string
+	for _, m := range probe.Mutants {
+		if m.Mutation.Function == "Sub" {
+			subFP = m.Mutation.Fingerprint
+		}
+	}
+	if subFP == "" {
+		t.Fatalf("no Sub mutant in %+v", probe)
+	}
+
+	const gone = "000000000000"
+	got, stderr := runJSON("--mutant=" + subFP + "," + gone)
+	if len(got.Mutants) != 1 || got.Mutants[0].Mutation.Fingerprint != subFP {
+		t.Errorf("--mutant=%s ran %+v, want just that mutant", subFP, got.Mutants)
+	}
+	if !reflect.DeepEqual(got.UnmatchedMutants, []string{gone}) {
+		t.Errorf("unmatched_mutants = %v, want [%s]", got.UnmatchedMutants, gone)
+	}
+	if !strings.Contains(stderr, gone) {
+		t.Errorf("stderr does not name the unmatched fingerprint: %q", stderr)
+	}
+}
+
 func TestRunTestsRegexNarrowsInventory(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -433,43 +484,63 @@ func TestMin3(t *testing.T) {
 	}
 }
 
-func TestParseMutantIDs(t *testing.T) {
+func TestParseMutants(t *testing.T) {
 	tests := []struct {
 		name            string
 		input           string
-		want            map[int]bool
+		want            *mutantSet
 		wantErrContains string
 	}{
 		{name: "empty", input: "", want: nil},
 		{name: "whitespace only", input: "  ", want: nil},
-		{name: "single id", input: "1", want: map[int]bool{1: true}},
-		{name: "multiple ids", input: "1,2,3", want: map[int]bool{1: true, 2: true, 3: true}},
-		{name: "spaces around ids", input: " 2 , 3 ", want: map[int]bool{2: true, 3: true}},
+		{name: "single id", input: "1", want: &mutantSet{ids: map[int]bool{1: true}, fps: map[string]bool{}}},
+		{name: "multiple ids", input: "1,2,3", want: &mutantSet{ids: map[int]bool{1: true, 2: true, 3: true}, fps: map[string]bool{}}},
+		{name: "spaces around ids", input: " 2 , 3 ", want: &mutantSet{ids: map[int]bool{2: true, 3: true}, fps: map[string]bool{}}},
+		{name: "fingerprints and ids", input: "5e0d8f5590d5, 7,000000000012", want: &mutantSet{ids: map[int]bool{7: true}, fps: map[string]bool{"5e0d8f5590d5": true, "000000000012": true}}},
 		{name: "zero is invalid", input: "0", wantErrContains: "must be >= 1"},
 		{name: "negative is invalid", input: "-1", wantErrContains: "must be >= 1"},
 		{name: "non-integer", input: "abc", wantErrContains: "invalid id"},
+		{name: "short hex is not a fingerprint", input: "5e0d8f", wantErrContains: "12-hex-digit fingerprint"},
+		{name: "upper-case hex is not a fingerprint", input: "5E0D8F5590D5", wantErrContains: "invalid id"},
 		{name: "empty part from comma", input: ",", wantErrContains: "empty id"},
 		{name: "trailing comma", input: "1,", wantErrContains: "empty id"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseMutantIDs(tt.input)
+			got, err := parseMutants(tt.input)
 			if tt.wantErrContains != "" {
 				if err == nil {
-					t.Fatalf("parseMutantIDs(%q): expected error containing %q, got nil", tt.input, tt.wantErrContains)
+					t.Fatalf("parseMutants(%q): expected error containing %q, got nil", tt.input, tt.wantErrContains)
 				}
 				if !strings.Contains(err.Error(), tt.wantErrContains) {
-					t.Errorf("parseMutantIDs(%q): error %q does not contain %q", tt.input, err.Error(), tt.wantErrContains)
+					t.Errorf("parseMutants(%q): error %q does not contain %q", tt.input, err.Error(), tt.wantErrContains)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("parseMutantIDs(%q): unexpected error: %v", tt.input, err)
+				t.Fatalf("parseMutants(%q): unexpected error: %v", tt.input, err)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("parseMutantIDs(%q): want %v, got %v", tt.input, tt.want, got)
+				t.Errorf("parseMutants(%q): want %+v, got %+v", tt.input, tt.want, got)
 			}
 		})
+	}
+}
+
+func TestMutantSetHas(t *testing.T) {
+	set := &mutantSet{ids: map[int]bool{2: true}, fps: map[string]bool{"5e0d8f5590d5": true}}
+	for _, tt := range []struct {
+		m    mutation.Mutation
+		want bool
+	}{
+		{mutation.Mutation{ID: 2, Fingerprint: "aaaaaaaaaaaa"}, true},
+		{mutation.Mutation{ID: 3, Fingerprint: "5e0d8f5590d5"}, true},
+		{mutation.Mutation{ID: 3, Fingerprint: "aaaaaaaaaaaa"}, false},
+		{mutation.Mutation{ID: 3}, false},
+	} {
+		if got := set.has(tt.m); got != tt.want {
+			t.Errorf("has(%+v) = %v, want %v", tt.m, got, tt.want)
+		}
 	}
 }
 
@@ -1311,5 +1382,93 @@ func TestUnionHits(t *testing.T) {
 	}
 	if got := unionHits(nil, nil); len(got) != 0 {
 		t.Errorf("unionHits(nil, nil) = %v, want none", got)
+	}
+}
+
+func TestRunCrossPackage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	// The fixture is its own module: crosspkg/app's tests are the only ones
+	// that run lib.Scale and lib.Half, and they never check Half's result.
+	chdir(t, relDir(t, "../../internal/runner/testdata/crosspkg"))
+	t.Setenv("KANLY_CACHE_DIR", t.TempDir())
+	type mutant struct {
+		Mutation struct {
+			Function string `json:"function"`
+		} `json:"mutation"`
+		Status        string   `json:"status"`
+		CoveringTests []string `json:"covering_tests"`
+		KillingTests  []string `json:"killing_tests"`
+	}
+	var stderr bytes.Buffer
+	runLib := func(args ...string) (map[string]mutant, bool) {
+		t.Helper()
+		var stdout bytes.Buffer
+		stderr.Reset()
+		if code := run(append(append([]string{"--format=json", "--operators=int_arith"}, args...), "./lib"), &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v returned %d; stderr: %s", args, code, stderr.String())
+		}
+		var result struct {
+			CrossPackage bool     `json:"cross_package"`
+			Mutants      []mutant `json:"mutants"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		byFunc := make(map[string]mutant)
+		for _, m := range result.Mutants {
+			byFunc[m.Mutation.Function] = m
+		}
+		return byFunc, result.CrossPackage
+	}
+
+	own, cross := runLib()
+	if cross {
+		t.Error("cross_package set without --cross-package")
+	}
+	for _, fn := range []string{"Scale", "Half", "Unused"} {
+		if got := own[fn].Status; got != "not_covered" {
+			t.Errorf("own tests only: %s is %s, want not_covered", fn, got)
+		}
+	}
+
+	all, cross := runLib("--cross-package")
+	if !cross {
+		t.Error("cross_package not set with --cross-package")
+	}
+	if m := all["Add"]; m.Status != "killed" || !reflect.DeepEqual(m.KillingTests, []string{"TestAdd"}) {
+		t.Errorf("Add: %+v, want killed by its own TestAdd", m)
+	}
+	if m := all["Scale"]; m.Status != "killed" || !reflect.DeepEqual(m.KillingTests, []string{"crosspkg/app.TestArea"}) {
+		t.Errorf("Scale: %+v, want killed by crosspkg/app.TestArea", m)
+	}
+	if m := all["Half"]; m.Status != "survived" || !reflect.DeepEqual(m.CoveringTests, []string{"crosspkg/app.TestReport"}) {
+		t.Errorf("Half: %+v, want survived, covered by crosspkg/app.TestReport", m)
+	}
+	if got := all["Unused"].Status; got != "not_covered" {
+		t.Errorf("Unused: %s, want not_covered", got)
+	}
+	// A dependent whose tests cannot run is left out, not fatal.
+	if !strings.Contains(stderr.String(), "not counting the tests of dependent crosspkg/mainfail") {
+		t.Errorf("stderr does not warn about crosspkg/mainfail: %s", stderr.String())
+	}
+	const reused = "reusing the setup of dependent crosspkg/app"
+	if strings.Contains(stderr.String(), reused) {
+		t.Errorf("first --cross-package run reused a setup from an empty cache: %s", stderr.String())
+	}
+
+	// Nothing changed, so the next run reuses app's setup, with the same
+	// verdicts; --no-cache sets it up afresh.
+	again, _ := runLib("--cross-package")
+	if !strings.Contains(stderr.String(), reused) {
+		t.Errorf("second run did not reuse app's setup: %s", stderr.String())
+	}
+	if !reflect.DeepEqual(again, all) {
+		t.Errorf("verdicts changed with a cached setup:\n%+v\nwant\n%+v", again, all)
+	}
+	runLib("--cross-package", "--no-cache")
+	if strings.Contains(stderr.String(), reused) {
+		t.Errorf("--no-cache reused a setup: %s", stderr.String())
 	}
 }

@@ -104,11 +104,19 @@ type Report struct {
 	Errors        []PackageError   `json:"errors,omitempty"`
 	ExcludedTests []ExcludedTest   `json:"excluded_tests,omitempty"`
 	StaleIgnores  []StaleIgnore    `json:"stale_ignores,omitempty"`
+	// UnmatchedMutants lists --mutant fingerprints that matched no mutant
+	// in scope: the mutated line changed, or the mutant was accepted.
+	UnmatchedMutants []string `json:"unmatched_mutants,omitempty"`
 	// FailFast is set when each mutant stopped at its first failing test
 	// (--fail-fast): killing_tests then names that test only, and the
 	// test-level views (tests, zero_kill_tests, redundant_test_groups) are
 	// left empty because partial kill sets would make them wrong.
-	FailFast            bool                         `json:"fail_fast,omitempty"`
+	FailFast bool `json:"fail_fast,omitempty"`
+	// CrossPackage is set when the tests of the module's other packages
+	// that import a mutated package ran against its mutants too
+	// (--cross-package). Their names in killing_tests and covering_tests
+	// are qualified by import path; the package's own tests' are not.
+	CrossPackage        bool                         `json:"cross_package,omitempty"`
 	Tests               []mutation.TestStats         `json:"tests"`
 	ZeroKillTests       []string                     `json:"zero_kill_tests"`
 	RedundantTestGroups [][]string                   `json:"redundant_test_groups"`
@@ -315,8 +323,11 @@ func buildSurvivorsByFunction(results []mutation.Result) []mutation.FunctionSurv
 	return out
 }
 
+// qualifyTestName prefixes a test name with its package. Names of another
+// package's tests (--cross-package) are qualified already: a Go identifier
+// cannot contain a dot.
 func qualifyTestName(pkg, name string) string {
-	if pkg == "" {
+	if pkg == "" || strings.Contains(name, ".") {
 		return name
 	}
 	return pkg + "." + name
@@ -330,6 +341,9 @@ func qualifyTestName(pkg, name string) string {
 type LLMSource struct {
 	FuncRanges map[string]map[string]mutation.FuncRange
 	ReadFile   func(string) ([]byte, error)
+	// Limit caps the mutants listed, live ones first; the functions left
+	// out are named. 0 lists every mutant.
+	Limit int
 }
 
 // llmWarnSize triggers a stderr-style warning when the rendered artifact
@@ -364,8 +378,13 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMPreamble(&b)
 	writeLLMSummary(&b, r.Summary)
 	survivors, uncovered := splitUnkilled(r.Mutants)
+	budget := &llmBudget{left: src.Limit, limit: src.Limit > 0}
+	survivors, omittedLive := budget.take(survivors)
+	uncovered, omittedUncovered := budget.take(uncovered)
 	writeLLMLiveSection(&b, r, survivors, src.FuncRanges, readFile)
+	writeLLMOmitted(&b, "live", omittedLive, src.Limit)
 	writeLLMUncoveredSection(&b, r, uncovered, src.FuncRanges, readFile)
+	writeLLMOmitted(&b, "uncovered", omittedUncovered, src.Limit)
 	if r.FailFast {
 		b.WriteString("_Test-level analysis skipped: `--fail-fast` stopped each mutant at its first failing test, so kill sets are incomplete._\n\n")
 	} else {
@@ -376,6 +395,7 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMErrors(&b, r.Errors)
 	writeLLMExcluded(&b, r.ExcludedTests)
 	writeLLMStale(&b, r.StaleIgnores)
+	writeLLMUnmatched(&b, r.UnmatchedMutants)
 	writeLLMNextIteration(&b, survivors, uncovered)
 
 	out := b.String()
@@ -413,6 +433,31 @@ func writeLLMSummary(b *strings.Builder, s Summary) {
 	b.WriteString("|-------|--------|----------|---------|------------|-----------|-------|-------------------------|\n")
 	fmt.Fprintf(b, "| %d | %d | %d | %d | %d | %d | %.1f%% | %.1f%% |\n\n",
 		s.Total, s.Killed, s.Survived, s.Timeout, s.NotCovered, s.NotViable, s.Score*100, s.ScoreWithUncovered*100)
+}
+
+// llmBudget counts the mutants the brief may still list.
+type llmBudget struct {
+	left   int
+	listed int
+	limit  bool // false lists everything
+}
+
+// take keeps whole groups, in order, while their mutants fit, and returns
+// the rest. The brief's first group is always kept, so a limit smaller than
+// one function's mutants still lists that function.
+func (bud *llmBudget) take(groups []mutation.FunctionSurvivors) (kept, omitted []mutation.FunctionSurvivors) {
+	if !bud.limit {
+		return groups, nil
+	}
+	for i, g := range groups {
+		if len(g.Mutations) > bud.left && bud.listed > 0 {
+			return kept, groups[i:]
+		}
+		bud.left -= len(g.Mutations)
+		bud.listed += len(g.Mutations)
+		kept = append(kept, g)
+	}
+	return kept, nil
 }
 
 // splitUnkilled groups survived and not-covered mutants by (package,
@@ -456,13 +501,42 @@ func groupByFunction(results []mutation.Result, want mutation.Status) []mutation
 		})
 		out = append(out, *g)
 	}
+	// Functions with the most mutants come first: one sharper test there
+	// settles the most, and a limited brief keeps them.
 	sort.Slice(out, func(i, j int) bool {
+		if len(out[i].Mutations) != len(out[j].Mutations) {
+			return len(out[i].Mutations) > len(out[j].Mutations)
+		}
 		if out[i].Package != out[j].Package {
 			return out[i].Package < out[j].Package
 		}
 		return out[i].Function < out[j].Function
 	})
 	return out
+}
+
+// maxOmittedNamed caps the functions named in a note on omitted mutants.
+const maxOmittedNamed = 10
+
+// writeLLMOmitted names the functions whose mutants of one kind ("live" or
+// "uncovered") the limit left out of the brief.
+func writeLLMOmitted(b *strings.Builder, kind string, groups []mutation.FunctionSurvivors, limit int) {
+	if len(groups) == 0 {
+		return
+	}
+	n := 0
+	var names []string
+	for _, g := range groups {
+		n += len(g.Mutations)
+		if len(names) < maxOmittedNamed {
+			names = append(names, fmt.Sprintf("`%s:%s` (%d)", g.Package, g.Function, len(g.Mutations)))
+		}
+	}
+	more := ""
+	if len(groups) > len(names) {
+		more = fmt.Sprintf(" and %d more", len(groups)-len(names))
+	}
+	fmt.Fprintf(b, "_%d more %s mutant(s) are not listed (`--llm-limit=%d`): %s%s. Settle the ones above first, then re-run, or run `kanly --format=llm <pkg>:<Func>` for one of these._\n\n", n, kind, limit, strings.Join(names, ", "), more)
 }
 
 // operatorHints maps each registered operator ID to a one-line test-strategy
@@ -492,7 +566,7 @@ var operatorHints = map[string]string{
 // writeLLMUnkilledGroups renders one offense section (live or uncovered),
 // emitting the per-function snippet, the per-mutant line, and an inline
 // operator-hint legend that fires once per operator on first occurrence.
-func writeLLMUnkilledGroups(b *strings.Builder, groups []mutation.FunctionSurvivors, byID map[int]mutation.Result, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
+func writeLLMUnkilledGroups(b *strings.Builder, groups []mutation.FunctionSurvivors, byID map[mutantKey]mutation.Result, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
 	seenHints := make(map[string]bool)
 	for _, g := range groups {
 		fmt.Fprintf(b, "### %s — %s  (%d)\n\n", g.Package, g.Function, len(g.Mutations))
@@ -505,7 +579,7 @@ func writeLLMUnkilledGroups(b *strings.Builder, groups []mutation.FunctionSurviv
 		}
 
 		for _, m := range g.Mutations {
-			res := byID[m.ID]
+			res := byID[mutantKey{m.Package, m.ID}]
 			// The snippet header names the file; repeating it per mutant
 			// is the costliest part of a large report.
 			loc := fmt.Sprintf("L%d:%d", m.Line, m.Column)
@@ -537,64 +611,86 @@ func writeLLMLiveSection(b *strings.Builder, r Report, groups []mutation.Functio
 		b.WriteString("_None — every covered mutant was killed._\n\n")
 		return
 	}
-	byID := make(map[int]mutation.Result, len(r.Mutants))
-	for _, res := range r.Mutants {
-		byID[res.Mutation.ID] = res
-	}
+	byID := resultsByKey(r.Mutants)
 	writeLLMUnkilledGroups(b, groups, byID, funcRanges, readFile)
 }
 
 func writeLLMUncoveredSection(b *strings.Builder, r Report, groups []mutation.FunctionSurvivors, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
 	b.WriteString("## Uncovered mutants (no test reaches this line)\n\n")
-	b.WriteString("_No test in the package runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation. Code exercised only by another package's tests shows up here too._\n\n")
+	if r.CrossPackage {
+		b.WriteString("_No test in the package, or in the module's packages that import it, runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation._\n\n")
+	} else {
+		b.WriteString("_No test in the package runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation. Code exercised only by another package's tests shows up here too: re-run with `--cross-package` to count those tests before writing new ones._\n\n")
+	}
 	if len(groups) == 0 {
 		b.WriteString("_None — every mutation site is reached by at least one test._\n\n")
 		return
 	}
-	byID := make(map[int]mutation.Result, len(r.Mutants))
-	for _, res := range r.Mutants {
-		byID[res.Mutation.ID] = res
-	}
+	byID := resultsByKey(r.Mutants)
 	writeLLMUnkilledGroups(b, groups, byID, funcRanges, readFile)
+}
+
+// mutantKey identifies a mutant in a report: IDs are unique per package only.
+type mutantKey struct {
+	pkg string
+	id  int
+}
+
+func resultsByKey(results []mutation.Result) map[mutantKey]mutation.Result {
+	byKey := make(map[mutantKey]mutation.Result, len(results))
+	for _, res := range results {
+		byKey[mutantKey{res.Mutation.Package, res.Mutation.ID}] = res
+	}
+	return byKey
 }
 
 // writeLLMNextIteration renders the closing instruction pointing at the
 // `--mutant=<ids>` re-verification loop. Skipped when there's nothing to
 // iterate on, so a clean-suite artifact ends on the inventory.
 func writeLLMNextIteration(b *strings.Builder, survived, notCovered []mutation.FunctionSurvivors) {
-	// Mutation IDs are unique per package only, so each package gets its own
-	// re-run command.
-	idsByPkg := make(map[string][]int)
+	// Fingerprints survive edits elsewhere in the package, which renumber
+	// its mutants; an ID is used only for a mutant without one.
+	refsByPkg := make(map[string][]string)
 	for _, groups := range [][]mutation.FunctionSurvivors{survived, notCovered} {
 		for _, g := range groups {
 			for _, m := range g.Mutations {
-				idsByPkg[m.Package] = append(idsByPkg[m.Package], m.ID)
+				ref := m.Fingerprint
+				if ref == "" {
+					ref = strconv.Itoa(m.ID)
+				}
+				refsByPkg[m.Package] = append(refsByPkg[m.Package], ref)
 			}
 		}
 	}
-	if len(idsByPkg) == 0 {
+	if len(refsByPkg) == 0 {
 		return
 	}
-	pkgs := make([]string, 0, len(idsByPkg))
-	for p := range idsByPkg {
+	pkgs := make([]string, 0, len(refsByPkg))
+	for p := range refsByPkg {
 		pkgs = append(pkgs, p)
 	}
 	sort.Strings(pkgs)
 
 	b.WriteString("## Next iteration\n\n")
-	b.WriteString("After editing tests, re-run only these mutants (the iterative loop validated in arXiv:2506.02954). `--fail-fast` stops each mutant at its first failing test, which is all a verdict needs:\n\n")
+	b.WriteString("After editing tests or code, re-run only these mutants (the iterative loop validated in arXiv:2506.02954). `--fail-fast` stops each mutant at its first failing test, which is all a verdict needs:\n\n")
 	b.WriteString("```\n")
 	for _, pkg := range pkgs {
-		ids := idsByPkg[pkg]
-		sort.Ints(ids)
-		idStrs := make([]string, len(ids))
-		for i, id := range ids {
-			idStrs[i] = strconv.Itoa(id)
-		}
-		fmt.Fprintf(b, "kanly --fail-fast --mutant=%s %s\n", strings.Join(idStrs, ","), pkg)
+		refs := refsByPkg[pkg]
+		sort.Strings(refs)
+		fmt.Fprintf(b, "kanly --fail-fast --mutant=%s %s\n", strings.Join(refs, ","), pkg)
 	}
 	b.WriteString("```\n\n")
-	b.WriteString("IDs hold while only tests change. Editing the package's code renumbers its mutants, so re-run the package or `<pkg>:<Func>` instead; fingerprints (`fp`) survive edits elsewhere.\n\n")
+	b.WriteString("Mutants are named by fingerprint (`fp`), which survives edits elsewhere in the package. Editing a mutant's own line gives it a new fingerprint, and the re-run reports the old one as not found: re-run the package or `<pkg>:<Func>` to judge that line again.\n\n")
+	b.WriteString("To try one test against one mutant while you write it, run `kanly test <pkg> <fp> -run <TestName>`: it runs `go test` with the mutant applied, so the test should fail. Add `--in=<pkg>` for a test in another package. `kanly show <pkg> <fp>` prints the mutated line.\n\n")
+}
+
+// writeLLMUnmatched lists --mutant fingerprints that matched no mutant.
+func writeLLMUnmatched(b *strings.Builder, fps []string) {
+	if len(fps) == 0 {
+		return
+	}
+	b.WriteString("## Mutants not found\n\n")
+	fmt.Fprintf(b, "No mutant in scope has these fingerprints: %s. The mutated line changed (which also changes the fingerprint) or the mutant is accepted in `%s`. Re-run the package or `<pkg>:<Func>` to see the line's current mutants.\n\n", strings.Join(backtickAll(fps), ", "), ignoreFileName)
 }
 
 // writeLLMSnippet writes the function's numbered source and reports whether
@@ -629,7 +725,9 @@ func writeLLMSnippet(b *strings.Builder, fr mutation.FuncRange, readFile func(st
 const maxLLMCoveringTests = 5
 
 // writeLLMCoveringTests appends the tests that ran a live mutant without
-// failing. Names are unqualified: the section heading names the package.
+// failing. The package's own tests are unqualified, since the section
+// heading names the package; another package's are shortened to the last
+// element of its import path.
 func writeLLMCoveringTests(b *strings.Builder, res mutation.Result) {
 	if res.Status == mutation.StatusNotCovered || len(res.CoveringTests) == 0 {
 		return
@@ -641,7 +739,7 @@ func writeLLMCoveringTests(b *strings.Builder, res mutation.Result) {
 	var names []string
 	for _, t := range res.CoveringTests {
 		if !killers[t] {
-			names = append(names, t)
+			names = append(names, shortTestName(t))
 		}
 	}
 	if len(names) == 0 {
@@ -654,6 +752,14 @@ func writeLLMCoveringTests(b *strings.Builder, res mutation.Result) {
 		names = names[:maxLLMCoveringTests]
 	}
 	fmt.Fprintf(b, " · ran by %s%s", strings.Join(backtickAll(names), ", "), more)
+}
+
+// shortTestName shortens "example.com/m/app.TestX" to "app.TestX".
+func shortTestName(name string) string {
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 func backtickAll(in []string) []string {
@@ -869,6 +975,12 @@ func WriteText(w io.Writer, r Report) error {
 			if _, err := fmt.Fprintf(w, "  %s: %s %s\n", relPath(s.File), s.Fingerprint, s.Reason); err != nil {
 				return err
 			}
+		}
+	}
+
+	if len(r.UnmatchedMutants) > 0 {
+		if _, err := fmt.Fprintf(w, "\n--mutant fingerprints matching no mutant (line changed or accepted): %s\n", strings.Join(r.UnmatchedMutants, ", ")); err != nil {
+			return err
 		}
 	}
 

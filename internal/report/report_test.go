@@ -3,6 +3,7 @@ package report_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -941,5 +942,171 @@ func TestWriteLLMStaleIgnores(t *testing.T) {
 	}
 	if want := "## Stale .kanlyignore entries\n\nThese entries match no mutant: the line changed or was removed. Delete them, and judge any mutant on that line again.\n\n- `p/.kanlyignore`: `ba9876543210` equivalent\n"; !strings.Contains(buf.String(), want) {
 		t.Errorf("stale section missing; want %q in:\n%s", want, buf.String())
+	}
+}
+
+// TestCrossPackageTestNames covers --cross-package results, whose tests from
+// other packages arrive qualified by import path.
+func TestCrossPackageTestNames(t *testing.T) {
+	results := []mutation.Result{
+		{
+			Mutation:      mutation.Mutation{ID: 1, Package: "m/lib", Function: "Scale", File: "lib.go", Line: 3, OperatorName: "int_arith", Original: "*", Mutant: "/"},
+			Status:        mutation.StatusKilled,
+			KillingTests:  []string{"m/app.TestArea"},
+			CoveringTests: []string{"m/app.TestArea"},
+		},
+		{
+			Mutation:      mutation.Mutation{ID: 2, Package: "m/lib", Function: "Half", File: "lib.go", Line: 5, OperatorName: "int_arith", Original: "/", Mutant: "*"},
+			Status:        mutation.StatusSurvived,
+			CoveringTests: []string{"TestOwn", "m/app.TestReport"},
+		},
+		{
+			Mutation: mutation.Mutation{ID: 3, Package: "m/lib", Function: "Unused", File: "lib.go", Line: 7, OperatorName: "int_arith", Original: "-", Mutant: "+"},
+			Status:   mutation.StatusNotCovered,
+		},
+	}
+	r := report.Build(results, map[string][]string{"m/lib": {"TestOwn"}})
+	if want := []string{"m/lib.TestOwn"}; !equalStrings(r.ZeroKillTests, want) {
+		t.Errorf("ZeroKillTests = %v, want %v", r.ZeroKillTests, want)
+	}
+	if r.Tests[0].Package != "m/lib" || r.Tests[0].Name != "m/app.TestArea" || r.Tests[0].KillCount != 1 {
+		t.Errorf("Tests[0] = %+v, want m/app.TestArea killing one m/lib mutant", r.Tests[0])
+	}
+
+	r.CrossPackage = true
+	var buf bytes.Buffer
+	if err := report.WriteLLM(&buf, r, report.LLMSource{ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"ran by `TestOwn`, `app.TestReport`",
+		"or in the module's packages that import it",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("llm output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "re-run with `--cross-package`") {
+		t.Errorf("llm output suggests --cross-package although it was on:\n%s", out)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestLLMSameIDInTwoPackages guards the per-mutant lookup: IDs are unique
+// per package only, so each package's mutant #1 keeps its own tests.
+func TestLLMSameIDInTwoPackages(t *testing.T) {
+	results := []mutation.Result{
+		{
+			Mutation:      mutation.Mutation{ID: 1, Package: "m/a", Function: "A", File: "a.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-", Fingerprint: "aaaaaaaaaaaa"},
+			Status:        mutation.StatusSurvived,
+			CoveringTests: []string{"TestA"},
+		},
+		{
+			Mutation:      mutation.Mutation{ID: 1, Package: "m/b", Function: "B", File: "b.go", Line: 1, OperatorName: "int_arith", Original: "+", Mutant: "-", Fingerprint: "bbbbbbbbbbbb"},
+			Status:        mutation.StatusSurvived,
+			CoveringTests: []string{"TestB"},
+		},
+	}
+	r := report.Build(results, nil)
+	r.UnmatchedMutants = []string{"cccccccccccc"}
+	var buf bytes.Buffer
+	if err := report.WriteLLM(&buf, r, report.LLMSource{ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"fp `aaaaaaaaaaaa` · ran by `TestA`\n",
+		"fp `bbbbbbbbbbbb` · ran by `TestB`\n",
+		"kanly --fail-fast --mutant=aaaaaaaaaaaa m/a\n",
+		"kanly --fail-fast --mutant=bbbbbbbbbbbb m/b\n",
+		"## Mutants not found",
+		"`cccccccccccc`",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("llm output lacks %q:\n%s", want, out)
+		}
+	}
+
+	buf.Reset()
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "matching no mutant (line changed or accepted): cccccccccccc") {
+		t.Errorf("text output does not list the unmatched fingerprint:\n%s", buf.String())
+	}
+}
+
+func TestLLMRanksAndLimitsMutants(t *testing.T) {
+	mut := func(id int, fn string, status mutation.Status) mutation.Result {
+		return mutation.Result{
+			Mutation: mutation.Mutation{ID: id, Package: "m/p", Function: fn, File: "p.go", Line: id, OperatorName: "int_arith", Original: "+", Mutant: "-", Fingerprint: fmt.Sprintf("%012d", id)},
+			Status:   status,
+		}
+	}
+	results := []mutation.Result{
+		mut(1, "Alpha", mutation.StatusSurvived),
+		mut(2, "Busy", mutation.StatusSurvived),
+		mut(3, "Busy", mutation.StatusSurvived),
+		mut(4, "Busy", mutation.StatusSurvived),
+		mut(5, "Cold", mutation.StatusNotCovered),
+		mut(6, "Cold", mutation.StatusNotCovered),
+	}
+	render := func(limit int) string {
+		t.Helper()
+		var buf bytes.Buffer
+		src := report.LLMSource{Limit: limit, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}
+		if err := report.WriteLLM(&buf, report.Build(results, nil), src); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+
+	all := render(0)
+	if busy, alpha := strings.Index(all, "### m/p — Busy"), strings.Index(all, "### m/p — Alpha"); busy < 0 || alpha < 0 || busy > alpha {
+		t.Errorf("Busy (3 live) should come before Alpha (1 live):\n%s", all)
+	}
+	if strings.Contains(all, "not listed") {
+		t.Errorf("unlimited brief omits mutants:\n%s", all)
+	}
+
+	limited := render(3)
+	for _, want := range []string{
+		"### m/p — Busy",
+		"_1 more live mutant(s) are not listed (`--llm-limit=3`): `m/p:Alpha` (1).",
+		"_2 more uncovered mutant(s) are not listed (`--llm-limit=3`): `m/p:Cold` (2).",
+		"--mutant=000000000002,000000000003,000000000004 m/p\n",
+	} {
+		if !strings.Contains(limited, want) {
+			t.Errorf("limited brief lacks %q:\n%s", want, limited)
+		}
+	}
+	for _, unwanted := range []string{"### m/p — Alpha", "### m/p — Cold"} {
+		if strings.Contains(limited, unwanted) {
+			t.Errorf("limited brief lists %q:\n%s", unwanted, limited)
+		}
+	}
+
+	// A limit below the first function's mutants still lists that function.
+	if tiny := render(1); !strings.Contains(tiny, "### m/p — Busy") || strings.Contains(tiny, "### m/p — Alpha") {
+		t.Errorf("limit 1 should list Busy alone:\n%s", tiny)
+	}
+	// Leftover budget goes to uncovered mutants once the live ones fit.
+	if wide := render(5); !strings.Contains(wide, "### m/p — Alpha") || strings.Contains(wide, "### m/p — Cold") || !strings.Contains(wide, "`m/p:Cold` (2)") {
+		t.Errorf("limit 5 should list every live mutant and omit Cold:\n%s", wide)
+	}
+	if exact := render(6); strings.Contains(exact, "not listed") {
+		t.Errorf("limit 6 fits every mutant:\n%s", exact)
 	}
 }

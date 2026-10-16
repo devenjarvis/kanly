@@ -59,6 +59,12 @@ func parseTestNames(out []byte, prefixes ...string) []string {
 	return names
 }
 
+// SchemaBuildFlags returns the extra `go test` flags needed to compile
+// pkgPath's mutant schema; see schemaLangFlags.
+func SchemaBuildFlags(pkgPath, goVersion string) []string {
+	return schemaLangFlags(pkgPath, goVersion)
+}
+
 // schemaLangFlags returns the extra `go test` flags needed to compile the
 // schema for a module whose `go` directive is goVersion. Modules older than
 // schema.MinLang get the package's language version raised to it; newer (or
@@ -76,6 +82,13 @@ func schemaLangFlags(pkgPath, goVersion string) []string {
 // see schemaLangFlags. Returns the binary path and a cleanup function.
 // buildFlags are extra `go test -c` flags such as -tags.
 func CompileTestBinary(ctx context.Context, pkgPath, overlayPath, goVersion string, buildFlags ...string) (binaryPath string, cleanup func(), err error) {
+	return CompileDependentTestBinary(ctx, pkgPath, pkgPath, overlayPath, goVersion, buildFlags...)
+}
+
+// CompileDependentTestBinary compiles testPkg's test binary with the overlay
+// that holds schemaPkg's mutant schema, so testPkg's tests run against
+// schemaPkg's mutants. goVersion is schemaPkg's module `go` directive.
+func CompileDependentTestBinary(ctx context.Context, testPkg, schemaPkg, overlayPath, goVersion string, buildFlags ...string) (binaryPath string, cleanup func(), err error) {
 	tmpDir, err := os.MkdirTemp("", "kanly-bin-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp dir: %w", err)
@@ -89,9 +102,9 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath, goVersion stri
 
 	binPath := filepath.Join(tmpDir, "testbin")
 	args := []string{"test", "-c", "-vet=off", "-overlay=" + overlayPath}
-	args = append(args, schemaLangFlags(pkgPath, goVersion)...)
+	args = append(args, schemaLangFlags(schemaPkg, goVersion)...)
 	args = append(args, buildFlags...)
-	args = append(args, "-o", binPath, pkgPath)
+	args = append(args, "-o", binPath, testPkg)
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
@@ -123,6 +136,13 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath, goVersion stri
 // mutant injected at line L.
 // buildFlags are extra `go test -c` flags such as -tags.
 func CompileCoverageBinary(ctx context.Context, pkgPath string, buildFlags ...string) (binaryPath string, cleanup func(), err error) {
+	return CompileDependentCoverageBinary(ctx, pkgPath, pkgPath, buildFlags...)
+}
+
+// CompileDependentCoverageBinary compiles testPkg's test binary with only
+// coverPkg instrumented, so per-test coverage says which of testPkg's tests
+// run each line of coverPkg.
+func CompileDependentCoverageBinary(ctx context.Context, testPkg, coverPkg string, buildFlags ...string) (binaryPath string, cleanup func(), err error) {
 	tmpDir, err := os.MkdirTemp("", "kanly-cov-bin-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp dir: %w", err)
@@ -137,9 +157,9 @@ func CompileCoverageBinary(ctx context.Context, pkgPath string, buildFlags ...st
 	binPath := filepath.Join(tmpDir, "covbin")
 	// -covermode=count records per-block execution counts (not just 0/1 as
 	// the default `set` mode does); they are reported as TestHit.Hits.
-	args := []string{"test", "-c", "-vet=off", "-cover", "-covermode=count", "-coverpkg=" + pkgPath}
+	args := []string{"test", "-c", "-vet=off", "-cover", "-covermode=count", "-coverpkg=" + coverPkg}
 	args = append(args, buildFlags...)
-	args = append(args, "-o", binPath, pkgPath)
+	args = append(args, "-o", binPath, testPkg)
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
@@ -483,13 +503,15 @@ func parseCoverProfile(data []byte) ([]coverBlock, error) {
 // cover instrumentation, so both firing means both contributed to the
 // test's traffic on that line.
 //
-// Coverprofile file paths are normalized via filepath.Join(pkgDir, basename),
-// which is correct for single-directory Go packages.
+// The tests run in pkgDir. srcDir is the covered package's directory:
+// coverprofile file paths are normalized via filepath.Join(srcDir, basename),
+// which is correct for single-directory Go packages. It differs from pkgDir
+// when the binary is a dependent package's (CompileDependentCoverageBinary).
 //
 // A test that fails when run on its own is not an error: it contributes no
 // coverage and is returned in the second map, test name → failure output.
 // testArgs are extra test binary flags such as -test.short.
-func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inventory []string, timeout time.Duration, jobs int, testArgs ...string) (map[FileLine][]TestHit, map[string]string, error) {
+func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir, srcDir string, inventory []string, timeout time.Duration, jobs int, testArgs ...string) (map[FileLine][]TestHit, map[string]string, error) {
 	if jobs < 1 {
 		jobs = 1
 	}
@@ -570,7 +592,7 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inve
 			if base == "kanly_schema.go" {
 				continue
 			}
-			abs := filepath.Join(pkgDir, base)
+			abs := filepath.Join(srcDir, base)
 			for ln := b.StartLine; ln <= b.EndLine; ln++ {
 				key := FileLine{File: abs, Line: ln}
 				set, ok := out[key]

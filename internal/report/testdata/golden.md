@@ -38,7 +38,7 @@ _Tests run these lines, but none failed when the mutant was applied. Sharpen an 
 
 ## Uncovered mutants (no test reaches this line)
 
-_No test in the package runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation. Code exercised only by another package's tests shows up here too._
+_No test in the package runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation. Code exercised only by another package's tests shows up here too: re-run with `--cross-package` to count those tests before writing new ones._
 
 ### example.com/pkg/bar — Mul  (1)
 
@@ -71,12 +71,14 @@ Mutants killed per test:
 
 ## Next iteration
 
-After editing tests, re-run only these mutants (the iterative loop validated in arXiv:2506.02954). `--fail-fast` stops each mutant at its first failing test, which is all a verdict needs:
+After editing tests or code, re-run only these mutants (the iterative loop validated in arXiv:2506.02954). `--fail-fast` stops each mutant at its first failing test, which is all a verdict needs:
 
 ```
-kanly --fail-fast --mutant=3 example.com/pkg/bar
-kanly --fail-fast --mutant=2 example.com/pkg/foo
+kanly --fail-fast --mutant=7d793037a076 example.com/pkg/bar
+kanly --fail-fast --mutant=5d41402abc4b example.com/pkg/foo
 ```
 
-IDs hold while only tests change. Editing the package's code renumbers its mutants, so re-run the package or `<pkg>:<Func>` instead; fingerprints (`fp`) survive edits elsewhere.
+Mutants are named by fingerprint (`fp`), which survives edits elsewhere in the package. Editing a mutant's own line gives it a new fingerprint, and the re-run reports the old one as not found: re-run the package or `<pkg>:<Func>` to judge that line again.
+
+To try one test against one mutant while you write it, run `kanly test <pkg> <fp> -run <TestName>`: it runs `go test` with the mutant applied, so the test should fail. Add `--in=<pkg>` for a test in another package. `kanly show <pkg> <fp>` prints the mutated line.
 
