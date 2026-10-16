@@ -87,13 +87,28 @@ type ExcludedTest struct {
 	Reason  string `json:"reason"`
 }
 
+// StaleIgnore is a .kanlyignore entry that matches no mutant in its
+// package any more: the mutated line changed or went away.
+type StaleIgnore struct {
+	Package     string `json:"package"`
+	File        string `json:"file"`
+	Fingerprint string `json:"fingerprint"`
+	Reason      string `json:"reason"`
+}
+
 type Report struct {
-	SchemaVersion       int                          `json:"schema_version"`
-	Scope               string                       `json:"scope,omitempty"`
-	Summary             Summary                      `json:"summary"`
-	Packages            []PackageSummary             `json:"packages"`
-	Errors              []PackageError               `json:"errors,omitempty"`
-	ExcludedTests       []ExcludedTest               `json:"excluded_tests,omitempty"`
+	SchemaVersion int              `json:"schema_version"`
+	Scope         string           `json:"scope,omitempty"`
+	Summary       Summary          `json:"summary"`
+	Packages      []PackageSummary `json:"packages"`
+	Errors        []PackageError   `json:"errors,omitempty"`
+	ExcludedTests []ExcludedTest   `json:"excluded_tests,omitempty"`
+	StaleIgnores  []StaleIgnore    `json:"stale_ignores,omitempty"`
+	// FailFast is set when each mutant stopped at its first failing test
+	// (--fail-fast): killing_tests then names that test only, and the
+	// test-level views (tests, zero_kill_tests, redundant_test_groups) are
+	// left empty because partial kill sets would make them wrong.
+	FailFast            bool                         `json:"fail_fast,omitempty"`
 	Tests               []mutation.TestStats         `json:"tests"`
 	ZeroKillTests       []string                     `json:"zero_kill_tests"`
 	RedundantTestGroups [][]string                   `json:"redundant_test_groups"`
@@ -351,11 +366,16 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	survivors, uncovered := splitUnkilled(r.Mutants)
 	writeLLMLiveSection(&b, r, survivors, src.FuncRanges, readFile)
 	writeLLMUncoveredSection(&b, r, uncovered, src.FuncRanges, readFile)
-	writeLLMRedundant(&b, r.RedundantTestGroups)
-	writeLLMZeroKill(&b, r.ZeroKillTests)
-	writeLLMTestInventory(&b, r.Tests)
+	if r.FailFast {
+		b.WriteString("_Test-level analysis skipped: `--fail-fast` stopped each mutant at its first failing test, so kill sets are incomplete._\n\n")
+	} else {
+		writeLLMRedundant(&b, r.RedundantTestGroups)
+		writeLLMZeroKill(&b, r)
+		writeLLMTestInventory(&b, r.Tests)
+	}
 	writeLLMErrors(&b, r.Errors)
 	writeLLMExcluded(&b, r.ExcludedTests)
+	writeLLMStale(&b, r.StaleIgnores)
 	writeLLMNextIteration(&b, survivors, uncovered)
 
 	out := b.String()
@@ -371,14 +391,21 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 // writeLLMPreamble renders the task framing so an LLM consuming the artifact
 // has explicit instructions without the user having to wrap it in their own
 // system prompt. Mutation score (not line coverage) is named as the goal,
-// matching the headline finding of arXiv:2506.02954.
+// matching the headline finding of arXiv:2506.02954. A test is only one of
+// three outcomes: optimizing for the score alone pushes a model toward
+// contorted tests for equivalent mutants and toward change-detector tests
+// that pin implementation details.
 func writeLLMPreamble(b *strings.Builder) {
 	b.WriteString("## Task\n\n")
-	b.WriteString("Your goal is to **raise the mutation score** of this package: write tests that fail when the listed mutations are applied. Line coverage is not the target — a test suite can reach 100% coverage and still kill almost no mutants. Two kinds of offense target follow:\n\n")
-	b.WriteString("- **Live mutants** are reached by existing tests but not detected — the fix is to *sharpen an assertion* so the original and mutant diverge.\n")
-	b.WriteString("- **Uncovered mutants** are never executed — the fix is to *add a test* that exercises the line; almost any assertion on its result will catch the mutation.\n\n")
-	b.WriteString("After editing tests, verify with `kanly --mutant=<ids> <pkg>` (see the iteration block at the end of this report) to re-run only the targeted mutants.\n\n")
+	b.WriteString("Raise the **mutation score**: each mutant below is a small change to the code that no test noticed. Line coverage is not the target. Decide each mutant one of three ways:\n\n")
+	b.WriteString("1. **Test it.** For a live mutant (tests run the line but none failed), sharpen an assertion so the original and the mutant diverge. For an uncovered mutant, add a test that reaches the line.\n")
+	b.WriteString("2. **Simplify the code.** A mutant nothing can observe may reveal dead or redundant code, such as a field that is never read or a check repeated later. Delete it and the mutant goes with it.\n")
+	b.WriteString("3. **Accept it.** If the mutant is equivalent (no input tells it apart from the original) or only a contrived test could kill it, append `<fp> <reason>` to `" + ignoreFileName + "` in the package's directory. Kanly stops reporting it until its line changes.\n\n")
+	b.WriteString("Write tests a maintainer would keep: assert on behaviour callers can observe through the package's API. Match errors with `errors.Is`/`errors.As` or a key substring, not the full message, and don't assert on unexported fields, log text or call order just to kill a mutant. A test that breaks on a harmless refactor costs more than a surviving mutant; accept the mutant instead.\n\n")
 }
+
+// ignoreFileName is schema.IgnoreFileName, which report cannot import.
+const ignoreFileName = ".kanlyignore"
 
 func writeLLMSummary(b *strings.Builder, s Summary) {
 	b.WriteString("## Summary\n\n")
@@ -447,19 +474,19 @@ var operatorHints = map[string]string{
 	"int_cmp_boundary":    "Test exactly at the boundary (n and n±1) so `<` vs `<=` flips the result.",
 	"int_cmp_negate":      "Assert on both truthy and falsy inputs so a negated comparison can't pass both.",
 	"int_bitwise":         "Choose bit patterns where `&` and `|` differ (e.g. 0b10 and 0b01) and assert the exact value.",
-	"int_literal":         "Assert the exact numeric result so swapping the literal to 0/1/±1 fails.",
+	"int_literal":         "Assert the exact numeric result so swapping the literal to 0/1/±1 fails. A size or capacity that only affects performance is usually not worth a test.",
 	"bool_logic":          "Pick inputs where `&&` and `||` diverge (one true, one false) and assert the boolean result.",
 	"bool_not":            "Assert the boolean direction explicitly — removing `!` should flip the test.",
 	"bool_literal":        "Assert the exact boolean value (not just truthiness) so `true↔false` is caught.",
-	"err_return_nil":      "Drive the function down the error branch and assert `err != nil` (and ideally its kind).",
+	"err_return_nil":      "Drive the function down the error branch and assert `err != nil`; check its kind with `errors.Is`/`errors.As`, not its message.",
 	"return_zero":         "Assert the returned value, not just `err == nil`; a zero return must fail the test.",
-	"call_delete":         "Assert the observable side effect of the call (state change, panic, output), not just that the caller returned.",
-	"string_literal":      "Assert the exact string value, not just non-empty or length.",
+	"call_delete":         "Assert the call's observable effect (state, output, error). If removing the call changes nothing observable, the call may be unnecessary.",
+	"string_literal":      "Assert strings callers depend on (output formats, keys, user-facing text). For an error message, prefer `errors.Is` or a key substring over the full text: emptying a `fmt.Errorf` format also drops its `%w` wrap.",
 	"slice_index":         "Use distinct values at adjacent indices and assert the exact element, not just presence.",
 	"slice_range":         "Test inputs where shifting the slice bounds by one would change the result.",
 	"inc_dec":             "Assert the post-loop counter / iteration count so `++↔--` diverges visibly.",
 	"int_compound_assign": "Pick operands where the compound op's direction matters and assert the exact accumulator value.",
-	"struct_field_zero":   "Assert the populated field value, not just that the struct is non-nil.",
+	"struct_field_zero":   "Assert the field's effect through the API, not just that the struct is non-nil. If nothing reads the field, delete it.",
 }
 
 // writeLLMUnkilledGroups renders one offense section (live or uncovered),
@@ -470,21 +497,34 @@ func writeLLMUnkilledGroups(b *strings.Builder, groups []mutation.FunctionSurviv
 	for _, g := range groups {
 		fmt.Fprintf(b, "### %s — %s  (%d)\n\n", g.Package, g.Function, len(g.Mutations))
 
+		snippet := false
 		if pkgRanges, ok := funcRanges[g.Package]; ok {
 			if fr, ok := pkgRanges[g.Function]; ok {
-				writeLLMSnippet(b, fr, readFile)
+				snippet = writeLLMSnippet(b, fr, readFile)
 			}
 		}
 
 		for _, m := range g.Mutations {
 			res := byID[m.ID]
-			fmt.Fprintf(b, "- **#%d** at %s:%d:%d — `%s` `%s` → `%s`\n",
-				m.ID, m.File, m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
+			// The snippet header names the file; repeating it per mutant
+			// is the costliest part of a large report.
+			loc := fmt.Sprintf("L%d:%d", m.Line, m.Column)
+			if !snippet {
+				loc = fmt.Sprintf("%s:%d:%d", filepath.ToSlash(relPath(m.File)), m.Line, m.Column)
+			}
+			fmt.Fprintf(b, "- **#%d** %s `%s` `%s` → `%s`", m.ID, loc, m.OperatorName, m.Original, m.Mutant)
+			if m.Fingerprint != "" {
+				fmt.Fprintf(b, " · fp `%s`", m.Fingerprint)
+			}
+			writeLLMCoveringTests(b, res)
+			if res.Note != "" {
+				fmt.Fprintf(b, " · %s", res.Note)
+			}
+			b.WriteString("\n")
 			if hint, ok := operatorHints[m.OperatorName]; ok && !seenHints[m.OperatorName] {
 				fmt.Fprintf(b, "  - _Hint (`%s`): %s_\n", m.OperatorName, hint)
 				seenHints[m.OperatorName] = true
 			}
-			writeLLMCoveringTests(b, res)
 		}
 		b.WriteString("\n")
 	}
@@ -492,7 +532,7 @@ func writeLLMUnkilledGroups(b *strings.Builder, groups []mutation.FunctionSurviv
 
 func writeLLMLiveSection(b *strings.Builder, r Report, groups []mutation.FunctionSurvivors, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
 	b.WriteString("## Live mutants (covered but not killed)\n\n")
-	b.WriteString("_Existing tests reach the mutated line but don't observe the change. Sharpen an assertion so the original and mutant diverge._\n\n")
+	b.WriteString("_Tests run these lines, but none failed when the mutant was applied. Sharpen an assertion, simplify the code, or accept the mutant._\n\n")
 	if len(groups) == 0 {
 		b.WriteString("_None — every covered mutant was killed._\n\n")
 		return
@@ -506,7 +546,7 @@ func writeLLMLiveSection(b *strings.Builder, r Report, groups []mutation.Functio
 
 func writeLLMUncoveredSection(b *strings.Builder, r Report, groups []mutation.FunctionSurvivors, funcRanges map[string]map[string]mutation.FuncRange, readFile func(string) ([]byte, error)) {
 	b.WriteString("## Uncovered mutants (no test reaches this line)\n\n")
-	b.WriteString("_No test executes this code. Add a new test that drives the path; almost any meaningful assertion on the result will catch the mutation._\n\n")
+	b.WriteString("_No test in the package runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation. Code exercised only by another package's tests shows up here too._\n\n")
 	if len(groups) == 0 {
 		b.WriteString("_None — every mutation site is reached by at least one test._\n\n")
 		return
@@ -542,7 +582,7 @@ func writeLLMNextIteration(b *strings.Builder, survived, notCovered []mutation.F
 	sort.Strings(pkgs)
 
 	b.WriteString("## Next iteration\n\n")
-	b.WriteString("After editing tests, re-run only the targeted mutants to verify each is now killed — the other mutants in the package are skipped, which is the iterative loop validated in arXiv:2506.02954:\n\n")
+	b.WriteString("After editing tests, re-run only these mutants (the iterative loop validated in arXiv:2506.02954). `--fail-fast` stops each mutant at its first failing test, which is all a verdict needs:\n\n")
 	b.WriteString("```\n")
 	for _, pkg := range pkgs {
 		ids := idsByPkg[pkg]
@@ -551,61 +591,69 @@ func writeLLMNextIteration(b *strings.Builder, survived, notCovered []mutation.F
 		for i, id := range ids {
 			idStrs[i] = strconv.Itoa(id)
 		}
-		fmt.Fprintf(b, "kanly --mutant=%s %s\n", strings.Join(idStrs, ","), pkg)
+		fmt.Fprintf(b, "kanly --fail-fast --mutant=%s %s\n", strings.Join(idStrs, ","), pkg)
 	}
 	b.WriteString("```\n\n")
-	b.WriteString("Any survivor still listed after the re-run is a real assertion gap — feed it back through this artifact and iterate.\n\n")
+	b.WriteString("IDs hold while only tests change. Editing the package's code renumbers its mutants, so re-run the package or `<pkg>:<Func>` instead; fingerprints (`fp`) survive edits elsewhere.\n\n")
 }
 
-func writeLLMSnippet(b *strings.Builder, fr mutation.FuncRange, readFile func(string) ([]byte, error)) {
+// writeLLMSnippet writes the function's numbered source and reports whether
+// it did.
+func writeLLMSnippet(b *strings.Builder, fr mutation.FuncRange, readFile func(string) ([]byte, error)) bool {
+	file := filepath.ToSlash(relPath(fr.File))
 	data, err := readFile(fr.File)
 	if err != nil {
-		fmt.Fprintf(b, "_Source unavailable for %s: %v_\n\n", fr.File, err)
-		return
+		fmt.Fprintf(b, "_Source unavailable for %s: %v_\n\n", file, err)
+		return false
 	}
 	lines := strings.Split(string(data), "\n")
 	if fr.StartLine < 1 || fr.StartLine > len(lines) {
-		return
+		return false
 	}
 	end := fr.EndLine
 	if end > len(lines) {
 		end = len(lines)
 	}
-	fmt.Fprintf(b, "**Source: %s:%d-%d**\n\n", fr.File, fr.StartLine, end)
+	fmt.Fprintf(b, "**Source: %s:%d-%d**\n\n", file, fr.StartLine, end)
 	b.WriteString("```go\n")
 	width := len(strconv.Itoa(end))
 	for i := fr.StartLine; i <= end; i++ {
 		fmt.Fprintf(b, "%*d  %s\n", width, i, lines[i-1])
 	}
 	b.WriteString("```\n\n")
+	return true
 }
 
+// maxLLMCoveringTests caps the covering tests listed per mutant; the JSON
+// report has them all.
+const maxLLMCoveringTests = 5
+
+// writeLLMCoveringTests appends the tests that ran a live mutant without
+// failing. Names are unqualified: the section heading names the package.
 func writeLLMCoveringTests(b *strings.Builder, res mutation.Result) {
 	if res.Status == mutation.StatusNotCovered || len(res.CoveringTests) == 0 {
-		b.WriteString("  - Covering tests that did NOT kill: _none — mutation site is not exercised by any test_\n")
 		return
 	}
-	killers := make(map[string]struct{}, len(res.KillingTests))
+	killers := make(map[string]bool, len(res.KillingTests))
 	for _, t := range res.KillingTests {
-		killers[t] = struct{}{}
+		killers[t] = true
 	}
-	var coveringNonKillers []string
+	var names []string
 	for _, t := range res.CoveringTests {
-		if _, killed := killers[t]; killed {
-			continue
+		if !killers[t] {
+			names = append(names, t)
 		}
-		coveringNonKillers = append(coveringNonKillers, t)
 	}
-	if len(coveringNonKillers) == 0 {
-		b.WriteString("  - Covering tests that did NOT kill: _none_\n")
+	if len(names) == 0 {
 		return
 	}
-	sort.Strings(coveringNonKillers)
-	qualified := make([]string, len(coveringNonKillers))
-	for i, name := range coveringNonKillers {
-		qualified[i] = qualifyTestName(res.Mutation.Package, name)
+	sort.Strings(names)
+	more := ""
+	if len(names) > maxLLMCoveringTests {
+		more = fmt.Sprintf(" +%d more", len(names)-maxLLMCoveringTests)
+		names = names[:maxLLMCoveringTests]
 	}
-	fmt.Fprintf(b, "  - Covering tests that did NOT kill: %s\n", strings.Join(backtickAll(qualified), ", "))
+	fmt.Fprintf(b, " · ran by %s%s", strings.Join(backtickAll(names), ", "), more)
 }
 
 func backtickAll(in []string) []string {
@@ -617,27 +665,55 @@ func backtickAll(in []string) []string {
 }
 
 func writeLLMRedundant(b *strings.Builder, groups [][]string) {
-	b.WriteString("## Redundant test groups (consolidation targets)\n\n")
+	b.WriteString("## Tests with identical kill sets\n\n")
 	if len(groups) == 0 {
 		b.WriteString("_None — no two tests share an identical kill set._\n\n")
 		return
 	}
-	b.WriteString("Each group's tests kill exactly the same mutants; keep one and delete the rest unless they assert different behaviour.\n\n")
+	b.WriteString("Each group's tests kill exactly the same mutants. Tests that check different behaviour along the same code path often do, so this alone is no reason to delete one; merge tests only if they also assert the same thing.\n\n")
 	for _, g := range groups {
 		fmt.Fprintf(b, "- %s\n", strings.Join(backtickAll(g), ", "))
 	}
 	b.WriteString("\n")
 }
 
-func writeLLMZeroKill(b *strings.Builder, tests []string) {
-	b.WriteString("## Zero-kill tests (deletion candidates)\n\n")
-	if len(tests) == 0 {
+// writeLLMZeroKill lists the tests that killed nothing, flagging the ones
+// that ran a live mutant: only those point at a weak assertion.
+func writeLLMZeroKill(b *strings.Builder, r Report) {
+	b.WriteString("## Tests that killed no mutants\n\n")
+	if len(r.ZeroKillTests) == 0 {
 		b.WriteString("_None — every test killed at least one mutant._\n\n")
 		return
 	}
-	b.WriteString("These tests killed no mutants within the current scope. Consider deleting or rewriting them to target a surviving mutant above.\n\n")
-	for _, t := range tests {
-		fmt.Fprintf(b, "- `%s`\n", t)
+	b.WriteString("**Do not delete these tests on this basis.** Most exercise code with no mutable operators (constructors, wiring, struct tags) or check behaviour Kanly's operators don't change. A test that ran a live mutant above may have a weak assertion; those are marked.\n\n")
+	ranLive := make(map[string]bool)
+	for _, res := range r.Mutants {
+		if res.Status != mutation.StatusSurvived {
+			continue
+		}
+		for _, t := range res.CoveringTests {
+			ranLive[qualifyTestName(res.Mutation.Package, t)] = true
+		}
+	}
+	for _, t := range r.ZeroKillTests {
+		if ranLive[t] {
+			fmt.Fprintf(b, "- `%s` — ran a live mutant\n", t)
+		} else {
+			fmt.Fprintf(b, "- `%s`\n", t)
+		}
+	}
+	b.WriteString("\n")
+}
+
+// writeLLMStale lists .kanlyignore entries that no longer match a mutant.
+func writeLLMStale(b *strings.Builder, stale []StaleIgnore) {
+	if len(stale) == 0 {
+		return
+	}
+	b.WriteString("## Stale " + ignoreFileName + " entries\n\n")
+	b.WriteString("These entries match no mutant: the line changed or was removed. Delete them, and judge any mutant on that line again.\n\n")
+	for _, s := range stale {
+		fmt.Fprintf(b, "- `%s`: `%s` %s\n", filepath.ToSlash(relPath(s.File)), s.Fingerprint, s.Reason)
 	}
 	b.WriteString("\n")
 }
@@ -679,24 +755,26 @@ func writeLLMExcluded(b *strings.Builder, tests []ExcludedTest) {
 	b.WriteString("\n")
 }
 
+// writeLLMTestInventory lists each package's tests with their kill counts,
+// most kills first. The killed IDs are in the JSON report.
 func writeLLMTestInventory(b *strings.Builder, tests []mutation.TestStats) {
 	b.WriteString("## Test inventory\n\n")
 	if len(tests) == 0 {
 		b.WriteString("_No tests in scope._\n\n")
 		return
 	}
-	b.WriteString("| Test | KillCount | Killed mutants |\n")
-	b.WriteString("|------|-----------|----------------|\n")
+	b.WriteString("Mutants killed per test:\n\n")
+	byPkg := make(map[string][]string)
+	var pkgs []string
 	for _, ts := range tests {
-		killed := "_none_"
-		if len(ts.KilledMutants) > 0 {
-			ids := make([]string, len(ts.KilledMutants))
-			for i, id := range ts.KilledMutants {
-				ids[i] = "#" + strconv.Itoa(id)
-			}
-			killed = strings.Join(ids, ", ")
+		if _, ok := byPkg[ts.Package]; !ok {
+			pkgs = append(pkgs, ts.Package)
 		}
-		fmt.Fprintf(b, "| `%s` | %d | %s |\n", qualifyTestName(ts.Package, ts.Name), ts.KillCount, killed)
+		byPkg[ts.Package] = append(byPkg[ts.Package], fmt.Sprintf("`%s` %d", ts.Name, ts.KillCount))
+	}
+	sort.Strings(pkgs)
+	for _, pkg := range pkgs {
+		fmt.Fprintf(b, "- `%s`: %s\n", pkg, strings.Join(byPkg[pkg], ", "))
 	}
 	b.WriteString("\n")
 }
@@ -729,9 +807,13 @@ func WriteText(w io.Writer, r Report) error {
 			return err
 		}
 		for _, m := range muts {
-			line := fmt.Sprintf("  %s:%d:%d [%s] %s→%s (id %d)",
+			id := strconv.Itoa(m.Mutation.ID)
+			if m.Mutation.Fingerprint != "" {
+				id += ", fp " + m.Mutation.Fingerprint
+			}
+			line := fmt.Sprintf("  %s:%d:%d [%s] %s→%s (id %s)",
 				relPath(m.Mutation.File), m.Mutation.Line, m.Mutation.Column,
-				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant, m.Mutation.ID)
+				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant, id)
 			if m.Note != "" {
 				line += " — " + m.Note
 			}
@@ -779,6 +861,17 @@ func WriteText(w io.Writer, r Report) error {
 		}
 	}
 
+	if len(r.StaleIgnores) > 0 {
+		if _, err := fmt.Fprintf(w, "\nStale %s entries, matching no mutant (%d):\n", ignoreFileName, len(r.StaleIgnores)); err != nil {
+			return err
+		}
+		for _, s := range r.StaleIgnores {
+			if _, err := fmt.Fprintf(w, "  %s: %s %s\n", relPath(s.File), s.Fingerprint, s.Reason); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Top tests by kill count — up to 5 entries with at least one kill.
 	var topKillers []mutation.TestStats
 	for _, ts := range r.Tests {
@@ -802,7 +895,7 @@ func WriteText(w io.Writer, r Report) error {
 	}
 
 	if len(r.ZeroKillTests) > 0 {
-		if _, err := fmt.Fprintln(w, "\nTests that killed nothing:"); err != nil {
+		if _, err := fmt.Fprintln(w, "\nTests that killed nothing (by itself no reason to delete a test):"); err != nil {
 			return err
 		}
 		for _, n := range r.ZeroKillTests {

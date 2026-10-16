@@ -305,12 +305,12 @@ func makeLLMResults() []mutation.Result {
 			CoveringTests: []string{"TestAdd", "TestAddSmoke"},
 		},
 		{
-			Mutation:      mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 14, Function: "Add", OperatorName: "int_literal", Original: "1", Mutant: "0"},
+			Mutation:      mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 14, Function: "Add", OperatorName: "int_literal", Original: "1", Mutant: "0", Fingerprint: "5d41402abc4b"},
 			Status:        mutation.StatusSurvived,
 			CoveringTests: []string{"TestAdd", "TestAddSmoke"},
 		},
 		{
-			Mutation: mutation.Mutation{ID: 3, Package: "example.com/pkg/bar", File: "bar.go", Line: 3, Column: 15, Function: "Mul", OperatorName: "int_arith", Original: "*", Mutant: "/"},
+			Mutation: mutation.Mutation{ID: 3, Package: "example.com/pkg/bar", File: "bar.go", Line: 3, Column: 15, Function: "Mul", OperatorName: "int_arith", Original: "*", Mutant: "/", Fingerprint: "7d793037a076"},
 			Status:   mutation.StatusNotCovered,
 		},
 	}
@@ -386,8 +386,8 @@ func TestWriteLLMEmpty(t *testing.T) {
 		"## Summary",
 		"## Live mutants",
 		"## Uncovered mutants",
-		"## Redundant test groups",
-		"## Zero-kill tests",
+		"## Tests with identical kill sets",
+		"## Tests that killed no mutants",
 		"## Test inventory",
 	} {
 		if !strings.Contains(out, section) {
@@ -492,7 +492,7 @@ func TestWriteText(t *testing.T) {
 	}
 
 	// Zero-kill section: TestMul (bar) is in inventory but kills nothing.
-	if !strings.Contains(out, "Tests that killed nothing:") {
+	if !strings.Contains(out, "Tests that killed nothing (") {
 		t.Errorf("missing 'Tests that killed nothing:' section:\n%s", out)
 	}
 	if !strings.Contains(out, "example.com/pkg/bar.TestMul") {
@@ -690,7 +690,7 @@ func TestWriteTextNoZeroKillSection(t *testing.T) {
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(buf.String(), "Tests that killed nothing:") {
+	if strings.Contains(buf.String(), "Tests that killed nothing (") {
 		t.Errorf("zero-kill section must be absent when all tests kill at least one mutant:\n%s", buf.String())
 	}
 }
@@ -858,7 +858,7 @@ func TestExcludedTestsInReports(t *testing.T) {
 func TestWriteTextUnkilledSections(t *testing.T) {
 	mk := func(id int, file string, line int, status mutation.Status, note string) mutation.Result {
 		return mutation.Result{
-			Mutation: mutation.Mutation{ID: id, Package: "p", File: file, Line: line, Column: 2, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Mutation: mutation.Mutation{ID: id, Package: "p", File: file, Line: line, Column: 2, OperatorName: "int_arith", Original: "+", Mutant: "-", Fingerprint: map[int]string{1: "0123456789ab"}[id]},
 			Status:   status,
 			Note:     note,
 		}
@@ -870,6 +870,7 @@ func TestWriteTextUnkilledSections(t *testing.T) {
 		mk(4, "a.go", 1, mutation.StatusKilled, ""),
 	}, nil)
 	r.Summary.Ignored = 5
+	r.StaleIgnores = []report.StaleIgnore{{Package: "p", File: "p/.kanlyignore", Fingerprint: "ba9876543210", Reason: "equivalent"}}
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
@@ -877,7 +878,7 @@ func TestWriteTextUnkilledSections(t *testing.T) {
 	out := buf.String()
 	want := "Survived (tests ran the mutated code but none failed):\n" +
 		"  a.go:3:2 [int_arith] +→- (id 3) — killed in the parallel run but survived when re-run alone\n" +
-		"  b.go:9:2 [int_arith] +→- (id 1)\n\n" +
+		"  b.go:9:2 [int_arith] +→- (id 1, fp 0123456789ab)\n\n" +
 		"Not covered (no test runs the mutated code):\n" +
 		"  a.go:7:2 [int_arith] +→- (id 2)\n\n"
 	if !strings.HasPrefix(out, want) {
@@ -885,5 +886,60 @@ func TestWriteTextUnkilledSections(t *testing.T) {
 	}
 	if !strings.Contains(out, "\nTotal: 4 | Killed: 1 | Survived: 2 | Timeout: 0 | Not covered: 1 | Score: 33.3% (25.0% incl. not covered) | Ignored: 5\n") {
 		t.Errorf("total line missing or malformed:\n%s", out)
+	}
+	if !strings.Contains(out, "\nStale .kanlyignore entries, matching no mutant (1):\n  p/.kanlyignore: ba9876543210 equivalent\n") {
+		t.Errorf("stale entries missing or malformed:\n%s", out)
+	}
+}
+
+// With --fail-fast the kill sets are partial, so the test-level sections
+// would mislead and are replaced by one note.
+func TestWriteLLMFailFastSkipsTestAnalysis(t *testing.T) {
+	r := report.Build(makeLLMResults(), map[string][]string{"example.com/pkg/foo": {"TestAdd", "TestAddSmoke"}})
+	r.FailFast = true
+	var buf bytes.Buffer
+	if err := report.WriteLLM(&buf, r, report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, section := range []string{"## Tests with identical kill sets", "## Tests that killed no mutants", "## Test inventory"} {
+		if strings.Contains(out, section) {
+			t.Errorf("fail-fast report has %q:\n%s", section, out)
+		}
+	}
+	if !strings.Contains(out, "kill sets are incomplete") {
+		t.Errorf("fail-fast note missing:\n%s", out)
+	}
+}
+
+// A live mutant lists its covering tests unqualified and capped; the file
+// is named per mutant only when no snippet carries it.
+func TestWriteLLMCompactMutantLine(t *testing.T) {
+	covering := []string{"TestG", "TestF", "TestE", "TestD", "TestC", "TestB", "TestA"}
+	r := report.Build([]mutation.Result{{
+		Mutation:      mutation.Mutation{ID: 4, Package: "example.com/p", File: "p.go", Line: 9, Column: 3, Function: "F", OperatorName: "int_arith", Original: "+", Mutant: "-", Fingerprint: "00112233aabb"},
+		Status:        mutation.StatusSurvived,
+		CoveringTests: covering,
+		Note:          "timed out in the parallel run; survived when re-run alone",
+	}}, nil)
+	var buf bytes.Buffer
+	if err := report.WriteLLM(&buf, r, report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "- **#4** p.go:9:3 `int_arith` `+` → `-` · fp `00112233aabb` · ran by `TestA`, `TestB`, `TestC`, `TestD`, `TestE` +2 more · timed out in the parallel run; survived when re-run alone\n"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("mutant line missing; want %q in:\n%s", want, buf.String())
+	}
+}
+
+func TestWriteLLMStaleIgnores(t *testing.T) {
+	r := report.Build(nil, nil)
+	r.StaleIgnores = []report.StaleIgnore{{Package: "p", File: "p/.kanlyignore", Fingerprint: "ba9876543210", Reason: "equivalent"}}
+	var buf bytes.Buffer
+	if err := report.WriteLLM(&buf, r, report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "## Stale .kanlyignore entries\n\nThese entries match no mutant: the line changed or was removed. Delete them, and judge any mutant on that line again.\n\n- `p/.kanlyignore`: `ba9876543210` equivalent\n"; !strings.Contains(buf.String(), want) {
+		t.Errorf("stale section missing; want %q in:\n%s", want, buf.String())
 	}
 }

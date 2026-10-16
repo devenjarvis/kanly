@@ -64,6 +64,17 @@ type runConfig struct {
 	progress      *progress       // informational output
 	jobs          int             // worker pool size for per-test coverage and the mutant loop; >= 1
 	verifyKills   bool            // re-run every killed mutant alone to confirm the kill
+	failFast      bool            // stop each mutant run at its first failing test
+}
+
+// mutantArgs returns the test binary flags for a run against a mutant.
+// -test.failfast stops at the first failing test: the verdict is the same,
+// only the kill set is partial.
+func (c runConfig) mutantArgs() []string {
+	if !c.failFast {
+		return c.testArgs
+	}
+	return append(c.testArgs[:len(c.testArgs):len(c.testArgs)], "-test.failfast")
 }
 
 const (
@@ -267,16 +278,31 @@ type pkgResult struct {
 	inventory  []string                      // tests reported for the package
 	excluded   []report.ExcludedTest         // tests left out because they fail unmutated
 	funcRanges map[string]mutation.FuncRange // canonical func name → source range
+	stale      []report.StaleIgnore          // .kanlyignore entries matching no mutant
 }
 
 func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) (pkgResult, error) {
-	rew, err := schema.RewriteWith(pkg, ops, schema.Options{Filter: cfg.filter, Operators: cfg.operators})
+	accepted, err := schema.ReadIgnoreFile(pkg.Dir)
 	if err != nil {
 		return pkgResult{}, &stageError{"rewrite", err}
 	}
+	rew, err := schema.RewriteWith(pkg, ops, schema.Options{Filter: cfg.filter, Operators: cfg.operators, Accepted: accepted})
+	if err != nil {
+		return pkgResult{}, &stageError{"rewrite", err}
+	}
+	// Stale entries are reported even when nothing in scope is left to run.
+	var stale []report.StaleIgnore
+	for _, fp := range rew.StaleAccepted {
+		stale = append(stale, report.StaleIgnore{
+			Package:     pkg.ImportPath,
+			File:        filepath.Join(pkg.Dir, schema.IgnoreFileName),
+			Fingerprint: fp,
+			Reason:      accepted[fp],
+		})
+	}
 
 	if len(rew.Mutations) == 0 {
-		return pkgResult{}, nil
+		return pkgResult{stale: stale}, nil
 	}
 
 	funcRanges := schema.FuncRanges(pkg)
@@ -294,7 +320,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		}
 		mutations = filtered
 		if len(mutations) == 0 {
-			return pkgResult{}, nil
+			return pkgResult{stale: stale}, nil
 		}
 	}
 
@@ -424,7 +450,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 			continue
 		}
 		g.Go(func() error {
-			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.mutantTimeout(baseline, tests), cfg.testArgs...)
+			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.mutantTimeout(baseline, tests), cfg.mutantArgs()...)
 			if err != nil {
 				return fmt.Errorf("run mutant %d: %w", mut.ID, err)
 			}
@@ -453,7 +479,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// the parallel loop.
 	rerun := func(r mutation.Result, timeoutScale float64) (mutation.Result, error) {
 		timeout := time.Duration(timeoutScale * float64(cfg.mutantTimeout(baseline, r.CoveringTests)))
-		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, r.Mutation.ID, pkg.Dir, r.CoveringTests, timeout, cfg.testArgs...)
+		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, r.Mutation.ID, pkg.Dir, r.CoveringTests, timeout, cfg.mutantArgs()...)
 		if err != nil {
 			return r, fmt.Errorf("re-run mutant %d: %w", r.Mutation.ID, err)
 		}
@@ -479,11 +505,11 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		inventory = narrowed
 	}
 
-	return pkgResult{results: results, inventory: inventory, excluded: excluded, funcRanges: funcRanges, ignored: rew.Ignored}, nil
+	return pkgResult{results: results, inventory: inventory, excluded: excluded, funcRanges: funcRanges, ignored: rew.Ignored, stale: stale}, nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] [--fail-fast] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -504,6 +530,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	mutantFlag := fs.String("mutant", "", "comma-separated schema-assigned mutant IDs to re-run; others are skipped")
 	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
 	verifyKillsFlag := fs.Bool("verify-kills", false, "re-run every killed mutant alone and count kills that do not reproduce as survived")
+	failFastFlag := fs.Bool("fail-fast", false, "stop testing each mutant at its first failing test; verdicts are unchanged, but per-test kill analysis is skipped")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(stderr, usage)
@@ -628,6 +655,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// package cannot discard its siblings' results.
 	var pkgErrors []report.PackageError
 	var excludedTests []report.ExcludedTest
+	var staleIgnores []report.StaleIgnore
 	ignored := 0
 	recordFailure := func(pkg, stage string, err error) {
 		msg := err.Error()
@@ -683,6 +711,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				progress:      prog,
 				jobs:          *jobsFlag,
 				verifyKills:   *verifyKillsFlag,
+				failFast:      *failFastFlag,
 			}
 
 			res, err := runPackage(ctx, pkg, ops, cfg, stderr)
@@ -695,6 +724,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				}
 				continue
 			}
+			staleIgnores = append(staleIgnores, res.stale...)
 			if len(res.results) == 0 {
 				prog.printf("skip %s: no mutations", pkg.ImportPath)
 				continue
@@ -719,9 +749,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *shortFlag {
 		rep.Scope = strings.TrimSpace(rep.Scope + " --short")
 	}
+	if *failFastFlag {
+		rep.Scope = strings.TrimSpace(rep.Scope + " --fail-fast")
+		// Each kill set holds only the first failing test, so the
+		// per-test views would call tests that kill plenty useless.
+		rep.FailFast = true
+		rep.Tests, rep.ZeroKillTests, rep.RedundantTestGroups = []mutation.TestStats{}, []string{}, [][]string{}
+	}
 	rep.Summary.Ignored = ignored
 	rep.Errors = pkgErrors
 	rep.ExcludedTests = excludedTests
+	rep.StaleIgnores = staleIgnores
 	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg}
 	if code := writeReport(stdout, stderr, *formatFlag, rep, llmSrc); code != 0 {
 		return code

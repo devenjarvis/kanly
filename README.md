@@ -34,6 +34,7 @@ kanly [flags] <pattern>[:<func-list>]...
 | `--short` | off | Run tests with `-test.short` |
 | `--jobs` | `NumCPU` | Parallel worker processes for per-test coverage and the mutant loop (`1` = sequential) |
 | `--verify-kills` | off | Re-run every killed mutant alone and count kills that do not reproduce as survived (roughly doubles the run time) |
+| `--fail-fast` | off | Stop testing each mutant at its first failing test. Verdicts are unchanged, but each kill names one test, so the per-test views (`tests`, `zero_kill_tests`, `redundant_test_groups`) are left out. Meant for the inner loop of re-running a few mutants |
 | `--quiet` | off | Print no progress to stderr; errors and warnings are still printed |
 
 Positional arguments take the form `<pkg-pattern>[:<func-list>]`. The optional function list selects mutants by enclosing function — accepts plain names (`Foo`), method receivers in dotted form (`Server.Handle` matches both `(Server).Handle` and `(*Server).Handle`), or the explicit canonical form (`(*Server).Handle`). A function filter requires the pattern to resolve to a single package (no `./...`).
@@ -60,7 +61,7 @@ $ kanly --quiet ./internal/runner/testdata/sample
 Scope: ./internal/runner/testdata/sample
 
 Survived (tests ran the mutated code but none failed):
-  internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+ (id 2)
+  internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+ (id 2, fp fe04d7ed53a0)
 
 Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 50.0% (50.0% incl. not covered)
 
@@ -69,11 +70,11 @@ Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 50.0% 
 Top tests by kill count:
   github.com/devenjarvis/kanly/internal/runner/testdata/sample.TestAdd (1)
 
-Tests that killed nothing:
+Tests that killed nothing (by itself no reason to delete a test):
   github.com/devenjarvis/kanly/internal/runner/testdata/sample.TestSub
 ```
 
-The survived mutant on line 5 (`Sub`) means the test suite has a weak assertion on subtraction — it passes even when `-` is replaced with `+`. Mutants no test executes are listed separately under `Not covered`.
+The survived mutant on line 5 (`Sub`) means the test suite has a weak assertion on subtraction — it passes even when `-` is replaced with `+`. Mutants no test executes are listed separately under `Not covered`. `id` is the mutant's number for `--mutant`; `fp` is its [fingerprint](#accepting-mutants), which survives edits elsewhere in the package.
 
 ### Multi-package
 
@@ -104,14 +105,14 @@ $ kanly './internal/foo:Compute,(*Server).Handle'
 # Pre-narrow the test inventory (skips baseline + coverage for everything else).
 $ kanly --tests='^TestCompute' ./internal/foo:Compute
 
-# Re-verify two survivors after editing the test suite.
-$ kanly --mutant=7,12 ./internal/foo
+# Re-verify two survivors after editing the test suite; stop each at its first failing test.
+$ kanly --fail-fast --mutant=7,12 ./internal/foo
 
 # Compose with --diff: only changed lines inside the named function.
 $ kanly --diff ./internal/foo:Compute
 ```
 
-Mutant IDs are stable: the same source produces the same IDs on every run, and a scoped run (`--diff`, `pkg:Func`) reports the same ID for a mutant as a full run would, so IDs from one report can be passed straight to `--mutant`. IDs are unique within a package only — pass `--mutant` together with the package the IDs came from (the `--format=llm` report prints one such command per package).
+Mutant IDs are stable: the same source produces the same IDs on every run, and a scoped run (`--diff`, `pkg:Func`) reports the same ID for a mutant as a full run would, so IDs from one report can be passed straight to `--mutant`. IDs are unique within a package only — pass `--mutant` together with the package the IDs came from (the `--format=llm` report prints one such command per package). Editing a package's non-test code renumbers its mutants, so after a code change re-run the package or function rather than old IDs.
 
 When a scope is active (`pkg:Func`, `--tests`, `--mutant`, or `--diff`), the report's `scope` field and the text-mode `Scope:` header announce exactly what was tested. The inventory used for `zero_kill_tests` / `redundant_test_groups` is also narrowed to tests that touch a kept mutation, so the signal stays focused on the targeted change.
 
@@ -143,6 +144,18 @@ func (c *Conn) Close() error { ... }
 ```
 
 Operator names may be comma- or space-separated; text after `--` is a free-form reason. An unknown operator name is an error, so a typo cannot silently suppress nothing. Suppressed mutants are counted as `Ignored` in the report. Generated files (`// Code generated … DO NOT EDIT.`) are never mutated; `--exclude`, `--operators` and `--skip-operators` narrow a run from the command line. Suppression does not renumber mutants, so IDs still match a run without it.
+
+#### Accepting mutants
+
+A directive suppresses every mutant of an operator on a line. To accept one specific mutant (an equivalent one, or one that only a contrived test could kill) without touching the code, list its fingerprint in a `.kanlyignore` file in the package's directory, with a required reason:
+
+```
+# internal/diff/.kanlyignore
+96e766e6b6d3 equivalent: a line without the "@@" prefix fails hunkRe, which requires it, and is skipped as before
+de8f2a72b1e7 the larger scanner buffer only matters for diff lines over 64KB; a test for it would cost more than it checks
+```
+
+Every mutant carries a fingerprint (`fp` in text and `--format=llm` output, `fingerprint` in JSON). It is derived from the enclosing function, the operator, the change and the text of the mutated line, not from the mutant's ID or line number. Edits elsewhere in the package leave it alone. Editing the mutated line changes it, because the judgement that the mutant is harmless has to be made again. An entry that matches no mutant any more is reported as stale (`Stale .kanlyignore entries` in text and llm output, `stale_ignores` in JSON) so it can be deleted. A malformed line or a missing reason is an error, and so is a mutant ID written where the fingerprint belongs. Accepted mutants count as `Ignored`.
 
 ### Using Kanly in CI
 
@@ -233,7 +246,11 @@ Every pull request on this repo runs Kanly against `./internal/...`, and again a
 
 ## LLM-driven test repair
 
-`--format=llm` emits a Markdown artifact designed to feed into an LLM that will write new tests for survivors and tighten weak assertions. Its layout is informed by Wang, Xu, Briand & Liu (2025): live (covered-but-survived) mutants and uncovered mutants get separate sections with different prompt-side guidance — sharpen an assertion vs. add a test that reaches the line — because they need different fixes. Each operator class drops in a one-line strategy hint on its first occurrence (boundary values for `int_cmp_boundary`, sign-changing inputs for `int_arith`, exact-string assertions for `string_literal`, and so on). The artifact closes with a `kanly --mutant=<ids>` command that re-runs only the survivor schema IDs — the iterative verify-after-edit loop validated in the same paper.
+`--format=llm` emits a Markdown artifact designed to feed into an LLM that will work through the surviving mutants. Its layout is informed by Wang, Xu, Briand & Liu (2025): live (covered-but-survived) mutants and uncovered mutants get separate sections with different prompt-side guidance, because they need different fixes. Each operator class drops in a one-line strategy hint on its first occurrence (boundary values for `int_cmp_boundary`, sign-changing inputs for `int_arith`, and so on).
+
+Not every survivor deserves a test, and a model told only to raise the score will write contorted tests for mutants that cannot or should not be killed. The artifact therefore offers three outcomes per mutant: **test it**, **simplify the code** (a survivor often reveals dead code, such as a field that is never read), or **accept it** in [`.kanlyignore`](#accepting-mutants) with a reason. It also asks for tests that check behaviour through the package's API rather than change-detector tests that pin error strings or internal details. Tests that killed nothing are listed, with a warning that this alone is no reason to delete them. The ones that ran a live mutant are marked, since only those point at a weak assertion.
+
+To keep large runs affordable, each mutant takes one line: position within the function snippet, change, fingerprint, and at most five covering tests by short name. The artifact closes with a `kanly --fail-fast --mutant=<ids>` command per package that re-runs only those mutants, which is the iterative verify-after-edit loop validated in the same paper.
 
 ## References
 

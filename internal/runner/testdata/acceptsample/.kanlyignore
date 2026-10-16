@@ -1,0 +1,3 @@
+# Accepted mutants for TestRunAcceptedMutantsAndFailFast.
+f5599e05f98a equivalent: at n == max both branches return max
+0123456789ab stale: matches no mutant
