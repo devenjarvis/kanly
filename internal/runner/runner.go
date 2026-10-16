@@ -209,11 +209,11 @@ func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Du
 	if testRunRegex != "" {
 		args = append(args, "-test.run="+testRunRegex)
 	}
-	cmd := exec.CommandContext(tctx, binaryPath, args...)
+	cmd := testCommand(tctx, binaryPath, args...)
 	cmd.Dir = pkgDir
 	cmd.Env = os.Environ()
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	out, err := runTestCommand(cmd)
 	wall := time.Since(start)
 
 	if tctx.Err() == context.DeadlineExceeded {
@@ -294,12 +294,12 @@ func RunMutant(ctx context.Context, binaryPath string, mutID int, pkgDir string,
 	if len(testFilter) > 0 {
 		args = append(args, "-test.run="+buildRunRegex(testFilter))
 	}
-	cmd := exec.CommandContext(tctx, binaryPath, args...)
+	cmd := testCommand(tctx, binaryPath, args...)
 	cmd.Dir = pkgDir
 	cmd.Env = append(os.Environ(), fmt.Sprintf("KANLY_MUTANT=%d", mutID))
 
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	out, err := runTestCommand(cmd)
 	elapsed := time.Since(start)
 
 	if tctx.Err() == context.DeadlineExceeded {
@@ -449,7 +449,7 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inve
 			profPath := filepath.Join(tmpDir, fmt.Sprintf("cov-%d.out", i))
 			tctx, cancel := context.WithTimeout(gctx, timeout)
 			defer cancel()
-			cmd := exec.CommandContext(tctx, binaryPath,
+			cmd := testCommand(tctx, binaryPath,
 				"-test.run="+buildRunRegex([]string{name}),
 				"-test.coverprofile="+profPath,
 				"-test.parallel=1",
@@ -458,7 +458,7 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inve
 			// Inherit env but ensure KANLY_MUTANT is not set so coverage reflects
 			// the original code path.
 			cmd.Env = filterEnv(os.Environ(), "KANLY_MUTANT")
-			combined, runErr := cmd.CombinedOutput()
+			combined, runErr := runTestCommand(cmd)
 			if runErr != nil {
 				return fmt.Errorf("coverage run for %q failed: %w\n%s", name, runErr, combined)
 			}
