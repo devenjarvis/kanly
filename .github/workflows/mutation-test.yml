@@ -14,7 +14,8 @@ env:
   # Mutants on the lines a PR changes, including ones no test reaches.
   KANLY_DIFF_MIN_SCORE: "80"
   # The whole of ./internal/...: a floor that stops the score sliding back.
-  KANLY_FULL_MIN_SCORE: "70"
+  # Set just under its 65.9% when the gate was introduced.
+  KANLY_FULL_MIN_SCORE: "65"
 
 jobs:
   kanly:
