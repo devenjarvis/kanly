@@ -6,7 +6,10 @@ import (
 	"go/ast"
 	"go/format"
 	"go/token"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
 
@@ -154,8 +157,13 @@ type Rewritten struct {
 	Files      map[string]string // absolute file path → rewritten source
 	Dispatcher string            // source of the generated kanly_schema.go file
 	Mutations  []mutation.Mutation
-	// Ignored counts the in-scope candidates that //kanly:ignore suppressed.
+	// Ignored counts the in-scope candidates that //kanly:ignore or an
+	// Options.Accepted fingerprint suppressed.
 	Ignored int
+	// StaleAccepted lists, sorted, the Options.Accepted fingerprints that
+	// match no candidate in the package, in scope or not: their line
+	// changed or went away.
+	StaleAccepted []string
 }
 
 // Rewrite transforms pkg's source files into a mutant schema using the provided operators.
@@ -183,11 +191,15 @@ type Options struct {
 	// Every operator in ops still numbers its candidates, so IDs match a run
 	// without this option.
 	Operators map[string]bool
+	// Accepted maps the fingerprints of mutants not to report (the
+	// package's IgnoreFileName file, see ReadIgnoreFile) to their reasons.
+	Accepted map[string]string
 }
 
 // RewriteWith is Rewrite with every option. Candidates suppressed by a
 // //kanly:ignore directive are dropped after numbering, like filtered ones,
-// and counted in Rewritten.Ignored. Generated files (see ast.IsGenerated)
+// and counted in Rewritten.Ignored, as are candidates whose fingerprint is
+// in Options.Accepted. Generated files (see ast.IsGenerated)
 // are not mutated.
 func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*Rewritten, error) {
 	filter := opts.Filter
@@ -199,6 +211,8 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 		known[op.Name()] = true
 	}
 	ignored := 0
+	matched := make(map[string]bool)
+	occurrences := make(map[string]int)
 
 	mutID := 0
 	var mutations []mutation.Mutation
@@ -219,6 +233,11 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 		if err != nil {
 			return nil, err
 		}
+		src, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("read source for fingerprints: %w", err)
+		}
+		lines := strings.Split(string(src), "\n")
 		type entry struct {
 			node ast.Node
 			cand mutation.Candidate
@@ -235,13 +254,35 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 				pos := pkg.Fset.Position(c.Pos)
 				funcName := enclosingFunc(funcSpans, c.Pos)
 				mutID++
+				// Fingerprints are computed for every candidate, in scope
+				// or not, so stale Accepted entries are found in scoped runs.
+				scope := funcName
+				if scope == "" {
+					scope = "file " + filepath.Base(filePath)
+				}
+				// The line as written in this file, ignoring //line
+				// directives, which can point anywhere.
+				raw := pkg.Fset.PositionFor(c.Pos, false)
+				var lineText string
+				if raw.Line <= len(lines) {
+					lineText = lines[raw.Line-1]
+				}
+				// The unnumbered fingerprint keys the count of identical
+				// mutants in this scope.
+				same := fingerprint(scope, op.Name(), c.Original, c.Mutant, lineText, raw.Column, 0)
+				occurrences[same]++
+				fp := fingerprint(scope, op.Name(), c.Original, c.Mutant, lineText, raw.Column, occurrences[same])
+				_, accepted := opts.Accepted[fp]
+				if accepted {
+					matched[fp] = true
+				}
 				if filter != nil && !filter(filePath, pos.Line, funcName) {
 					continue
 				}
 				if opts.Operators != nil && !opts.Operators[op.Name()] {
 					continue
 				}
-				if ign.covers(op.Name(), c.Pos, pos.Line) {
+				if accepted || ign.covers(op.Name(), c.Pos, pos.Line) {
 					ignored++
 					continue
 				}
@@ -255,6 +296,7 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 					OperatorName: op.Name(),
 					Original:     c.Original,
 					Mutant:       c.Mutant,
+					Fingerprint:  fp,
 					PackageInit:  funcName == "" && !inSpans(litSpans, c.Pos),
 				})
 				entries = append(entries, entry{node: c.Node, cand: c, id: mutID, op: op})
@@ -338,10 +380,19 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 		return nil, fmt.Errorf("render dispatcher: %w", err)
 	}
 
+	var stale []string
+	for fp := range opts.Accepted {
+		if !matched[fp] {
+			stale = append(stale, fp)
+		}
+	}
+	sort.Strings(stale)
+
 	return &Rewritten{
-		Files:      rewrittenFiles,
-		Dispatcher: dispatcher,
-		Mutations:  mutations,
-		Ignored:    ignored,
+		Files:         rewrittenFiles,
+		Dispatcher:    dispatcher,
+		Mutations:     mutations,
+		Ignored:       ignored,
+		StaleAccepted: stale,
 	}, nil
 }

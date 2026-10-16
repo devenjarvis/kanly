@@ -4,12 +4,13 @@
 
 ## Task
 
-Your goal is to **raise the mutation score** of this package: write tests that fail when the listed mutations are applied. Line coverage is not the target — a test suite can reach 100% coverage and still kill almost no mutants. Two kinds of offense target follow:
+Raise the **mutation score**: each mutant below is a small change to the code that no test noticed. Line coverage is not the target. Decide each mutant one of three ways:
 
-- **Live mutants** are reached by existing tests but not detected — the fix is to *sharpen an assertion* so the original and mutant diverge.
-- **Uncovered mutants** are never executed — the fix is to *add a test* that exercises the line; almost any assertion on its result will catch the mutation.
+1. **Test it.** For a live mutant (tests run the line but none failed), sharpen an assertion so the original and the mutant diverge. For an uncovered mutant, add a test that reaches the line.
+2. **Simplify the code.** A mutant nothing can observe may reveal dead or redundant code, such as a field that is never read or a check repeated later. Delete it and the mutant goes with it.
+3. **Accept it.** If the mutant is equivalent (no input tells it apart from the original) or only a contrived test could kill it, append `<fp> <reason>` to `.kanlyignore` in the package's directory. Kanly stops reporting it until its line changes.
 
-After editing tests, verify with `kanly --mutant=<ids> <pkg>` (see the iteration block at the end of this report) to re-run only the targeted mutants.
+Write tests a maintainer would keep: assert on behaviour callers can observe through the package's API. Match errors with `errors.Is`/`errors.As` or a key substring, not the full message, and don't assert on unexported fields, log text or call order just to kill a mutant. A test that breaks on a harmless refactor costs more than a surviving mutant; accept the mutant instead.
 
 ## Summary
 
@@ -19,7 +20,7 @@ After editing tests, verify with `kanly --mutant=<ids> <pkg>` (see the iteration
 
 ## Live mutants (covered but not killed)
 
-_Existing tests reach the mutated line but don't observe the change. Sharpen an assertion so the original and mutant diverge._
+_Tests run these lines, but none failed when the mutant was applied. Sharpen an assertion, simplify the code, or accept the mutant._
 
 ### example.com/pkg/foo — Add  (1)
 
@@ -32,13 +33,12 @@ _Existing tests reach the mutated line but don't observe the change. Sharpen an 
 6  }
 ```
 
-- **#2** at foo.go:5:14 — `int_literal` `1` → `0`
-  - _Hint (`int_literal`): Assert the exact numeric result so swapping the literal to 0/1/±1 fails._
-  - Covering tests that did NOT kill: `example.com/pkg/foo.TestAdd`, `example.com/pkg/foo.TestAddSmoke`
+- **#2** L5:14 `int_literal` `1` → `0` · fp `5d41402abc4b` · ran by `TestAdd`, `TestAddSmoke`
+  - _Hint (`int_literal`): Assert the exact numeric result so swapping the literal to 0/1/±1 fails. A size or capacity that only affects performance is usually not worth a test._
 
 ## Uncovered mutants (no test reaches this line)
 
-_No test executes this code. Add a new test that drives the path; almost any meaningful assertion on the result will catch the mutation._
+_No test in the package runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation. Code exercised only by another package's tests shows up here too._
 
 ### example.com/pkg/bar — Mul  (1)
 
@@ -48,37 +48,35 @@ _No test executes this code. Add a new test that drives the path; almost any mea
 3  func Mul(a, b int) int { return a * b }
 ```
 
-- **#3** at bar.go:3:15 — `int_arith` `*` → `/`
+- **#3** L3:15 `int_arith` `*` → `/` · fp `7d793037a076`
   - _Hint (`int_arith`): Use inputs where +/-/*/% differ; avoid zero/identity values that mask the operator._
-  - Covering tests that did NOT kill: _none — mutation site is not exercised by any test_
 
-## Redundant test groups (consolidation targets)
+## Tests with identical kill sets
 
 _None — no two tests share an identical kill set._
 
-## Zero-kill tests (deletion candidates)
+## Tests that killed no mutants
 
-These tests killed no mutants within the current scope. Consider deleting or rewriting them to target a surviving mutant above.
+**Do not delete these tests on this basis.** Most exercise code with no mutable operators (constructors, wiring, struct tags) or check behaviour Kanly's operators don't change. A test that ran a live mutant above may have a weak assertion; those are marked.
 
 - `example.com/pkg/bar.TestMul`
-- `example.com/pkg/foo.TestAddSmoke`
+- `example.com/pkg/foo.TestAddSmoke` — ran a live mutant
 
 ## Test inventory
 
-| Test | KillCount | Killed mutants |
-|------|-----------|----------------|
-| `example.com/pkg/foo.TestAdd` | 1 | #1 |
-| `example.com/pkg/bar.TestMul` | 0 | _none_ |
-| `example.com/pkg/foo.TestAddSmoke` | 0 | _none_ |
+Mutants killed per test:
+
+- `example.com/pkg/bar`: `TestMul` 0
+- `example.com/pkg/foo`: `TestAdd` 1, `TestAddSmoke` 0
 
 ## Next iteration
 
-After editing tests, re-run only the targeted mutants to verify each is now killed — the other mutants in the package are skipped, which is the iterative loop validated in arXiv:2506.02954:
+After editing tests, re-run only these mutants (the iterative loop validated in arXiv:2506.02954). `--fail-fast` stops each mutant at its first failing test, which is all a verdict needs:
 
 ```
-kanly --mutant=3 example.com/pkg/bar
-kanly --mutant=2 example.com/pkg/foo
+kanly --fail-fast --mutant=3 example.com/pkg/bar
+kanly --fail-fast --mutant=2 example.com/pkg/foo
 ```
 
-Any survivor still listed after the re-run is a real assertion gap — feed it back through this artifact and iterate.
+IDs hold while only tests change. Editing the package's code renumbers its mutants, so re-run the package or `<pkg>:<Func>` instead; fingerprints (`fp`) survive edits elsewhere.
 

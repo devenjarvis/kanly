@@ -877,6 +877,84 @@ func TestRunVerifyKills(t *testing.T) {
 	}
 }
 
+// A .kanlyignore entry hides its mutant, and an entry matching no mutant is
+// reported as stale. --fail-fast keeps every verdict but stops each mutant
+// at its first failing test, so the per-test views are dropped.
+func TestRunAcceptedMutantsAndFailFast(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/acceptsample")
+	type result struct {
+		FailFast bool `json:"fail_fast"`
+		Summary  struct {
+			Ignored int `json:"ignored"`
+		} `json:"summary"`
+		Tests        []json.RawMessage `json:"tests"`
+		StaleIgnores []struct {
+			Fingerprint string `json:"fingerprint"`
+		} `json:"stale_ignores"`
+		Mutants []struct {
+			Mutation struct {
+				ID          int    `json:"mutation_id"`
+				Fingerprint string `json:"fingerprint"`
+			} `json:"mutation"`
+			Status       string   `json:"status"`
+			KillingTests []string `json:"killing_tests"`
+		} `json:"mutants"`
+	}
+	runJSON := func(args ...string) result {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run(append(append([]string{"--format=json"}, args...), dir), &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v returned %d; stderr: %s", args, code, stderr.String())
+		}
+		var r result
+		if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		return r
+	}
+
+	full := runJSON()
+	if full.Summary.Ignored != 1 {
+		t.Errorf("ignored = %d, want 1", full.Summary.Ignored)
+	}
+	for _, m := range full.Mutants {
+		if m.Mutation.Fingerprint == "f5599e05f98a" {
+			t.Errorf("accepted mutant %d was run", m.Mutation.ID)
+		}
+	}
+	if len(full.StaleIgnores) != 1 || full.StaleIgnores[0].Fingerprint != "0123456789ab" {
+		t.Errorf("stale_ignores = %+v, want just 0123456789ab", full.StaleIgnores)
+	}
+	if full.FailFast || len(full.Tests) == 0 {
+		t.Errorf("full run: fail_fast = %v with %d tests, want false with tests", full.FailFast, len(full.Tests))
+	}
+
+	fast := runJSON("--fail-fast")
+	if !fast.FailFast || len(fast.Tests) != 0 {
+		t.Errorf("--fail-fast: fail_fast = %v with %d tests, want true with none", fast.FailFast, len(fast.Tests))
+	}
+	if len(fast.Mutants) != len(full.Mutants) {
+		t.Fatalf("--fail-fast ran %d mutants, full run %d", len(fast.Mutants), len(full.Mutants))
+	}
+	multi := false
+	for i, m := range fast.Mutants {
+		want := full.Mutants[i]
+		if m.Status != want.Status {
+			t.Errorf("mutant %d: --fail-fast status %s, full run %s", m.Mutation.ID, m.Status, want.Status)
+		}
+		multi = multi || len(want.KillingTests) > 1
+		if m.Status == "killed" && len(m.KillingTests) != 1 {
+			t.Errorf("mutant %d: --fail-fast killing tests %v, want exactly one", m.Mutation.ID, m.KillingTests)
+		}
+	}
+	if !multi {
+		t.Error("no mutant has several killers in the full run, so --fail-fast is not exercised")
+	}
+}
+
 // Files that mutants make tests create in the package directory are moved
 // out of it, and each test process gets a private temporary directory.
 func TestRunCleansUpFilesTestsCreate(t *testing.T) {

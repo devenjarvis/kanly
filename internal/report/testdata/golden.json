@@ -76,7 +76,8 @@
           "function": "Mul",
           "operator": "int_arith",
           "original": "*",
-          "mutant": "/"
+          "mutant": "/",
+          "fingerprint": ""
         }
       ]
     }
@@ -92,7 +93,8 @@
         "function": "Add",
         "operator": "int_arith",
         "original": "+",
-        "mutant": "-"
+        "mutant": "-",
+        "fingerprint": ""
       },
       "status": "killed",
       "killing_tests": [
@@ -111,7 +113,8 @@
         "function": "Sub",
         "operator": "int_arith",
         "original": "-",
-        "mutant": "+"
+        "mutant": "+",
+        "fingerprint": ""
       },
       "status": "killed",
       "killing_tests": [
@@ -130,7 +133,8 @@
         "function": "Mul",
         "operator": "int_arith",
         "original": "*",
-        "mutant": "/"
+        "mutant": "/",
+        "fingerprint": ""
       },
       "status": "survived",
       "killing_tests": null,

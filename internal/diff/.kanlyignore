@@ -1,0 +1,4 @@
+# Mutants Kanly should not report, one per line: <fingerprint> <reason>.
+# An entry stops matching when the mutated line changes; judge it again then.
+96e766e6b6d3 equivalent: a line without the "@@" prefix fails hunkRe, which requires it, and is skipped as before
+de8f2a72b1e7 the larger scanner buffer only matters for diff lines over 64KB; a test for it would cost more than it checks

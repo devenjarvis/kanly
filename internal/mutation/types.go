@@ -24,6 +24,10 @@ type Mutation struct {
 	OperatorName string `json:"operator"`
 	Original     string `json:"original"`
 	Mutant       string `json:"mutant"`
+	// Fingerprint identifies the mutant across edits that renumber it; it
+	// changes when the mutated line does. It is the key of a .kanlyignore
+	// entry.
+	Fingerprint string `json:"fingerprint"`
 	// PackageInit marks a mutation in a package-level variable initializer
 	// (outside any function body). It runs once per test process, but Go's
 	// coverage instrumentation never attributes it to a test.

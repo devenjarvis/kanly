@@ -27,7 +27,6 @@ type LineRange struct {
 // file path so callers can match against `Mutation.File` / `Package.Files` keys
 // without any further normalisation.
 type Diff struct {
-	root   string
 	byFile map[string][]LineRange
 }
 
@@ -99,7 +98,7 @@ func Compute(workDir, base string) (*Diff, error) {
 // into a Diff. root is prepended to each repo-relative path so the resulting
 // keys are absolute. Exported so unit tests can exercise parsing without a real repo.
 func ParseDiff(root string, r io.Reader) (*Diff, error) {
-	d := &Diff{root: root, byFile: make(map[string][]LineRange)}
+	d := &Diff{byFile: make(map[string][]LineRange)}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1<<20)
 
