@@ -500,18 +500,6 @@ func TestWriteText(t *testing.T) {
 	}
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func TestBuildScoreExcludesNotViable(t *testing.T) {
 	// 3 total: 1 killed, 1 not-viable, 1 not-covered.
 	// denominator = 3 - 1 - 1 = 1; score = 1.0.

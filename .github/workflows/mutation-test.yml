@@ -24,7 +24,7 @@ jobs:
       - name: Run kanly on internal packages
         id: run
         continue-on-error: true
-        run: ./kanly --format=text ./internal/... 2>&1 | tee kanly-report.txt
+        run: ./kanly --quiet --format=text ./internal/... 2>&1 | tee kanly-report.txt
 
       - name: Build comment body
         run: |
@@ -74,7 +74,7 @@ jobs:
       - name: Run kanly --diff against PR base
         id: run
         continue-on-error: true
-        run: ./kanly --diff --diff-base=origin/${{ github.base_ref }} --format=text 2>&1 | tee kanly-diff-report.txt
+        run: ./kanly --quiet --diff --diff-base=origin/${{ github.base_ref }} --format=text 2>&1 | tee kanly-diff-report.txt
 
       - name: Build comment body
         run: |
