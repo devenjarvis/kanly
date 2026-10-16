@@ -877,8 +877,8 @@ func TestRunVerifyKills(t *testing.T) {
 	}
 }
 
-// Files that mutants make tests create in the package directory are
-// removed, and each test process gets a private temporary directory.
+// Files that mutants make tests create in the package directory are moved
+// out of it, and each test process gets a private temporary directory.
 func TestRunCleansUpFilesTestsCreate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -891,10 +891,10 @@ func TestRunCleansUpFilesTestsCreate(t *testing.T) {
 		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(dir, "fswrite-result.txt")); !os.IsNotExist(err) {
-		t.Errorf("file written into the package directory by a mutant was not removed (stat: %v)", err)
+		t.Errorf("file written into the package directory by a mutant was not moved out (stat: %v)", err)
 	}
-	if !strings.Contains(stderr.String(), "removed 1 file(s) that tests created") {
-		t.Errorf("stderr does not report the removal:\n%s", stderr.String())
+	if !strings.Contains(stderr.String(), "moved 1 file(s) created during the run to") {
+		t.Errorf("stderr does not report the move:\n%s", stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "fswrite-leftover")); !os.IsNotExist(err) {
 		t.Errorf("a test's leftover temporary file reached the real TMPDIR (stat: %v)", err)
@@ -1156,5 +1156,30 @@ func TestRunSARIF(t *testing.T) {
 	}
 	if log.Version != "2.1.0" || len(log.Runs) != 1 || len(log.Runs[0].Results) != 1 || log.Runs[0].Results[0].RuleID != "int_arith" {
 		t.Errorf("SARIF = %s", stdout.String())
+	}
+}
+
+// A --tests regex that matches no test leaves every mutant not covered; it
+// is not a package failure.
+func TestRunTestsRegexMatchingNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/sample")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", "--quiet", "--tests=^TestNoSuchTest$", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Summary struct {
+			Total      int `json:"total"`
+			NotCovered int `json:"not_covered"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	if result.Summary.Total == 0 || result.Summary.NotCovered != result.Summary.Total {
+		t.Errorf("summary = %+v, want every mutant not covered", result.Summary)
 	}
 }

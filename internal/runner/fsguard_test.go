@@ -39,9 +39,14 @@ func TestDirSnapshotRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, changed, err := snap.Restore()
+	res, err := snap.Restore()
 	if err != nil {
 		t.Fatal(err)
+	}
+	defer os.RemoveAll(res.Quarantine)
+	removed, quarantine, changed := res.Moved, res.Quarantine, res.Changed
+	if len(res.Unmoved) != 0 {
+		t.Errorf("unmoved = %v, want none", res.Unmoved)
 	}
 	abs := func(rels ...string) []string {
 		var out []string
@@ -60,6 +65,13 @@ func TestDirSnapshotRestore(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("%s still exists", p)
 		}
+	}
+	// Moved, not deleted: contents are recoverable from the quarantine.
+	if data, err := os.ReadFile(filepath.Join(quarantine, "testdata/new/deep.txt")); err != nil || string(data) != "created" {
+		t.Errorf("quarantined testdata/new/deep.txt: %q, %v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(quarantine, "out.txt")); err != nil || string(data) != "created by a test" {
+		t.Errorf("quarantined out.txt: %q, %v", data, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sub/created.txt")); err != nil {
 		t.Errorf("file outside the guard was touched: %v", err)

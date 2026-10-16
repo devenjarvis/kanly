@@ -319,19 +319,23 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanCovBin()
 
-	// Mutants run in the real checkout. Undo what they leave behind in the
-	// package directory, and warn about what cannot be undone.
+	// Mutants run in the real checkout. Move what they leave behind in the
+	// package directory out of it (not delete: a file created during the
+	// run may be the user's), and warn about what cannot be undone.
 	if snap, err := runner.SnapshotDir(pkg.Dir); err == nil {
 		defer func() {
-			removed, changed, err := snap.Restore()
+			res, err := snap.Restore()
 			if err != nil {
 				fmt.Fprintf(stderr, "warning: %s: checking for files changed by tests: %v\n", pkg.ImportPath, err)
 			}
-			if len(removed) > 0 {
-				fmt.Fprintf(stderr, "%s: removed %d file(s) that tests created: %s\n", pkg.ImportPath, len(removed), strings.Join(displayPaths(removed), ", "))
+			if len(res.Moved) > 0 {
+				fmt.Fprintf(stderr, "%s: moved %d file(s) created during the run to %s: %s\n", pkg.ImportPath, len(res.Moved), res.Quarantine, strings.Join(displayPaths(res.Moved), ", "))
 			}
-			if len(changed) > 0 {
-				fmt.Fprintf(stderr, "warning: %s: tests modified or deleted %d file(s); check them before committing: %s\n", pkg.ImportPath, len(changed), strings.Join(displayPaths(changed), ", "))
+			if len(res.Unmoved) > 0 {
+				fmt.Fprintf(stderr, "warning: %s: %d file(s) were created during the run and could not be moved; remove them if unwanted: %s\n", pkg.ImportPath, len(res.Unmoved), strings.Join(displayPaths(res.Unmoved), ", "))
+			}
+			if len(res.Changed) > 0 {
+				fmt.Fprintf(stderr, "warning: %s: tests modified or deleted %d file(s); check them before committing: %s\n", pkg.ImportPath, len(res.Changed), strings.Join(displayPaths(res.Changed), ", "))
 			}
 		}()
 	}
@@ -362,7 +366,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	for i := range excluded {
 		excluded[i].Package = pkg.ImportPath
 	}
-	if len(inventory) == 0 {
+	if len(inventory) == 0 && len(covFailed) > 0 {
 		return pkgResult{}, &stageError{"coverage", errors.New("no test passes when run on its own")}
 	}
 

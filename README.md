@@ -154,7 +154,7 @@ kanly --quiet --diff --diff-base=origin/main --min-score=80 --format=sarif ./...
 - `--min-score` fails the job (exit 3) when the changed code's mutants go undetected or untested.
 - `--format=sarif` output can be uploaded with `github/codeql-action/upload-sarif` so survivors appear as annotations on the PR's changed lines. Run Kanly from the repository root so the SARIF paths resolve.
 - Tests that share ports, files or databases may collide when Kanly runs them in parallel. Use `--verify-kills` to re-check kills one at a time, or `--jobs=1`.
-- Mutants run in your checkout. Each test process gets a private `TMPDIR`; files that tests create in the package directory or its `testdata` are removed afterwards, and files they modify or delete there are reported on stderr. Run Kanly in a clean checkout or a CI workspace you can discard.
+- Mutants run in your checkout. Each test process gets a private `TMPDIR`; files created in the package directory or its `testdata` during the run are moved to a temporary quarantine directory afterwards (named on stderr, so nothing is lost), and files the tests modify or delete there are reported on stderr. Run Kanly in a clean checkout or a CI workspace you can discard.
 
 ## How it works
 
