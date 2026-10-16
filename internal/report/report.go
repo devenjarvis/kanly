@@ -756,10 +756,7 @@ func writeLLMCoveringTests(b *strings.Builder, res mutation.Result) {
 
 // shortTestName shortens "example.com/m/app.TestX" to "app.TestX".
 func shortTestName(name string) string {
-	if i := strings.LastIndex(name, "/"); i >= 0 {
-		return name[i+1:]
-	}
-	return name
+	return name[strings.LastIndex(name, "/")+1:]
 }
 
 func backtickAll(in []string) []string {

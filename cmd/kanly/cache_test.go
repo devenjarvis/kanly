@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,5 +160,95 @@ func TestOpenSetupCacheHonoursEnv(t *testing.T) {
 	t.Setenv("KANLY_CACHE_DIR", dir)
 	if c := openSetupCache(); c == nil || c.dir != dir {
 		t.Errorf("openSetupCache() = %+v, want dir %s", c, dir)
+	}
+}
+
+func TestSetupCacheKeyAndStoreFailures(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	c := &setupCache{dir: filepath.Join(dir, "cache")}
+
+	// Binaries are delimited, so moving bytes from one to the next
+	// changes the key.
+	k1, _ := c.key([]string{write("a1", "ab"), write("b1", "c")})
+	k2, _ := c.key([]string{write("a2", "a"), write("b2", "bc")})
+	if k1 == k2 {
+		t.Error(`key(["ab", "c"]) == key(["a", "bc"])`)
+	}
+	// A binary that cannot be read, such as a directory, gives no key.
+	if _, ok := c.key([]string{dir}); ok {
+		t.Error("key of a directory succeeded")
+	}
+
+	// A failed store leaves no temporary file behind.
+	if err := os.MkdirAll(filepath.Join(c.dir, "blocked.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c.store("blocked", dependentSetup{})
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("cache dir holds %v after a failed store, want only blocked.json", entries)
+	}
+}
+
+func TestOpenSetupCacheDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("KANLY_CACHE_DIR", "")
+	t.Setenv("XDG_CACHE_HOME", home) // os.UserCacheDir on Linux
+	t.Setenv("HOME", home)           // and on macOS, under Library/Caches
+	base, err := os.UserCacheDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	if c := openSetupCache(); c == nil || c.dir != filepath.Join(base, "kanly", "dependents-v1") {
+		t.Errorf("openSetupCache() = %+v, want <user cache>/kanly/dependents-v1", c)
+	}
+}
+
+func TestGuardDir(t *testing.T) {
+	dir := t.TempDir()
+	kept := filepath.Join(dir, "kept.txt")
+	if err := os.WriteFile(kept, []byte("before"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	restore := guardDir(dir, "example.com/p", &stderr)
+	if err := os.WriteFile(kept, []byte("after, longer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created := filepath.Join(dir, "created.txt")
+	if err := os.WriteFile(created, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore()
+
+	if _, err := os.Stat(created); !os.IsNotExist(err) {
+		t.Errorf("created.txt is still in the directory: %v", err)
+	}
+	out := stderr.String()
+	for _, want := range []string{
+		"example.com/p: moved 1 file(s) created during the run to ",
+		"warning: example.com/p: tests modified or deleted 1 file(s); check them before committing: ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, out)
+		}
+	}
+
+	// Without changes, restoring says nothing.
+	stderr.Reset()
+	guardDir(dir, "example.com/p", &stderr)()
+	if stderr.Len() != 0 {
+		t.Errorf("restoring an unchanged directory printed %q", stderr.String())
 	}
 }

@@ -111,10 +111,7 @@ func moduleStamp(dir string) (string, error) {
 			}
 			return nil
 		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
+		rel := strings.TrimPrefix(path, dir)
 		if strings.HasSuffix(path, ".go") && !inTestdata(rel) {
 			return nil
 		}

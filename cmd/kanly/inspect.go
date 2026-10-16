@@ -89,12 +89,13 @@ func describeMutant(w io.Writer, m mutation.Mutation) {
 		return
 	}
 	// Tabs stay tabs so the caret lines up however they are displayed.
+	before := line[:col]
 	pad := strings.Map(func(r rune) rune {
 		if r == '\t' {
 			return r
 		}
 		return ' '
-	}, line[:col])
+	}, before)
 	fmt.Fprintf(w, "  original: %s\n            %s^\n", line, pad)
 	if mutated, ok := mutatedLine(line, col, m); ok {
 		fmt.Fprintf(w, "  mutant:   %s\n", mutated)
@@ -122,24 +123,30 @@ func runShow(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	pkg, rew, err := loadMutants(fs.Arg(0), *tags)
-	if err != nil {
+	if err := show(stdout, fs.Arg(0), fs.Args()[1:], *tags); err != nil {
 		fmt.Fprintf(stderr, "kanly show: %v\n", err)
 		return 1
 	}
-	muts, err := findMutants(rew, pkg.ImportPath, fs.Args()[1:])
+	return 0
+}
+
+func show(w io.Writer, pattern string, refs []string, tags string) error {
+	pkg, rew, err := loadMutants(pattern, tags)
 	if err != nil {
-		fmt.Fprintf(stderr, "kanly show: %v\n", err)
-		return 1
+		return err
+	}
+	muts, err := findMutants(rew, pkg.ImportPath, refs)
+	if err != nil {
+		return err
 	}
 	for i, m := range muts {
 		if i > 0 {
-			fmt.Fprintln(stdout)
+			fmt.Fprintln(w)
 		}
-		describeMutant(stdout, m)
+		describeMutant(w, m)
 	}
-	fmt.Fprintf(stdout, "\nTry a test against it: kanly test %s %s -run <TestName> (add --in=<pkg> for a test in another package)\n", fs.Arg(0), muts[0].Fingerprint)
-	return 0
+	fmt.Fprintf(w, "\nTry a test against it: kanly test %s %s -run <TestName> (add --in=<pkg> for a test in another package)\n", pattern, muts[0].Fingerprint)
+	return nil
 }
 
 // runTest implements `kanly test [--tags=...] [--in=<pkg>] <pkg> <mutant>
@@ -156,43 +163,12 @@ func runTest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	pkg, rew, err := loadMutants(fs.Arg(0), *tags)
-	if err != nil {
-		fmt.Fprintf(stderr, "kanly test: %v\n", err)
-		return 1
+	cmd, cleanup, err := mutantTestCommand(fs.Arg(0), fs.Arg(1), *tags, *in, fs.Args()[2:], stderr)
+	if err == nil {
+		defer cleanup()
+		cmd.Stdout, cmd.Stderr = stdout, stderr
+		err = cmd.Run()
 	}
-	muts, err := findMutants(rew, pkg.ImportPath, fs.Args()[1:2])
-	if err != nil {
-		fmt.Fprintf(stderr, "kanly test: %v\n", err)
-		return 1
-	}
-	m := muts[0]
-	overlay, cleanup, err := runner.BuildOverlay(rew, pkg.Dir)
-	if err != nil {
-		fmt.Fprintf(stderr, "kanly test: %v\n", err)
-		return 1
-	}
-	defer cleanup()
-
-	// -count=1: a cached pass from before the test was edited says nothing.
-	goArgs := []string{"test", "-count=1", "-vet=off", "-overlay=" + overlay}
-	goArgs = append(goArgs, runner.SchemaBuildFlags(pkg.ImportPath, pkg.GoVersion)...)
-	if *tags != "" {
-		goArgs = append(goArgs, "-tags="+*tags)
-	}
-	goArgs = append(goArgs, fs.Args()[2:]...)
-	target := pkg.ImportPath
-	if *in != "" {
-		target = *in
-	}
-	goArgs = append(goArgs, target)
-
-	fmt.Fprintf(stderr, "kanly: go test %s with mutant #%d (fp %s) applied: %s:%d:%d %s `%s` → `%s`\n",
-		target, m.ID, m.Fingerprint, displayPath(m.File), m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
-	cmd := exec.Command("go", goArgs...)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-	cmd.Env = append(filterEnvKey(os.Environ(), "KANLY_MUTANT"), "KANLY_MUTANT="+strconv.Itoa(m.ID))
-	err = cmd.Run()
 	var exit *exec.ExitError
 	switch {
 	case err == nil:
@@ -207,13 +183,41 @@ func runTest(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// filterEnvKey returns env without entries for key.
-func filterEnvKey(env []string, key string) []string {
-	out := env[:0:0]
-	for _, e := range env {
-		if !strings.HasPrefix(e, key+"=") {
-			out = append(out, e)
-		}
+// mutantTestCommand prepares the `go test` run of runTest and announces it
+// on stderr. cleanup removes the overlay.
+func mutantTestCommand(pattern, ref, tags, in string, goTestArgs []string, stderr io.Writer) (*exec.Cmd, func(), error) {
+	pkg, rew, err := loadMutants(pattern, tags)
+	if err != nil {
+		return nil, nil, err
 	}
-	return out
+	muts, err := findMutants(rew, pkg.ImportPath, []string{ref})
+	if err != nil {
+		return nil, nil, err
+	}
+	m := muts[0]
+	overlay, cleanup, err := runner.BuildOverlay(rew, pkg.Dir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// -count=1: a cached pass from before the test was edited says nothing.
+	args := []string{"test", "-count=1", "-vet=off", "-overlay=" + overlay}
+	args = append(args, runner.SchemaBuildFlags(pkg.ImportPath, pkg.GoVersion)...)
+	if tags != "" {
+		args = append(args, "-tags="+tags)
+	}
+	args = append(args, goTestArgs...)
+	target := pkg.ImportPath
+	if in != "" {
+		target = in
+	}
+	args = append(args, target)
+
+	fmt.Fprintf(stderr, "kanly: go test %s with mutant #%d (fp %s) applied: %s:%d:%d %s `%s` → `%s`\n",
+		target, m.ID, m.Fingerprint, displayPath(m.File), m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
+	cmd := exec.Command("go", args...)
+	// exec uses the last value of a repeated variable, so this overrides
+	// any KANLY_MUTANT already set.
+	cmd.Env = append(os.Environ(), "KANLY_MUTANT="+strconv.Itoa(m.ID))
+	return cmd, cleanup, nil
 }

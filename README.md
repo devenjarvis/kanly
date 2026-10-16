@@ -23,7 +23,7 @@ kanly [flags] <pattern>[:<func-list>]...
 | `--min-score` | `0` | Exit 3 when the score including not-covered mutants is below this percentage |
 | `--timeout` | derived | Fixed per-mutant test timeout. By default each mutant's timeout is derived from the baseline: `--timeout-factor` × (the baseline run time of the tests it runs + process start-up) + 2s |
 | `--timeout-factor` | `3` | Multiple of the baseline run time a mutant may take before it counts as `Timeout` (ignored when `--timeout` is set) |
-| `--diff` | off | Only mutate lines changed since the working tree diverged from `--diff-base` (see [Using Kanly in CI](#using-kanly-in-ci)) |
+| `--diff` | off | Only mutate lines changed since the working tree diverged from `--diff-base` (see [Using Kanly in CI](#using-kanly-in-ci)). Without package arguments, changed packages under `testdata` or a directory starting with `.` or `_` are skipped, as `./...` skips them |
 | `--diff-base` | `HEAD` | Git ref to diff against when `--diff` is set |
 | `--tests` | (all) | Regex narrowing the test inventory used by baseline and per-test coverage |
 | `--mutant` | (all) | Comma-separated mutant IDs or [fingerprints](#accepting-mutants) to re-run; others are skipped. A fingerprint that matches no mutant (its line changed) is reported |

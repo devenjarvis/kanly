@@ -255,11 +255,12 @@ const confirmTimeoutScale = 2.0
 // every kill is re-run too, and a kill that does not reproduce is reported
 // as survived: tests that collide over shared ports, files or databases
 // when run concurrently fail without detecting anything.
-func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(r mutation.Result, timeoutScale float64) (mutation.Result, error)) error {
+// rerun is given each result's index in results.
+func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(i int, r mutation.Result, timeoutScale float64) (mutation.Result, error)) error {
 	for i, r := range results {
 		switch {
 		case r.Status == mutation.StatusTimeout:
-			again, err := rerun(r, confirmTimeoutScale)
+			again, err := rerun(i, r, confirmTimeoutScale)
 			if err != nil {
 				return err
 			}
@@ -268,7 +269,7 @@ func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(r m
 			}
 			results[i] = again
 		case r.Status == mutation.StatusKilled && verifyKills:
-			again, err := rerun(r, 1)
+			again, err := rerun(i, r, 1)
 			if err != nil {
 				return err
 			}
@@ -398,15 +399,17 @@ func runMutantSuites(ctx context.Context, suites []suite, id int, tests [][]stri
 // add kills, and their failure says nothing about pkg. The returned cleanup
 // removes the binaries and restores the dependents' directories.
 func dependentSuites(ctx context.Context, pkg *source.Package, overlayPath string, cfg runConfig, stderr io.Writer) ([]suite, []report.ExcludedTest, func()) {
+	// The cleanups are independent: binaries removed, directories restored.
 	var cleanups []func()
 	cleanup := func() {
-		for i := len(cleanups) - 1; i >= 0; i-- {
-			cleanups[i]()
+		for _, c := range cleanups {
+			c()
 		}
 	}
 	var suites []suite
 	var excluded []report.ExcludedTest
 	for _, dep := range cfg.dependents {
+		cfg.progress.printf("%s: running the tests of dependent %s unmutated", pkg.ImportPath, dep.ImportPath)
 		s, ex, err := func() (suite, []report.ExcludedTest, error) {
 			bin, cleanBin, err := runner.CompileDependentTestBinary(ctx, dep.ImportPath, pkg.ImportPath, overlayPath, pkg.GoVersion, cfg.buildFlags...)
 			if err != nil {
@@ -422,7 +425,7 @@ func dependentSuites(ctx context.Context, pkg *source.Package, overlayPath strin
 			if cfg.moduleStamp == "" {
 				cache = nil
 			}
-			key, _ := cache.key([]string{bin, covBin}, cfg.moduleStamp, dep.Dir, pkg.Dir, cfg.testsRegex, strings.Join(cfg.testArgs, " "))
+			key, _ := cache.key([]string{bin, covBin}, cfg.moduleStamp, dep.Dir, pkg.Dir, cfg.testsRegex, fmt.Sprint(cfg.testArgs))
 			if cached, ok := cache.load(key); ok {
 				cfg.progress.printf("%s: reusing the setup of dependent %s from the cache", pkg.ImportPath, dep.ImportPath)
 				return suite{pkg: dep.ImportPath, dir: dep.Dir, bin: bin, baseline: cached.Baseline, covMap: cached.covMap()}, nil, nil
@@ -573,14 +576,11 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		return pkgResult{}, &stageError{"coverage", errors.New("no test passes when run on its own")}
 	}
 
-	suites := []suite{{pkg: pkg.ImportPath, dir: pkg.Dir, bin: binaryPath, baseline: baseline, covMap: covMap, own: true}}
-	if len(cfg.dependents) > 0 {
-		cfg.progress.printf("%s: running the tests of %d dependent package(s) unmutated", pkg.ImportPath, len(cfg.dependents))
-		deps, depExcluded, cleanDeps := dependentSuites(ctx, pkg, overlayPath, cfg, stderr)
-		defer cleanDeps()
-		suites = append(suites, deps...)
-		excluded = append(excluded, depExcluded...)
-	}
+	suites := []suite{{dir: pkg.Dir, bin: binaryPath, baseline: baseline, covMap: covMap, own: true}}
+	deps, depExcluded, cleanDeps := dependentSuites(ctx, pkg, overlayPath, cfg, stderr)
+	defer cleanDeps()
+	suites = append(suites, deps...)
+	excluded = append(excluded, depExcluded...)
 
 	// Per-mutant covering tests are read out up front so the parallel loop
 	// below does not touch the coverage maps concurrently and so the
@@ -594,10 +594,8 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// test that asserts on a line may well execute it only once.
 	perMut := make([][][]string, len(mutations)) // mutation → suite → tests
 	covering := make([][]string, len(mutations)) // mutation → result names
-	byID := make(map[int]int, len(mutations))    // mutation ID → index
 	relevant := make(map[string]bool)
 	for i, mut := range mutations {
-		byID[mut.ID] = i
 		perMut[i] = make([][]string, len(suites))
 		for j, s := range suites {
 			tests := s.coveringTests(mut)
@@ -673,8 +671,8 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 
 	// Re-run uncertain verdicts one at a time, away from the contention of
 	// the parallel loop.
-	rerun := func(r mutation.Result, timeoutScale float64) (mutation.Result, error) {
-		status, killingTests, dur, err := runMutantSuites(ctx, suites, r.Mutation.ID, perMut[byID[r.Mutation.ID]], timeoutScale, cfg)
+	rerun := func(i int, r mutation.Result, timeoutScale float64) (mutation.Result, error) {
+		status, killingTests, dur, err := runMutantSuites(ctx, suites, r.Mutation.ID, perMut[i], timeoutScale, cfg)
 		if err != nil {
 			return r, fmt.Errorf("re-run mutant %d: %w", r.Mutation.ID, err)
 		}

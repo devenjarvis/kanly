@@ -43,22 +43,22 @@ func TestDependents(ctx context.Context, moduleDir string, buildFlags ...string)
 func parseTestDependents(out []byte) map[string][]Dependent {
 	type entry struct{ path, dir, deps string }
 	var entries []entry
+	// Every listed path, test variants included: a dependency is always a
+	// plain import path, so only the module's packages ever match.
 	module := make(map[string]bool)
 	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.SplitN(line, "\t", 3)
+		fields := strings.Split(line, "\t")
 		if len(fields) != 3 {
 			continue
 		}
 		e := entry{fields[0], fields[1], fields[2]}
 		entries = append(entries, e)
-		if !strings.Contains(e.path, " ") && !strings.HasSuffix(e.path, ".test") {
-			module[e.path] = true
-		}
+		module[e.path] = true
 	}
 	result := make(map[string][]Dependent)
 	for _, e := range entries {
 		testPkg, ok := strings.CutSuffix(e.path, ".test")
-		if !ok || strings.Contains(testPkg, " ") || !module[testPkg] {
+		if !ok || !module[testPkg] {
 			continue
 		}
 		seen := make(map[string]bool)

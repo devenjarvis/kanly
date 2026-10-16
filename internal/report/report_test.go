@@ -1020,8 +1020,15 @@ func TestLLMSameIDInTwoPackages(t *testing.T) {
 		},
 	}
 	r := report.Build(results, nil)
-	r.UnmatchedMutants = []string{"cccccccccccc"}
 	var buf bytes.Buffer
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "matching no mutant") {
+		t.Errorf("text output reports unmatched fingerprints although there are none:\n%s", buf.String())
+	}
+	buf.Reset()
+	r.UnmatchedMutants = []string{"cccccccccccc", "dddddddddddd"}
 	if err := report.WriteLLM(&buf, r, report.LLMSource{ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}); err != nil {
 		t.Fatal(err)
 	}
@@ -1032,7 +1039,7 @@ func TestLLMSameIDInTwoPackages(t *testing.T) {
 		"kanly --fail-fast --mutant=aaaaaaaaaaaa m/a\n",
 		"kanly --fail-fast --mutant=bbbbbbbbbbbb m/b\n",
 		"## Mutants not found",
-		"`cccccccccccc`",
+		"`cccccccccccc`, `dddddddddddd`",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("llm output lacks %q:\n%s", want, out)
@@ -1043,7 +1050,7 @@ func TestLLMSameIDInTwoPackages(t *testing.T) {
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), "matching no mutant (line changed or accepted): cccccccccccc") {
+	if !strings.Contains(buf.String(), "matching no mutant (line changed or accepted): cccccccccccc, dddddddddddd\n") {
 		t.Errorf("text output does not list the unmatched fingerprint:\n%s", buf.String())
 	}
 }
@@ -1077,6 +1084,9 @@ func TestLLMRanksAndLimitsMutants(t *testing.T) {
 	if busy, alpha := strings.Index(all, "### m/p — Busy"), strings.Index(all, "### m/p — Alpha"); busy < 0 || alpha < 0 || busy > alpha {
 		t.Errorf("Busy (3 live) should come before Alpha (1 live):\n%s", all)
 	}
+	if !strings.Contains(all, "--mutant=000000000001,000000000002,000000000003,000000000004,000000000005,000000000006 m/p\n") {
+		t.Errorf("re-run command does not list every fingerprint in order:\n%s", all)
+	}
 	if strings.Contains(all, "not listed") {
 		t.Errorf("unlimited brief omits mutants:\n%s", all)
 	}
@@ -1108,5 +1118,56 @@ func TestLLMRanksAndLimitsMutants(t *testing.T) {
 	}
 	if exact := render(6); strings.Contains(exact, "not listed") {
 		t.Errorf("limit 6 fits every mutant:\n%s", exact)
+	}
+}
+
+func TestLLMLimitEdgeCases(t *testing.T) {
+	mut := func(id int, fn string, status mutation.Status) mutation.Result {
+		return mutation.Result{
+			Mutation: mutation.Mutation{ID: id, Package: "m/p", Function: fn, File: "p.go", Line: id, OperatorName: "int_arith", Original: "+", Mutant: "-", Fingerprint: fmt.Sprintf("%012d", id)},
+			Status:   status,
+		}
+	}
+	render := func(results []mutation.Result, limit int) string {
+		t.Helper()
+		var buf bytes.Buffer
+		src := report.LLMSource{Limit: limit, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}
+		if err := report.WriteLLM(&buf, report.Build(results, nil), src); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+
+	// One live mutant uses the whole budget: the uncovered function, which
+	// would not fit, is left out although the live one was listed.
+	out := render([]mutation.Result{mut(1, "Alpha", mutation.StatusSurvived), mut(2, "Cold", mutation.StatusNotCovered), mut(3, "Cold", mutation.StatusNotCovered)}, 1)
+	if !strings.Contains(out, "### m/p — Alpha") || strings.Contains(out, "### m/p — Cold") {
+		t.Errorf("limit 1 should list Alpha only:\n%s", out)
+	}
+
+	// Functions with as many mutants are ordered by name.
+	var results []mutation.Result
+	for i, fn := range []string{"Fd", "Fc", "Fb", "Fa"} {
+		results = append(results, mut(i+1, fn, mutation.StatusSurvived))
+	}
+	out = render(results, 0)
+	last := -1
+	for _, fn := range []string{"Fa", "Fb", "Fc", "Fd"} {
+		i := strings.Index(out, "### m/p — "+fn)
+		if i < last {
+			t.Errorf("%s is out of order:\n%s", fn, out)
+		}
+		last = i
+	}
+
+	// At most ten omitted functions are named.
+	results = nil
+	for i := 1; i <= 13; i++ {
+		results = append(results, mut(i, fmt.Sprintf("F%02d", i), mutation.StatusSurvived))
+	}
+	out = render(results, 1)
+	if !strings.Contains(out, "_12 more live mutant(s) are not listed (`--llm-limit=1`): `m/p:F02` (1), `m/p:F03` (1), ") ||
+		!strings.Contains(out, "`m/p:F11` (1) and 2 more.") || strings.Contains(out, "`m/p:F12`") {
+		t.Errorf("omitted note should name F02 to F11 and count two more:\n%s", out)
 	}
 }

@@ -521,3 +521,74 @@ func TestSchemaCompilesTrickyConstructs(t *testing.T) {
 		t.Fatalf("RunBaseline: %v", err)
 	}
 }
+
+// TestDependentBinaries runs crosspkg/app's tests against crosspkg/lib: its
+// coverage binary attributes lib's lines to app's tests, and its schema
+// binary applies lib's mutants.
+func TestDependentBinaries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	root := relDir(t, "testdata/crosspkg")
+	// go test -c resolves import paths in the working directory's module.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	libDir, appDir := filepath.Join(root, "lib"), filepath.Join(root, "app")
+	ctx := context.Background()
+
+	covBin, cleanCov, err := runner.CompileDependentCoverageBinary(ctx, "crosspkg/app", "crosspkg/lib")
+	if err != nil {
+		t.Fatalf("CompileDependentCoverageBinary: %v", err)
+	}
+	defer cleanCov()
+	covMap, failed, err := runner.CollectPerTestCoverage(ctx, covBin, appDir, libDir, []string{"TestArea", "TestReport"}, time.Minute, 2)
+	if err != nil || len(failed) > 0 {
+		t.Fatalf("CollectPerTestCoverage: %v %v", err, failed)
+	}
+	libFile := filepath.Join(libDir, "lib.go")
+	for line, want := range map[int]string{7: "TestArea", 13: "TestReport"} {
+		hits := covMap[runner.FileLine{File: libFile, Line: line}]
+		if len(hits) != 1 || hits[0].Name != want {
+			t.Errorf("lib.go:%d covered by %v, want just %s", line, hits, want)
+		}
+	}
+	for k := range covMap {
+		if k.File != libFile {
+			t.Errorf("coverage of %s: only crosspkg/lib is instrumented", k.File)
+		}
+	}
+
+	pkg, err := source.Load(libDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay, cleanOverlay, err := runner.BuildOverlay(rew, pkg.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanOverlay()
+	bin, cleanBin, err := runner.CompileDependentTestBinary(ctx, "crosspkg/app", pkg.ImportPath, overlay, pkg.GoVersion)
+	if err != nil {
+		t.Fatalf("CompileDependentTestBinary: %v", err)
+	}
+	defer cleanBin()
+	for _, m := range rew.Mutations {
+		if m.Function != "Scale" {
+			continue
+		}
+		status, killers, _, err := runner.RunMutant(ctx, bin, m.ID, appDir, []string{"TestArea"}, time.Minute)
+		if err != nil || status != mutation.StatusKilled || len(killers) != 1 || killers[0] != "TestArea" {
+			t.Errorf("Scale mutant %d: %s %v %v, want killed by TestArea", m.ID, status, killers, err)
+		}
+	}
+}

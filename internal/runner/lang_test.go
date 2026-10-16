@@ -28,3 +28,9 @@ func TestSchemaLangFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestSchemaBuildFlags(t *testing.T) {
+	if got, want := SchemaBuildFlags("example.com/p", "1.16"), []string{"-gcflags=example.com/p=-lang=go1.21"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("SchemaBuildFlags = %v, want %v", got, want)
+	}
+}
