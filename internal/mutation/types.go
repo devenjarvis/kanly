@@ -32,6 +32,11 @@ type Mutation struct {
 	// (outside any function body). It runs once per test process, but Go's
 	// coverage instrumentation never attributes it to a test.
 	PackageInit bool `json:"-"`
+	// CoverLine, when non-zero, is the line of the switch or select statement
+	// whose case expression holds the mutation. Go's coverage blocks for a
+	// case start after its colon, so the tests that evaluate a case without
+	// taking it are only found through the statement's own line.
+	CoverLine int `json:"-"`
 }
 
 type Result struct {

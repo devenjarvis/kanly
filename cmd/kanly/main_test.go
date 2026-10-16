@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/devenjarvis/kanly/internal/mutation"
+	"github.com/devenjarvis/kanly/internal/runner"
 	"github.com/devenjarvis/kanly/internal/selector"
 )
 
@@ -577,6 +578,40 @@ func TestRunKillsPackageInitMutants(t *testing.T) {
 			t.Errorf("line %d (%q) %s→%s: status %s, want killed",
 				m.Mutation.Line, m.Mutation.Function, m.Mutation.Operator, m.Mutation.Mutant, m.Status)
 		}
+	}
+}
+
+// TestRunCoversCaseExpressions guards against case expressions counting as
+// not covered: TestKind takes no case, but evaluates them all, so it must run
+// against, and kill, each negated comparison.
+func TestRunCoversCaseExpressions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/casesample")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", "--operators=int_cmp_negate", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Mutants []struct {
+			Mutation struct {
+				Line     int    `json:"line"`
+				Original string `json:"original"`
+			} `json:"mutation"`
+			Status string `json:"status"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON output: %v\n%s", err, stdout.String())
+	}
+	got := map[int]string{}
+	for _, m := range result.Mutants {
+		got[m.Mutation.Line] = m.Status
+	}
+	want := map[int]string{8: "killed", 10: "killed", 11: "killed"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("status by line: want %v, got %v", want, got)
 	}
 }
 
@@ -1259,5 +1294,22 @@ func TestRunTestsRegexMatchingNothing(t *testing.T) {
 	}
 	if result.Summary.Total == 0 || result.Summary.NotCovered != result.Summary.Total {
 		t.Errorf("summary = %+v, want every mutant not covered", result.Summary)
+	}
+}
+
+func TestUnionHits(t *testing.T) {
+	hit := func(names ...string) []runner.TestHit {
+		var hs []runner.TestHit
+		for _, n := range names {
+			hs = append(hs, runner.TestHit{Name: n, Hits: 1})
+		}
+		return hs
+	}
+	got := unionHits(hit("TestA", "TestB"), hit("TestB", "TestC"))
+	if want := hit("TestA", "TestB", "TestC"); !reflect.DeepEqual(got, want) {
+		t.Errorf("unionHits = %v, want %v", got, want)
+	}
+	if got := unionHits(nil, nil); len(got) != 0 {
+		t.Errorf("unionHits(nil, nil) = %v, want none", got)
 	}
 }

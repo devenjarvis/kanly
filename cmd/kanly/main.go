@@ -38,7 +38,23 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(dispatch(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+// dispatch routes the agent subcommands (see agent.go); anything else is a
+// mutation run.
+func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "guide":
+			return runGuide(args[1:], stdout, stderr)
+		case "init":
+			return runInit(args[1:], stdout, stderr)
+		case "hook":
+			return runHook(args[1:], stdin, stdout, stderr)
+		}
+	}
+	return run(args, stdout, stderr)
 }
 
 func resolveVersion() string {
@@ -409,6 +425,10 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	relevant := make(map[string]bool)
 	for i, mut := range mutations {
 		hits := covMap[runner.FileLine{File: mut.File, Line: mut.Line}]
+		// A case expression runs whenever its statement is reached and no
+		// earlier case matched, not only when its case is taken. Line 0 (no
+		// CoverLine) has no coverage.
+		hits = unionHits(hits, covMap[runner.FileLine{File: mut.File, Line: mut.CoverLine}])
 		if mut.PackageInit && len(hits) == 0 {
 			// Package-level var initializers run in every test process
 			// but sit outside every cover block, so any test may kill them.
@@ -509,7 +529,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] [--fail-fast] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly guide | kanly init --agent=claude | kanly hook stop\n       kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] [--fail-fast] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -780,6 +800,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 // optional file-exclusion predicate and an optional function-name selector
 // list. Returns nil when none is active so the rewriter takes the fast
 // no-filter path.
+// unionHits returns the tests in a or b, each once.
+func unionHits(a, b []runner.TestHit) []runner.TestHit {
+	seen := make(map[string]bool)
+	var out []runner.TestHit
+	for _, h := range append(a[:len(a):len(a)], b...) {
+		if !seen[h.Name] {
+			seen[h.Name] = true
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 func composeFilter(diffPred func(file string, line int) bool, exclude func(file string) bool, funcs []string) func(string, int, string) bool {
 	if diffPred == nil && exclude == nil && len(funcs) == 0 {
 		return nil

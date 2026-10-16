@@ -6,6 +6,8 @@ import (
 	"go/token"
 	"go/types"
 
+	"golang.org/x/tools/go/types/typeutil"
+
 	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
@@ -18,6 +20,10 @@ import (
 //   - Const-decl initializers (e.g. const X = "alice") — must be constant expressions.
 //   - Array lengths and array/slice composite-literal keys (e.g. [len("ab")]int)
 //     — must be constant expressions.
+//
+// Also skipped: the usage argument of package flag's functions and methods
+// (flag.String("v", "", "verbose output")). Only a test that pins --help
+// output could kill it, which is the kind of test the llm report warns against.
 //
 // Strict-identity type policy, as for int_literal: the literal's contextual
 // type must be plain string. __cMutString returns string, so a literal used as
@@ -50,7 +56,8 @@ func (StringLiteral) Find(file *ast.File, info *types.Info) []mutation.Candidate
 
 		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
 			if lit.Value != `""` && lit.Value != "``" && stringLitMutable(stack, lit) &&
-				!inConstantPosition(info, stack, lit) && isPlainStringLit(info, lit) {
+				!inConstantPosition(info, stack, lit) && isPlainStringLit(info, lit) &&
+				!isFlagUsage(info, stack, lit) {
 				candidates = append(candidates, mutation.Candidate{
 					Node:     lit,
 					Pos:      lit.Pos(),
@@ -96,4 +103,27 @@ func stringLitMutable(stack []ast.Node, lit *ast.BasicLit) bool {
 		}
 	}
 	return true
+}
+
+// isFlagUsage reports whether lit is passed as the usage parameter of a
+// function or method in package flag.
+func isFlagUsage(info *types.Info, stack []ast.Node, lit *ast.BasicLit) bool {
+	// Find visits a literal only below its *ast.File, so stack is never empty.
+	call, ok := stack[len(stack)-1].(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	fn, ok := typeutil.Callee(info, call).(*types.Func)
+	// Only methods of the universe error interface have no package, and
+	// they take no arguments.
+	if !ok || fn.Pkg().Path() != "flag" {
+		return false
+	}
+	params := fn.Type().(*types.Signature).Params()
+	for i, arg := range call.Args {
+		if arg == lit && i < params.Len() {
+			return params.At(i).Name() == "usage"
+		}
+	}
+	return false
 }

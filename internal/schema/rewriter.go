@@ -78,6 +78,53 @@ func enclosingFunc(spans []funcSpan, pos token.Pos) string {
 	return ""
 }
 
+// caseSpan is the expression list of one case clause, from `case` to its
+// colon, and the line of the switch or select statement it belongs to.
+type caseSpan struct {
+	start, end token.Pos
+	stmtLine   int
+}
+
+// collectCaseSpans returns the case expression lists of every switch and
+// select statement in file. Type switches are left out: their case lists hold
+// only types, which nothing mutates.
+func collectCaseSpans(fset *token.FileSet, file *ast.File) []caseSpan {
+	var spans []caseSpan
+	add := func(stmt ast.Node, body *ast.BlockStmt) {
+		line := fset.Position(stmt.Pos()).Line
+		for _, s := range body.List {
+			switch c := s.(type) {
+			case *ast.CaseClause:
+				spans = append(spans, caseSpan{start: c.Case, end: c.Colon, stmtLine: line})
+			case *ast.CommClause:
+				spans = append(spans, caseSpan{start: c.Case, end: c.Colon, stmtLine: line})
+			}
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.SwitchStmt:
+			add(s, s.Body)
+		case *ast.SelectStmt:
+			add(s, s.Body)
+		}
+		return true
+	})
+	return spans
+}
+
+// caseStmtLine returns the statement line of the innermost case expression
+// list containing pos, or 0 when pos is in none.
+func caseStmtLine(spans []caseSpan, pos token.Pos) int {
+	line, start := 0, token.NoPos
+	for _, s := range spans {
+		if pos >= s.start && pos < s.end && s.start > start {
+			line, start = s.stmtLine, s.start
+		}
+	}
+	return line
+}
+
 // collectFileScopeFuncLits returns the ranges of function literals outside
 // any FuncDecl (e.g. `var h = func() {...}`). Their bodies run when called,
 // not during package initialization.
@@ -248,6 +295,7 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 
 		funcSpans := collectFuncSpans(file)
 		litSpans := collectFileScopeFuncLits(file)
+		caseSpans := collectCaseSpans(pkg.Fset, file)
 
 		for _, op := range ops {
 			for _, c := range op.Find(file, pkg.TypesInfo) {
@@ -298,6 +346,7 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 					Mutant:       c.Mutant,
 					Fingerprint:  fp,
 					PackageInit:  funcName == "" && !inSpans(litSpans, c.Pos),
+					CoverLine:    caseStmtLine(caseSpans, c.Pos),
 				})
 				entries = append(entries, entry{node: c.Node, cand: c, id: mutID, op: op})
 			}

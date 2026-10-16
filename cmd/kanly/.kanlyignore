@@ -1,0 +1,20 @@
+# kanly guide / init / hook (agent.go)
+f845daff7ecf flag set name only appears in the flag package's default usage header; our own usage line names the command
+b1d3d84d0631 flag set name only appears in the flag package's default usage header; our own usage line names the command
+8f6b12291b49 flag set name only appears in the flag package's default usage header; our own usage line names the command
+736c43b64580 equivalent: filepath.Join drops an empty --dir, so "" and "." both mean the working directory
+d7f604b98ee1 with an empty format, fmt still prints the path and JSON error as %!(EXTRA ...), so only a test pinning the message could tell
+841dd9a633d8 with an empty format, fmt still prints the error as %!(EXTRA ...), so only a test pinning the message could tell
+0dac67a4fde2 with an empty format, fmt still prints the error as %!(EXTRA ...), so only a test pinning the message could tell
+12812f23e778 with an empty format, fmt still prints the path and command as %!(EXTRA ...), so only a test pinning the message could tell
+d903e3d396be indentation of the generated settings.json; checking it would pin the exact bytes of the file
+9b775eaf4a55 os.WriteFile fails here only after the directory was created and the file read, which needs filesystem fault injection
+14568e6ea335 os.WriteFile fails here only after the directory was created and the file read, which needs filesystem fault injection
+04a017ed28f6 equivalent: callers ignore the bool when writeSkill returns an error
+c8249fb57490 equivalent: callers ignore the bool when writeSkill returns an error
+600fc5864c5c only reached by briefs over 10,000 bytes; truncateReason is tested directly and the note is advice, not behaviour
+# main
+ce9ac77d5c35 os.Exit in main cannot run inside a test process; dispatch is tested directly
+c14fb5056377 os.Exit in main cannot run inside a test process; dispatch is tested directly
+1da08a7efe6c os.Exit in main cannot run inside a test process; dispatch is tested directly
+d7d457bc3bcd os.Exit in main cannot run inside a test process; dispatch is tested directly

@@ -45,6 +45,36 @@ func TestStringLiteralFindsMutableLiterals(t *testing.T) {
 	}
 }
 
+// Help text passed to package flag can only be checked by pinning --help
+// output, so it is left alone; flag names, defaults and look-alike calls
+// outside package flag are still mutated.
+func TestStringLiteralSkipsFlagUsage(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "testdata/flagpkg"))
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range pkg.Files {
+		for _, c := range (StringLiteral{}).Find(f, pkg.TypesInfo) {
+			got[c.Original] = true
+		}
+	}
+	want := map[string]bool{
+		`"level"`: true, `"info"`: true, `"tool"`: true, `"out"`: true, `"-"`: true,
+		`"tag"`: true, `"mode"`: true, `"x"`: true, `"explained"`: true, `": "`: true,
+	}
+	for lit := range want {
+		if !got[lit] {
+			t.Errorf("missing candidate %s", lit)
+		}
+	}
+	for lit := range got {
+		if !want[lit] {
+			t.Errorf("unexpected candidate %s", lit)
+		}
+	}
+}
+
 func TestStringLiteralSkipsForbiddenContexts(t *testing.T) {
 	pkg, err := source.Load(relDir(t, "testdata/stringpkg"))
 	if err != nil {
