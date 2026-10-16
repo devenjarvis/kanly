@@ -132,7 +132,7 @@ func TestRunBaselineLeakedSubprocess(t *testing.T) {
 	t.Setenv("SUBPROC_LEAK", "1")
 
 	start := time.Now()
-	b, err := runner.RunBaseline(context.Background(), binary, dir, time.Minute, "")
+	b, err := runner.RunBaseline(context.Background(), binary, dir, time.Minute, "", nil)
 	if err != nil {
 		t.Fatalf("RunBaseline: %v", err)
 	}

@@ -94,10 +94,95 @@ type stageError struct {
 func (e *stageError) Error() string { return e.stage + ": " + e.err.Error() }
 func (e *stageError) Unwrap() error { return e.err }
 
+// maxBaselineRounds bounds how many times the baseline is re-run with newly
+// failing tests skipped. A test that panics stops the binary, hiding the
+// tests after it, so one round may not reveal every failing test.
+const maxBaselineRounds = 3
+
+// establishBaseline runs the package's tests on the schema binary with no
+// mutant active. Tests that fail are excluded, after re-running them alone
+// on both binaries to say why, and the baseline is re-run without them. It
+// fails only when the binary fails outside any test or failures persist.
+func establishBaseline(ctx context.Context, schemaBin, origBin, dir string, cfg runConfig) (runner.Baseline, []report.ExcludedTest, error) {
+	var skip []string
+	var excluded []report.ExcludedTest
+	for round := 0; ; round++ {
+		b, err := runner.RunBaseline(ctx, schemaBin, dir, cfg.setupTimeout(), cfg.testsRegex, skip)
+		if err == nil {
+			if len(b.Tests) == 0 && len(skip) > 0 {
+				return b, nil, errors.New("every test fails with no mutant applied")
+			}
+			return b, excluded, nil
+		}
+		var tf *runner.TestFailure
+		if !errors.As(err, &tf) || len(tf.Failed) == 0 || round == maxBaselineRounds {
+			return runner.Baseline{}, nil, explainBaselineFailure(ctx, origBin, dir, cfg, err)
+		}
+		origFailed, origErr := runner.RunTests(ctx, origBin, dir, cfg.setupTimeout(), tf.Failed)
+		schemaFailed, schemaErr := runner.RunTests(ctx, schemaBin, dir, cfg.setupTimeout(), tf.Failed)
+		failsOrig, failsSchema := toSet(origFailed), toSet(schemaFailed)
+		for _, name := range tf.Failed {
+			var reason string
+			switch {
+			case origErr != nil || failsOrig[name]:
+				reason = "fails on the unmodified code"
+			case schemaErr != nil || failsSchema[name]:
+				reason = "fails only under Kanly's rewritten code; it may depend on allocations, call stacks or timing, otherwise please report it as a Kanly bug"
+			default:
+				reason = "failed in the baseline but passed when re-run alone: flaky, or depends on another test"
+			}
+			excluded = append(excluded, report.ExcludedTest{Test: name, Reason: reason})
+		}
+		skip = append(skip, tf.Failed...)
+	}
+}
+
+// explainBaselineFailure turns a baseline failure that is not attributable
+// to individual tests into an error saying whether the unmodified code fails
+// too, which separates a broken test suite from a Kanly bug.
+func explainBaselineFailure(ctx context.Context, origBin, dir string, cfg runConfig, err error) error {
+	var tf *runner.TestFailure
+	if !errors.As(err, &tf) {
+		return err
+	}
+	if _, origErr := runner.RunTests(ctx, origBin, dir, cfg.setupTimeout(), nil); origErr == nil {
+		return fmt.Errorf("the tests pass on the unmodified code but fail under Kanly's rewritten code; this is likely a Kanly bug, please report it:\n%s", tf.Output)
+	}
+	return fmt.Errorf("tests fail with no mutant applied:\n%s", tf.Output)
+}
+
+func toSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	return set
+}
+
+// failureMessage returns the first line of a test failure's output that is
+// not a "--- FAIL" / "FAIL" status line, falling back to the first line.
+func failureMessage(msg string) string {
+	first := ""
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if first == "" {
+			first = line
+		}
+		if !strings.HasPrefix(line, "--- FAIL") && !strings.HasPrefix(line, "FAIL") && !strings.HasPrefix(line, "exit status") {
+			return line
+		}
+	}
+	return first
+}
+
 // pkgResult is what one package's pipeline contributes to the report.
 type pkgResult struct {
 	results    []mutation.Result
 	inventory  []string                      // tests reported for the package
+	excluded   []report.ExcludedTest         // tests left out because they fail unmutated
 	funcRanges map[string]mutation.FuncRange // canonical func name → source range
 }
 
@@ -149,17 +234,33 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanCovBin()
 
-	baseline, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, cfg.setupTimeout(), cfg.testsRegex)
+	baseline, excluded, err := establishBaseline(ctx, binaryPath, covBinaryPath, pkg.Dir, cfg)
 	if err != nil {
 		return pkgResult{}, &stageError{"baseline", err}
 	}
 
-	inventory := baseline.Tests
-
-	// Collect per-test coverage once; pays off across all mutants.
-	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.setupTimeout(), cfg.jobs)
+	// Collect per-test coverage once; pays off across all mutants. A test
+	// that fails on its own cannot be trusted to judge a mutant either.
+	covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs)
 	if err != nil {
 		return pkgResult{}, &stageError{"coverage", err}
+	}
+	var inventory []string
+	for _, name := range baseline.Tests {
+		if msg, failed := covFailed[name]; failed {
+			excluded = append(excluded, report.ExcludedTest{
+				Test:   name,
+				Reason: "fails when run on its own (it depends on another test, is flaky, or hangs): " + failureMessage(msg),
+			})
+			continue
+		}
+		inventory = append(inventory, name)
+	}
+	for i := range excluded {
+		excluded[i].Package = pkg.ImportPath
+	}
+	if len(inventory) == 0 {
+		return pkgResult{}, &stageError{"coverage", errors.New("no test passes when run on its own")}
 	}
 
 	// Per-mutant covering tests are read out up front so the parallel loop
@@ -236,7 +337,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		inventory = narrowed
 	}
 
-	return pkgResult{results: results, inventory: inventory, funcRanges: funcRanges}, nil
+	return pkgResult{results: results, inventory: inventory, excluded: excluded, funcRanges: funcRanges}, nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -342,6 +443,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// A package that fails is recorded and the run moves on, so one broken
 	// package cannot discard its siblings' results.
 	var pkgErrors []report.PackageError
+	var excludedTests []report.ExcludedTest
 	recordFailure := func(pkg, stage string, err error) {
 		msg := err.Error()
 		first, rest, multiline := strings.Cut(msg, "\n")
@@ -407,6 +509,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "skip %s: no mutations\n", pkg.ImportPath)
 				continue
 			}
+			excludedTests = append(excludedTests, res.excluded...)
 			allResults = append(allResults, res.results...)
 			testInventory[pkg.ImportPath] = res.inventory
 			funcRangesByPkg[pkg.ImportPath] = res.funcRanges
@@ -416,6 +519,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rep := report.Build(allResults, testInventory)
 	rep.Scope = describeScope(specs, *diffFlag, *diffBaseFlag, *testsFlag, *mutantFlag)
 	rep.Errors = pkgErrors
+	rep.ExcludedTests = excludedTests
 	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg}
 	if code := writeReport(stdout, stderr, *formatFlag, rep, llmSrc); code != 0 {
 		return code

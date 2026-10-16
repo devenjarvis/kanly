@@ -828,3 +828,39 @@ func TestPackageErrorsRendered(t *testing.T) {
 		t.Errorf("json output should omit errors when there are none:\n%s", empty.String())
 	}
 }
+
+func TestExcludedTestsInReports(t *testing.T) {
+	r := report.Build(makeResults(), makeInventory())
+	r.ExcludedTests = []report.ExcludedTest{{Package: "example.com/pkg/foo", Test: "TestFlaky", Reason: "fails when run on its own"}}
+
+	var text bytes.Buffer
+	if err := report.WriteText(&text, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "Tests excluded (1):\n  example.com/pkg/foo.TestFlaky: fails when run on its own") {
+		t.Errorf("text output missing excluded test:\n%s", text.String())
+	}
+
+	var llm bytes.Buffer
+	if err := report.WriteLLM(&llm, r, report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(llm.String(), "## Tests excluded") || !strings.Contains(llm.String(), "`example.com/pkg/foo.TestFlaky`: fails when run on its own") {
+		t.Errorf("llm output missing excluded test:\n%s", llm.String())
+	}
+
+	var js bytes.Buffer
+	if err := report.WriteJSON(&js, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js.String(), `"excluded_tests"`) {
+		t.Errorf("json output missing excluded_tests:\n%s", js.String())
+	}
+	var empty bytes.Buffer
+	if err := report.WriteJSON(&empty, report.Build(makeResults(), makeInventory())); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(empty.String(), "excluded_tests") {
+		t.Error("json output must omit excluded_tests when none were excluded")
+	}
+}

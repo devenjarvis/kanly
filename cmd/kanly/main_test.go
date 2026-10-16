@@ -680,3 +680,107 @@ func TestRunRejectsInvalidTimeoutFlags(t *testing.T) {
 		}
 	}
 }
+
+// Tests that fail without a mutant are excluded with a reason that says why,
+// and the package is still mutation-tested with the tests that pass.
+func TestRunExcludesFailingTests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/failingsample")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Excluded []struct {
+			Test   string `json:"test"`
+			Reason string `json:"reason"`
+		} `json:"excluded_tests"`
+		Mutants []struct {
+			Mutation struct {
+				Function string `json:"function"`
+			} `json:"mutation"`
+			Status       string   `json:"status"`
+			KillingTests []string `json:"killing_tests"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	wantReason := map[string]string{
+		"TestBroken":     "fails on the unmodified code",
+		"TestCallerName": "fails only under Kanly's rewritten code",
+		"TestSecond":     "fails when run on its own",
+	}
+	got := make(map[string]string)
+	for _, e := range result.Excluded {
+		got[e.Test] = e.Reason
+	}
+	for name, want := range wantReason {
+		if !strings.HasPrefix(got[name], want) {
+			t.Errorf("%s: reason %q, want prefix %q", name, got[name], want)
+		}
+	}
+	if len(got) != len(wantReason) {
+		t.Errorf("excluded tests = %v, want exactly %v", got, wantReason)
+	}
+	if !strings.Contains(got["TestSecond"], "TestFirst did not run first") {
+		t.Errorf("TestSecond reason should carry the failure message, got %q", got["TestSecond"])
+	}
+	for _, m := range result.Mutants {
+		if m.Mutation.Function == "Add" && m.Status != "killed" {
+			t.Errorf("Add mutant: status %s, want killed by TestAdd", m.Status)
+		}
+		for _, k := range m.KillingTests {
+			if _, excluded := wantReason[k]; excluded {
+				t.Errorf("excluded test %s was run against a mutant", k)
+			}
+		}
+	}
+}
+
+// A failure outside any test (here TestMain) cannot be narrowed to tests to
+// exclude, so the package is reported as not tested.
+func TestRunReportsTestMainFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/testmainfail")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", dir}, &stdout, &stderr); code != 1 {
+		t.Fatalf("run returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Errors []struct {
+			Stage string `json:"stage"`
+			Error string `json:"error"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Stage != "baseline" {
+		t.Fatalf("errors = %+v, want one baseline error", result.Errors)
+	}
+	for _, want := range []string{"fail with no mutant applied", "database unavailable"} {
+		if !strings.Contains(result.Errors[0].Error, want) {
+			t.Errorf("error %q does not mention %q", result.Errors[0].Error, want)
+		}
+	}
+
+	// A TestMain that fails only under the schema is reported as a Kanly bug.
+	stdout.Reset()
+	stderr.Reset()
+	dir = relDir(t, "../../internal/runner/testdata/testmainschema")
+	if code := run([]string{"--format=json", dir}, &stdout, &stderr); code != 1 {
+		t.Fatalf("run returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	result.Errors = nil
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Error, "pass on the unmodified code but fail under Kanly's rewritten code") {
+		t.Errorf("errors = %+v, want a baseline error blaming the rewrite", result.Errors)
+	}
+}

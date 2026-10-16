@@ -45,12 +45,23 @@ type PackageSummary struct {
 
 // PackageError records a package that was matched but not mutation-tested.
 // Stage names the pipeline step that failed: "load", "rewrite", "compile",
-// "baseline", "coverage" or "mutants". A failed baseline means the package's
-// tests fail before any mutant is applied.
+// "baseline", "coverage" or "mutants". A failed baseline means the test binary
+// fails outside any individual test (TestMain, init, a crash); failing tests
+// are excluded instead (see ExcludedTest). The error says whether the
+// unmodified code fails too.
 type PackageError struct {
 	Package string `json:"package"`
 	Stage   string `json:"stage"`
 	Error   string `json:"error"`
+}
+
+// ExcludedTest records a test that was left out of mutation testing because
+// it fails without any mutant applied, so it cannot tell a mutant apart from
+// the original code.
+type ExcludedTest struct {
+	Package string `json:"package"`
+	Test    string `json:"test"`
+	Reason  string `json:"reason"`
 }
 
 type Report struct {
@@ -58,6 +69,7 @@ type Report struct {
 	Summary             Summary                      `json:"summary"`
 	Packages            []PackageSummary             `json:"packages"`
 	Errors              []PackageError               `json:"errors,omitempty"`
+	ExcludedTests       []ExcludedTest               `json:"excluded_tests,omitempty"`
 	Tests               []mutation.TestStats         `json:"tests"`
 	ZeroKillTests       []string                     `json:"zero_kill_tests"`
 	RedundantTestGroups [][]string                   `json:"redundant_test_groups"`
@@ -316,6 +328,7 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMZeroKill(&b, r.ZeroKillTests)
 	writeLLMTestInventory(&b, r.Tests)
 	writeLLMErrors(&b, r.Errors)
+	writeLLMExcluded(&b, r.ExcludedTests)
 	writeLLMNextIteration(&b, survivors, uncovered)
 
 	out := b.String()
@@ -621,10 +634,22 @@ func writeLLMErrors(b *strings.Builder, errs []PackageError) {
 		return
 	}
 	b.WriteString("## Packages not tested\n\n")
-	b.WriteString("These packages matched but produced no mutation results, so the scores above do not cover them. A `baseline` failure means the package's tests fail before any mutant is applied — fix those first.\n\n")
+	b.WriteString("These packages matched but produced no mutation results, so the scores above do not cover them. A `baseline` failure means the test binary fails outside any single test (for example in `TestMain`); the error says whether the unmodified code fails too.\n\n")
 	for _, e := range errs {
 		fmt.Fprintf(b, "### %s (%s)\n\n```\n%s\n```\n\n", e.Package, e.Stage, errorExcerpt(e.Error, errorExcerptLines))
 	}
+}
+
+func writeLLMExcluded(b *strings.Builder, tests []ExcludedTest) {
+	if len(tests) == 0 {
+		return
+	}
+	b.WriteString("## Tests excluded\n\n")
+	b.WriteString("These tests fail without any mutant applied, so they were not run against mutants and their kills are not counted. Fix them to bring them back into the analysis.\n\n")
+	for _, t := range tests {
+		fmt.Fprintf(b, "- `%s`: %s\n", qualifyTestName(t.Package, t.Test), t.Reason)
+	}
+	b.WriteString("\n")
 }
 
 func writeLLMTestInventory(b *strings.Builder, tests []mutation.TestStats) {
@@ -693,6 +718,17 @@ func WriteText(w io.Writer, r Report) error {
 		for _, e := range r.Errors {
 			excerpt := strings.ReplaceAll(errorExcerpt(e.Error, errorExcerptLines), "\n", "\n    ")
 			if _, err := fmt.Fprintf(w, "  %s [%s]: %s\n", e.Package, e.Stage, excerpt); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(r.ExcludedTests) > 0 {
+		if _, err := fmt.Fprintf(w, "\nTests excluded (%d):\n", len(r.ExcludedTests)); err != nil {
+			return err
+		}
+		for _, t := range r.ExcludedTests {
+			if _, err := fmt.Fprintf(w, "  %s: %s\n", qualifyTestName(t.Package, t.Test), t.Reason); err != nil {
 				return err
 			}
 		}
