@@ -457,7 +457,9 @@ func TestComputeUsesMergeBaseAndUntracked(t *testing.T) {
 	if got := d.Files(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Files() = %v, want %v (b.go changed only on main)", got, want)
 	}
-	if !d.Includes(filepath.Join(repo, "new.go"), 3) {
-		t.Error("untracked new.go line 3 not included")
+	for _, line := range []int{1, 3} {
+		if !d.Includes(filepath.Join(repo, "new.go"), line) {
+			t.Errorf("untracked new.go line %d not included", line)
+		}
 	}
 }

@@ -1088,3 +1088,73 @@ func TestRunTagsAndShort(t *testing.T) {
 		t.Errorf("with --short, Double: %v, want [not_covered] (its only test skips)", got)
 	}
 }
+
+func TestRunRejectsUnknownFormat(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=xml", "."}, &stdout, &stderr); code != 2 {
+		t.Errorf("exit code %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--format: must be text, json, llm or sarif") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// --min-score gates on the score including not-covered mutants; --quiet
+// silences progress.
+func TestRunMinScoreAndQuiet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/sample") // 1 of 2 mutants killed: 50%
+	tests := []struct {
+		args     []string
+		wantCode int
+	}{
+		{[]string{"--min-score=50"}, 0},
+		{[]string{"--min-score=60"}, 3},
+	}
+	for _, tt := range tests {
+		var stdout, stderr bytes.Buffer
+		if code := run(append(tt.args, dir), &stdout, &stderr); code != tt.wantCode {
+			t.Errorf("%v: exit code %d, want %d; stderr: %s", tt.args, code, tt.wantCode, stderr.String())
+		}
+		if tt.wantCode == 3 && !strings.Contains(stderr.String(), "is 50.0%, below --min-score=60") {
+			t.Errorf("%v: stderr does not explain the failure: %s", tt.args, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "kanly: github.com/devenjarvis/kanly/internal/runner/testdata/sample: done in") {
+			t.Errorf("%v: no progress on stderr: %s", tt.args, stderr.String())
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--quiet", dir}, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Errorf("--quiet: exit %d, stderr %q; want 0 and empty", code, stderr.String())
+	}
+	if code := run([]string{"--min-score=101", dir}, &stdout, &stderr); code != 2 {
+		t.Errorf("--min-score=101: exit %d, want 2", code)
+	}
+}
+
+func TestRunSARIF(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/sample")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=sarif", "--quiet", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, stderr.String())
+	}
+	var log struct {
+		Version string `json:"version"`
+		Runs    []struct {
+			Results []struct {
+				RuleID string `json:"ruleId"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &log); err != nil {
+		t.Fatalf("parse SARIF: %v\n%s", err, stdout.String())
+	}
+	if log.Version != "2.1.0" || len(log.Runs) != 1 || len(log.Runs[0].Results) != 1 || log.Runs[0].Results[0].RuleID != "int_arith" {
+		t.Errorf("SARIF = %s", stdout.String())
+	}
+}

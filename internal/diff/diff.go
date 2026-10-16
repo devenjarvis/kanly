@@ -85,6 +85,10 @@ func Compute(workDir, base string) (*Diff, error) {
 	for _, rel := range strings.Split(string(untracked), "\x00") {
 		if rel != "" {
 			f := filepath.Join(root, filepath.FromSlash(rel))
+			// Lines start at 1, so the int_literal mutants Start 1→0 and
+			// 1→-1 are equivalent; 1→2 is pinned by a line-1 assertion in
+			// TestComputeUsesMergeBaseAndUntracked.
+			//kanly:ignore int_literal -- equivalent mutants
 			d.byFile[f] = append(d.byFile[f], LineRange{Start: 1, End: math.MaxInt})
 		}
 	}

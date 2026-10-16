@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -59,6 +61,7 @@ type runConfig struct {
 	operators     map[string]bool // if non-nil, only these operators' mutants run
 	buildFlags    []string        // extra `go test -c` flags (-tags)
 	testArgs      []string        // extra test binary flags (-test.short)
+	progress      *progress       // informational output
 	jobs          int             // worker pool size for per-test coverage and the mutant loop; >= 1
 	verifyKills   bool            // re-run every killed mutant alone to confirm the kill
 }
@@ -241,6 +244,22 @@ func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(r m
 	return nil
 }
 
+// progress writes informational lines to stderr unless --quiet is set. It
+// is safe for concurrent use.
+type progress struct {
+	mu sync.Mutex
+	w  io.Writer // nil when quiet
+}
+
+func (p *progress) printf(format string, args ...any) {
+	if p == nil || p.w == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fmt.Fprintf(p.w, "kanly: "+format+"\n", args...)
+}
+
 // pkgResult is what one package's pipeline contributes to the report.
 type pkgResult struct {
 	results    []mutation.Result
@@ -261,6 +280,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 
 	funcRanges := schema.FuncRanges(pkg)
+	start := time.Now()
 
 	// Narrow by --mutant IDs after schema assignment. The dispatcher keeps all
 	// cases; un-listed IDs simply never get activated.
@@ -278,6 +298,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		}
 	}
 
+	cfg.progress.printf("%s: %d mutants; compiling", pkg.ImportPath, len(mutations))
 	overlayPath, cleanOverlay, err := runner.BuildOverlay(rew, pkg.Dir)
 	if err != nil {
 		return pkgResult{}, &stageError{"rewrite", fmt.Errorf("build overlay: %w", err)}
@@ -315,6 +336,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		}()
 	}
 
+	cfg.progress.printf("%s: running the tests unmutated", pkg.ImportPath)
 	baseline, excluded, err := establishBaseline(ctx, binaryPath, covBinaryPath, pkg.Dir, cfg)
 	if err != nil {
 		return pkgResult{}, &stageError{"baseline", err}
@@ -370,6 +392,18 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		}
 	}
 
+	covered := 0
+	for _, tests := range perMut {
+		if len(tests) > 0 {
+			covered++
+		}
+	}
+	cfg.progress.printf("%s: testing %d covered mutants (%d not covered) with %d test(s)", pkg.ImportPath, covered, len(mutations)-covered, len(inventory))
+	var done atomic.Int64
+	reportEvery := max(covered/10, 1)
+	lastReport := time.Now()
+	var reportMu sync.Mutex
+
 	results := make([]mutation.Result, len(mutations))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(cfg.jobs)
@@ -397,6 +431,13 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 				CoveringTests: tests,
 				Duration:      dur,
 			}
+			n := int(done.Add(1))
+			reportMu.Lock()
+			if n < covered && (n%reportEvery == 0 || time.Since(lastReport) > 30*time.Second) {
+				lastReport = time.Now()
+				cfg.progress.printf("%s: %d/%d mutants tested", pkg.ImportPath, n, covered)
+			}
+			reportMu.Unlock()
 			return nil
 		})
 	}
@@ -418,6 +459,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	if err := confirmVerdicts(results, cfg.verifyKills, rerun); err != nil {
 		return pkgResult{}, &stageError{"mutants", err}
 	}
+	cfg.progress.printf("%s: done in %s", pkg.ImportPath, time.Since(start).Round(100*time.Millisecond))
 
 	// When a scope is active (filter or --mutant), drop tests from the reported
 	// inventory that don't cover any kept mutation. This keeps "zero_kill_tests"
@@ -437,12 +479,14 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--version] [--format=text|json|llm] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	versionFlag := fs.Bool("version", false, "print version and exit")
-	formatFlag := fs.String("format", "text", "output format: text|json|llm")
+	formatFlag := fs.String("format", "text", "output format: text|json|llm|sarif")
+	minScoreFlag := fs.Float64("min-score", 0, "exit 3 when the score including not-covered mutants is below this percentage")
+	quietFlag := fs.Bool("quiet", false, "print no progress to stderr; errors and warnings are still printed")
 	timeoutFlag := fs.Duration("timeout", 0, "fixed per-mutant test timeout; 0 derives each mutant's timeout from the baseline run time of the tests it runs")
 	timeoutFactorFlag := fs.Float64("timeout-factor", defaultTimeoutFactor, "for derived timeouts, the multiple of the tests' baseline run time a mutant may take")
 	diffFlag := fs.Bool("diff", false, "only mutate lines changed since --diff-base")
@@ -465,6 +509,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *versionFlag {
 		fmt.Fprintf(stdout, "kanly %s\n", resolveVersion())
 		return 0
+	}
+
+	switch *formatFlag {
+	case "text", "json", "llm", "sarif":
+	default:
+		fmt.Fprintf(stderr, "--format: must be text, json, llm or sarif, got %q\n", *formatFlag)
+		return 2
+	}
+	if *minScoreFlag < 0 || *minScoreFlag > 100 {
+		fmt.Fprintf(stderr, "--min-score: must be between 0 and 100, got %v\n", *minScoreFlag)
+		return 2
+	}
+	prog := &progress{w: stderr}
+	if *quietFlag {
+		prog.w = nil
 	}
 
 	if *timeoutFlag < 0 {
@@ -597,7 +656,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		for _, pkg := range pkgs {
 			testFiles, err := filepath.Glob(filepath.Join(pkg.Dir, "*_test.go"))
 			if err != nil || len(testFiles) == 0 {
-				fmt.Fprintf(stderr, "skip %s: no test files\n", pkg.ImportPath)
+				prog.printf("skip %s: no test files", pkg.ImportPath)
 				continue
 			}
 
@@ -617,6 +676,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				operators:     operatorSet,
 				buildFlags:    buildFlags,
 				testArgs:      testArgs,
+				progress:      prog,
 				jobs:          *jobsFlag,
 				verifyKills:   *verifyKillsFlag,
 			}
@@ -632,7 +692,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				continue
 			}
 			if len(res.results) == 0 {
-				fmt.Fprintf(stderr, "skip %s: no mutations\n", pkg.ImportPath)
+				prog.printf("skip %s: no mutations", pkg.ImportPath)
 				continue
 			}
 			excludedTests = append(excludedTests, res.excluded...)
@@ -666,6 +726,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// The report is complete for every other package, but the run is
 		// not: never let a partial result pass as success.
 		return 1
+	}
+	if got := rep.Summary.ScoreWithUncovered * 100; rep.Summary.Total > 0 && got < *minScoreFlag {
+		fmt.Fprintf(stderr, "kanly: score including not-covered mutants is %.1f%%, below --min-score=%v\n", got, *minScoreFlag)
+		return 3
 	}
 	return 0
 }
@@ -929,6 +993,11 @@ func writeReport(stdout, stderr io.Writer, format string, r report.Report, llmSr
 	case "json":
 		if err := report.WriteJSON(stdout, r); err != nil {
 			fmt.Fprintf(stderr, "write JSON: %v\n", err)
+			return 1
+		}
+	case "sarif":
+		if err := report.WriteSARIF(stdout, r, resolveVersion()); err != nil {
+			fmt.Fprintf(stderr, "write sarif: %v\n", err)
 			return 1
 		}
 	case "llm":

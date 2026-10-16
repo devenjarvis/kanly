@@ -454,10 +454,10 @@ func TestWriteText(t *testing.T) {
 	}
 
 	// Per-package summary lines must appear.
-	if !strings.Contains(out, "Package: example.com/pkg/foo | Total: 2 | Killed: 2 | Survived: 0 | Timeout: 0 | Score: 100.0%") {
+	if !strings.Contains(out, "Package: example.com/pkg/foo | Total: 2 | Killed: 2 | Survived: 0 | Timeout: 0 | Not covered: 0 | Score: 100.0% (100.0% incl. not covered)") {
 		t.Errorf("per-package foo summary missing or malformed:\n%s", out)
 	}
-	if !strings.Contains(out, "Package: example.com/pkg/bar | Total: 1 | Killed: 0 | Survived: 1 | Timeout: 0 | Score: 0.0%") {
+	if !strings.Contains(out, "Package: example.com/pkg/bar | Total: 1 | Killed: 0 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 0.0% (0.0% incl. not covered)") {
 		t.Errorf("per-package bar summary missing or malformed:\n%s", out)
 	}
 
@@ -862,5 +862,40 @@ func TestExcludedTestsInReports(t *testing.T) {
 	}
 	if strings.Contains(empty.String(), "excluded_tests") {
 		t.Error("json output must omit excluded_tests when none were excluded")
+	}
+}
+
+// Text output lists survived and not-covered mutants sorted by location,
+// with notes, and reports both scores and the ignored count.
+func TestWriteTextUnkilledSections(t *testing.T) {
+	mk := func(id int, file string, line int, status mutation.Status, note string) mutation.Result {
+		return mutation.Result{
+			Mutation: mutation.Mutation{ID: id, Package: "p", File: file, Line: line, Column: 2, OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:   status,
+			Note:     note,
+		}
+	}
+	r := report.Build([]mutation.Result{
+		mk(1, "b.go", 9, mutation.StatusSurvived, ""),
+		mk(2, "a.go", 7, mutation.StatusNotCovered, ""),
+		mk(3, "a.go", 3, mutation.StatusSurvived, "killed in the parallel run but survived when re-run alone"),
+		mk(4, "a.go", 1, mutation.StatusKilled, ""),
+	}, nil)
+	r.Summary.Ignored = 5
+	var buf bytes.Buffer
+	if err := report.WriteText(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	want := "Survived (tests ran the mutated code but none failed):\n" +
+		"  a.go:3:2 [int_arith] +→- (id 3) — killed in the parallel run but survived when re-run alone\n" +
+		"  b.go:9:2 [int_arith] +→- (id 1)\n\n" +
+		"Not covered (no test runs the mutated code):\n" +
+		"  a.go:7:2 [int_arith] +→- (id 2)\n\n"
+	if !strings.HasPrefix(out, want) {
+		t.Errorf("unkilled sections:\ngot:\n%s\nwant prefix:\n%s", out, want)
+	}
+	if !strings.Contains(out, "\nTotal: 4 | Killed: 1 | Survived: 2 | Timeout: 0 | Not covered: 1 | Score: 33.3% (25.0% incl. not covered) | Ignored: 5\n") {
+		t.Errorf("total line missing or malformed:\n%s", out)
 	}
 }
