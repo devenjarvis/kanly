@@ -152,6 +152,27 @@ func explainBaselineFailure(ctx context.Context, origBin, dir string, cfg runCon
 	return fmt.Errorf("tests fail with no mutant applied:\n%s", tf.Output)
 }
 
+// displayPaths returns paths relative to the working directory when they
+// lie under it.
+func displayPaths(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = displayPath(p)
+	}
+	return out
+}
+
+func displayPath(p string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return p
+	}
+	if rel, err := filepath.Rel(cwd, p); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return p
+}
+
 func toSet(names []string) map[string]bool {
 	set := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -271,6 +292,23 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		return pkgResult{}, &stageError{"compile", fmt.Errorf("coverage binary: %w", err)}
 	}
 	defer cleanCovBin()
+
+	// Mutants run in the real checkout. Undo what they leave behind in the
+	// package directory, and warn about what cannot be undone.
+	if snap, err := runner.SnapshotDir(pkg.Dir); err == nil {
+		defer func() {
+			removed, changed, err := snap.Restore()
+			if err != nil {
+				fmt.Fprintf(stderr, "warning: %s: checking for files changed by tests: %v\n", pkg.ImportPath, err)
+			}
+			if len(removed) > 0 {
+				fmt.Fprintf(stderr, "%s: removed %d file(s) that tests created: %s\n", pkg.ImportPath, len(removed), strings.Join(displayPaths(removed), ", "))
+			}
+			if len(changed) > 0 {
+				fmt.Fprintf(stderr, "warning: %s: tests modified or deleted %d file(s); check them before committing: %s\n", pkg.ImportPath, len(changed), strings.Join(displayPaths(changed), ", "))
+			}
+		}()
+	}
 
 	baseline, excluded, err := establishBaseline(ctx, binaryPath, covBinaryPath, pkg.Dir, cfg)
 	if err != nil {

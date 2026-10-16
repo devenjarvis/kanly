@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"time"
 )
@@ -25,10 +27,23 @@ func testCommand(ctx context.Context, binary string, args ...string) *exec.Cmd {
 }
 
 // runTestCommand runs cmd (from testCommand) and returns its combined output.
+// The process gets a private, freshly created temporary directory, removed
+// afterwards: files tests leave in os.TempDir do not pile up, and concurrent
+// runs of the same test cannot collide over a fixed temporary path.
 // Processes the tests left behind are killed once the binary exits. A binary
 // that passed but left a subprocess holding its output pipe is a pass: the
 // leftover pipe is not the tests' verdict.
 func runTestCommand(cmd *exec.Cmd) ([]byte, error) {
+	tmp, err := os.MkdirTemp("", "kanly-run-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, "TMPDIR="+tmp, "TMP="+tmp, "TEMP="+tmp)
+
 	out, err := cmd.CombinedOutput()
 	killProcessGroup(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {

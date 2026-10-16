@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -873,5 +874,29 @@ func TestRunVerifyKills(t *testing.T) {
 	}
 	if got := statuses("--verify-kills", dir); !reflect.DeepEqual(got, []string{"survived"}) {
 		t.Errorf("with --verify-kills: statuses %v, want [survived]", got)
+	}
+}
+
+// Files that mutants make tests create in the package directory are
+// removed, and each test process gets a private temporary directory.
+func TestRunCleansUpFilesTestsCreate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/fswrite")
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "fswrite-result.txt")); !os.IsNotExist(err) {
+		t.Errorf("file written into the package directory by a mutant was not removed (stat: %v)", err)
+	}
+	if !strings.Contains(stderr.String(), "removed 1 file(s) that tests created") {
+		t.Errorf("stderr does not report the removal:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "fswrite-leftover")); !os.IsNotExist(err) {
+		t.Errorf("a test's leftover temporary file reached the real TMPDIR (stat: %v)", err)
 	}
 }
