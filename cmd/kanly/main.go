@@ -94,14 +94,21 @@ type stageError struct {
 func (e *stageError) Error() string { return e.stage + ": " + e.err.Error() }
 func (e *stageError) Unwrap() error { return e.err }
 
-func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) ([]mutation.Result, []string, []string, map[string]mutation.FuncRange, error) {
+// pkgResult is what one package's pipeline contributes to the report.
+type pkgResult struct {
+	results    []mutation.Result
+	inventory  []string                      // tests reported for the package
+	funcRanges map[string]mutation.FuncRange // canonical func name → source range
+}
+
+func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) (pkgResult, error) {
 	rew, err := schema.Rewrite(pkg, ops, cfg.filter)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"rewrite", err}
+		return pkgResult{}, &stageError{"rewrite", err}
 	}
 
 	if len(rew.Mutations) == 0 {
-		return nil, nil, nil, nil, nil
+		return pkgResult{}, nil
 	}
 
 	funcRanges := schema.FuncRanges(pkg)
@@ -118,19 +125,19 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		}
 		mutations = filtered
 		if len(mutations) == 0 {
-			return nil, nil, nil, nil, nil
+			return pkgResult{}, nil
 		}
 	}
 
 	overlayPath, cleanOverlay, err := runner.BuildOverlay(rew, pkg.Dir)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"rewrite", fmt.Errorf("build overlay: %w", err)}
+		return pkgResult{}, &stageError{"rewrite", fmt.Errorf("build overlay: %w", err)}
 	}
 	defer cleanOverlay()
 
 	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"compile", err}
+		return pkgResult{}, &stageError{"compile", err}
 	}
 	defer cleanBin()
 
@@ -138,13 +145,13 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// for per-test coverage collection. See CompileCoverageBinary for why.
 	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"compile", fmt.Errorf("coverage binary: %w", err)}
+		return pkgResult{}, &stageError{"compile", fmt.Errorf("coverage binary: %w", err)}
 	}
 	defer cleanCovBin()
 
 	baseline, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, cfg.setupTimeout(), cfg.testsRegex)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"baseline", err}
+		return pkgResult{}, &stageError{"baseline", err}
 	}
 
 	inventory := baseline.Tests
@@ -152,33 +159,20 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// Collect per-test coverage once; pays off across all mutants.
 	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.setupTimeout(), cfg.jobs)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"coverage", err}
-	}
-
-	// Per-test profile across the kept mutation set: how many distinct
-	// (mutation file, line) pairs does each test touch. Used by the
-	// incidental-coverage filter — a test whose only contact with the scope
-	// is a single hit on a single line, when some other test hits that line
-	// harder, almost certainly reached it via shared setup or a helper call
-	// rather than via an assertion. We drop those from the per-mutant set so
-	// they don't (a) burn a `go test` invocation on a mutant they cannot
-	// kill or (b) land in zero-kill noise.
-	diffLinesByTest := make(map[string]int)
-	for _, mut := range mutations {
-		key := runner.FileLine{File: mut.File, Line: mut.Line}
-		for _, th := range covMap[key] {
-			diffLinesByTest[th.Name]++
-		}
+		return pkgResult{}, &stageError{"coverage", err}
 	}
 
 	// Per-mutant covering tests are read out up front so the parallel loop
-	// below does not touch covMap concurrently and so we can populate the
-	// `relevant` set (used to narrow the reported inventory) before any
+	// below does not touch covMap concurrently and so the `relevant` set
+	// (used to narrow the reported inventory) is complete before any
 	// goroutine starts. Indexed slices preserve schema-ID order across the
 	// parallel phase, keeping JSON output byte-identical to --jobs=1.
+	//
+	// Every covering test runs against the mutant, in scoped runs too:
+	// dropping a test by its hit count changes the verdict, since the one
+	// test that asserts on a line may well execute it only once.
 	perMut := make([][]string, len(mutations))
 	relevant := make(map[string]bool)
-	incidental := make(map[string]bool)
 	for i, mut := range mutations {
 		hits := covMap[runner.FileLine{File: mut.File, Line: mut.Line}]
 		if mut.PackageInit && len(hits) == 0 {
@@ -188,37 +182,11 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 				hits = append(hits, runner.TestHit{Name: name})
 			}
 		}
-		maxHits := 0
 		for _, th := range hits {
-			if th.Hits > maxHits {
-				maxHits = th.Hits
-			}
-		}
-		var kept []string
-		for _, th := range hits {
-			// Only drop when a scope is active: full runs preserve the
-			// existing covering-tests behavior so non-diff reports stay
-			// byte-identical to prior versions. The `maxHits > 1` guard
-			// keeps a lone single-hit test that is the only signal we
-			// have for the line.
-			if cfg.filter != nil && maxHits > 1 && th.Hits == 1 && diffLinesByTest[th.Name] == 1 {
-				incidental[th.Name] = true
-				continue
-			}
-			kept = append(kept, th.Name)
+			perMut[i] = append(perMut[i], th.Name)
 			relevant[th.Name] = true
 		}
-		perMut[i] = kept
 	}
-
-	// A test is marked incidental iff it touches exactly one diff line and
-	// is dropped from that line's covering set, so `incidental` and
-	// `relevant` are disjoint by construction.
-	incidentalNames := make([]string, 0, len(incidental))
-	for name := range incidental {
-		incidentalNames = append(incidentalNames, name)
-	}
-	sort.Strings(incidentalNames)
 
 	results := make([]mutation.Result, len(mutations))
 	g, gctx := errgroup.WithContext(ctx)
@@ -251,7 +219,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, nil, nil, nil, &stageError{"mutants", err}
+		return pkgResult{}, &stageError{"mutants", err}
 	}
 
 	// When a scope is active (filter or --mutant), drop tests from the reported
@@ -268,7 +236,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		inventory = narrowed
 	}
 
-	return results, inventory, incidentalNames, funcRanges, nil
+	return pkgResult{results: results, inventory: inventory, funcRanges: funcRanges}, nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -345,14 +313,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		diffPred = d.Includes
 		if len(d.Files()) == 0 {
-			return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil, nil), report.LLMSource{})
+			return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil), report.LLMSource{})
 		}
 		if len(specs) == 0 {
 			for _, p := range d.Patterns(cwd) {
 				specs = append(specs, selector.Spec{Pattern: p})
 			}
 			if len(specs) == 0 {
-				return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil, nil), report.LLMSource{})
+				return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil), report.LLMSource{})
 			}
 		}
 	} else if len(specs) == 0 {
@@ -369,7 +337,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	var allResults []mutation.Result
 	testInventory := make(map[string][]string)
-	incidentalByPkg := make(map[string][]string)
 	funcRangesByPkg := make(map[string]map[string]mutation.FuncRange)
 
 	// A package that fails is recorded and the run moves on, so one broken
@@ -426,7 +393,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				jobs:          *jobsFlag,
 			}
 
-			results, inventory, incidental, funcRanges, err := runPackage(ctx, pkg, ops, cfg, stderr)
+			res, err := runPackage(ctx, pkg, ops, cfg, stderr)
 			if err != nil {
 				var se *stageError
 				if errors.As(err, &se) {
@@ -436,20 +403,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 				}
 				continue
 			}
-			if len(results) == 0 {
+			if len(res.results) == 0 {
 				fmt.Fprintf(stderr, "skip %s: no mutations\n", pkg.ImportPath)
 				continue
 			}
-			allResults = append(allResults, results...)
-			testInventory[pkg.ImportPath] = inventory
-			if len(incidental) > 0 {
-				incidentalByPkg[pkg.ImportPath] = incidental
-			}
-			funcRangesByPkg[pkg.ImportPath] = funcRanges
+			allResults = append(allResults, res.results...)
+			testInventory[pkg.ImportPath] = res.inventory
+			funcRangesByPkg[pkg.ImportPath] = res.funcRanges
 		}
 	}
 
-	rep := report.Build(allResults, testInventory, incidentalByPkg)
+	rep := report.Build(allResults, testInventory)
 	rep.Scope = describeScope(specs, *diffFlag, *diffBaseFlag, *testsFlag, *mutantFlag)
 	rep.Errors = pkgErrors
 	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg}

@@ -286,81 +286,46 @@ func equalStringsSorted(a, b []string) bool {
 	return true
 }
 
-// TestIncidentalCoverageDroppedFromScopedRun verifies the diff-line incidental
-// filter end-to-end. The incidentalsample fixture has TestAddTable (3 hits on
-// Add's return line) and TestHelperBehavior (1 hit, only via Helper's setup
-// call). When scoped to :Add, the filter must:
-//   - drop TestHelperBehavior from the Add mutant's CoveringTests (because
-//     maxHits == 3 > 1 and TestHelperBehavior touches only one scoped line
-//     with hits == 1),
-//   - surface it in incidental_coverage_tests instead of zero_kill_tests.
-func TestIncidentalCoverageDroppedFromScopedRun(t *testing.T) {
+// TestScopedRunKeepsSingleHitTests guards against narrowing a mutant's
+// covering tests by hit count. TestEnable executes Enable once and is the
+// only test that asserts on it; TestBulk executes it five times and asserts
+// nothing. A scoped run must reach the same verdict as a full run.
+func TestScopedRunKeepsSingleHitTests(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	sampleDir := relDir(t, "../../internal/runner/testdata/incidentalsample")
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--format=json", sampleDir + ":Add"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
-	}
-
-	var result struct {
-		ZeroKillTests           []string `json:"zero_kill_tests"`
-		IncidentalCoverageTests []string `json:"incidental_coverage_tests"`
-		Mutants                 []struct {
-			Mutation struct {
-				Function string `json:"function"`
-			} `json:"mutation"`
-			Status        string   `json:"status"`
-			CoveringTests []string `json:"covering_tests"`
-			KillingTests  []string `json:"killing_tests"`
-		} `json:"mutants"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
-	}
-
-	const wantIncidental = "github.com/devenjarvis/kanly/internal/runner/testdata/incidentalsample.TestHelperBehavior"
-	if !containsString(result.IncidentalCoverageTests, wantIncidental) {
-		t.Errorf("incidental_coverage_tests: want %q in %v", wantIncidental, result.IncidentalCoverageTests)
-	}
-	if containsString(result.ZeroKillTests, wantIncidental) {
-		t.Errorf("zero_kill_tests must not contain incidental test %q; got %v", wantIncidental, result.ZeroKillTests)
-	}
-
-	// The single Add mutation should have run only against TestAddTable.
-	if len(result.Mutants) != 1 {
-		t.Fatalf("expected exactly 1 mutation under :Add scope, got %d", len(result.Mutants))
-	}
-	m := result.Mutants[0]
-	if m.Mutation.Function != "Add" {
-		t.Errorf("mutant function: want Add, got %q", m.Mutation.Function)
-	}
-	if !equalStringsSorted(m.CoveringTests, []string{"TestAddTable"}) {
-		t.Errorf("covering_tests: want [TestAddTable], got %v", m.CoveringTests)
-	}
-}
-
-// TestIncidentalFilterInactiveOnFullRun is the regression guard for the
-// "applied only when a scope is active" invariant: on a full run, the
-// incidental filter must NOT fire, and incidental_coverage_tests must be
-// omitted from the JSON entirely.
-func TestIncidentalFilterInactiveOnFullRun(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	sampleDir := relDir(t, "../../internal/runner/testdata/incidentalsample")
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--format=json", sampleDir}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
-	}
-
-	if strings.Contains(stdout.String(), "incidental_coverage_tests") {
-		t.Errorf("full run JSON must omit incidental_coverage_tests key, got:\n%s", stdout.String())
+	sampleDir := relDir(t, "../../internal/runner/testdata/singlehitsample")
+	for _, arg := range []string{sampleDir, sampleDir + ":Enable"} {
+		t.Run(filepath.Base(arg), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"--format=json", arg}, &stdout, &stderr); code != 0 {
+				t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+			}
+			var result struct {
+				Mutants []struct {
+					Status        string   `json:"status"`
+					CoveringTests []string `json:"covering_tests"`
+					KillingTests  []string `json:"killing_tests"`
+				} `json:"mutants"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+			}
+			if len(result.Mutants) != 1 {
+				t.Fatalf("want 1 mutant, got %d", len(result.Mutants))
+			}
+			m := result.Mutants[0]
+			if m.Status != "killed" {
+				t.Errorf("status: want killed, got %s (covering %v)", m.Status, m.CoveringTests)
+			}
+			if !equalStringsSorted(m.CoveringTests, []string{"TestBulk", "TestEnable"}) {
+				t.Errorf("covering_tests: want [TestBulk TestEnable], got %v", m.CoveringTests)
+			}
+			if !equalStringsSorted(m.KillingTests, []string{"TestEnable"}) {
+				t.Errorf("killing_tests: want [TestEnable], got %v", m.KillingTests)
+			}
+		})
 	}
 }
 

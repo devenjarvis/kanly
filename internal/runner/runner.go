@@ -28,8 +28,8 @@ type FileLine struct {
 
 // TestHit records one test's coverage on a specific line. Hits is the summed
 // execution count across all cover blocks whose [StartLine, EndLine] span
-// includes the line — a per-test value, distinguishing setup-style traffic
-// (Hits == 1) from heavily-exercised assertion paths (Hits >> 1).
+// includes the line. A hit count says nothing about whether the test asserts
+// on the line, so it must not be used to decide which tests run a mutant.
 type TestHit struct {
 	Name string
 	Hits int
@@ -133,11 +133,7 @@ func CompileCoverageBinary(ctx context.Context, pkgPath string) (binaryPath stri
 
 	binPath := filepath.Join(tmpDir, "covbin")
 	// -covermode=count records per-block execution counts (not just 0/1 as
-	// the default `set` mode does). The CLI uses those counts to distinguish
-	// incidental coverage (a line touched once via a helper/setup path) from
-	// assertion-bearing coverage (a line exercised many times by a table-
-	// driven test) when narrowing the per-mutant test set under --diff or
-	// pkg:func scope.
+	// the default `set` mode does); they are reported as TestHit.Hits.
 	cmd := exec.CommandContext(ctx,
 		"go", "test", "-c",
 		"-vet=off",

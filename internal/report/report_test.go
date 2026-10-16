@@ -54,7 +54,7 @@ func makeInventory() map[string][]string {
 }
 
 func TestBuildAggregatesPerPackage(t *testing.T) {
-	r := report.Build(makeResults(), makeInventory(), nil)
+	r := report.Build(makeResults(), makeInventory())
 
 	if len(r.Packages) != 2 {
 		t.Fatalf("Packages: want 2, got %d", len(r.Packages))
@@ -95,7 +95,7 @@ func TestBuildAggregatesPerPackage(t *testing.T) {
 
 func TestBuildComputesScore(t *testing.T) {
 	results := makeResults()
-	r := report.Build(results, makeInventory(), nil)
+	r := report.Build(results, makeInventory())
 
 	if r.Summary.Total != 3 {
 		t.Errorf("Total: want 3, got %d", r.Summary.Total)
@@ -128,7 +128,7 @@ func TestBuildScoreCountsTimeoutsAsDetected(t *testing.T) {
 			Status:   st,
 		})
 	}
-	r := report.Build(results, nil, nil)
+	r := report.Build(results, nil)
 	if want := 2.0 / 4.0; math.Abs(r.Summary.Score-want) > 1e-9 {
 		t.Errorf("Summary.Score: want %v, got %v", want, r.Summary.Score)
 	}
@@ -138,7 +138,7 @@ func TestBuildScoreCountsTimeoutsAsDetected(t *testing.T) {
 }
 
 func TestBuildAggregatesTestStats(t *testing.T) {
-	r := report.Build(makeResults(), makeInventory(), nil)
+	r := report.Build(makeResults(), makeInventory())
 
 	// Inventory has 3 tests total: TestAdd, TestSub (foo), TestMul (bar).
 	if len(r.Tests) != 3 {
@@ -165,7 +165,7 @@ func TestBuildAggregatesTestStats(t *testing.T) {
 }
 
 func TestBuildZeroKillTests(t *testing.T) {
-	r := report.Build(makeResults(), makeInventory(), nil)
+	r := report.Build(makeResults(), makeInventory())
 
 	// TestMul is in inventory but appears in no KillingTests list.
 	if len(r.ZeroKillTests) != 1 {
@@ -192,7 +192,7 @@ func TestBuildRedundantTestGroups(t *testing.T) {
 	// Without C in KillingTests for mutant 1, C's kill-set is {2}; A and B share {1,2}.
 
 	inventory := map[string][]string{"p": {"TestA", "TestB", "TestC"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 
 	if len(r.RedundantTestGroups) != 1 {
 		t.Fatalf("RedundantTestGroups: want 1 group, got %d (%v)", len(r.RedundantTestGroups), r.RedundantTestGroups)
@@ -221,14 +221,14 @@ func TestBuildRedundantTestGroupsArePerPackage(t *testing.T) {
 		},
 	}
 	inventory := map[string][]string{"p": {"TestP"}, "q": {"TestQ"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 	if len(r.RedundantTestGroups) != 0 {
 		t.Errorf("RedundantTestGroups: want none across packages, got %v", r.RedundantTestGroups)
 	}
 }
 
 func TestBuildSurvivorsByFunction(t *testing.T) {
-	r := report.Build(makeResults(), makeInventory(), nil)
+	r := report.Build(makeResults(), makeInventory())
 
 	if len(r.SurvivorsByFunction) != 1 {
 		t.Fatalf("SurvivorsByFunction: want 1 group, got %d", len(r.SurvivorsByFunction))
@@ -244,7 +244,7 @@ func TestBuildSurvivorsByFunction(t *testing.T) {
 
 func TestWriteJSONStableFieldNames(t *testing.T) {
 	results := makeResults()
-	r := report.Build(results, makeInventory(), nil)
+	r := report.Build(results, makeInventory())
 
 	var buf bytes.Buffer
 	if err := report.WriteJSON(&buf, r); err != nil {
@@ -322,7 +322,7 @@ func TestWriteLLMGolden(t *testing.T) {
 		"example.com/pkg/foo": {"TestAdd", "TestAddSmoke"},
 		"example.com/pkg/bar": {"TestMul"},
 	}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 	r.Scope = "./..."
 
 	// Fake source content keyed by file path, returned by an injectable
@@ -375,7 +375,7 @@ func TestWriteLLMGolden(t *testing.T) {
 func TestWriteLLMEmpty(t *testing.T) {
 	// Empty report should still render every section so the LLM sees the
 	// full schema, even when there's nothing to act on.
-	r := report.Build(nil, nil, nil)
+	r := report.Build(nil, nil)
 	var buf bytes.Buffer
 	if err := report.WriteLLM(&buf, r, report.LLMSource{}); err != nil {
 		t.Fatal(err)
@@ -418,7 +418,7 @@ func TestWriteLLMMissingFuncRange(t *testing.T) {
 			CoveringTests: []string{"TestX"},
 		},
 	}
-	r := report.Build(results, map[string][]string{"p": {"TestX"}}, nil)
+	r := report.Build(results, map[string][]string{"p": {"TestX"}})
 	var buf bytes.Buffer
 	if err := report.WriteLLM(&buf, r, report.LLMSource{}); err != nil {
 		t.Fatal(err)
@@ -434,7 +434,7 @@ func TestWriteLLMMissingFuncRange(t *testing.T) {
 
 func TestWriteText(t *testing.T) {
 	results := makeResults()
-	r := report.Build(results, makeInventory(), nil)
+	r := report.Build(results, makeInventory())
 
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
@@ -500,92 +500,6 @@ func TestWriteText(t *testing.T) {
 	}
 }
 
-func TestIncidentalCoverageInReports(t *testing.T) {
-	// When the caller supplies an incidental map, those tests must surface as
-	// a qualified, sorted list in JSON, in the text renderer, and in the LLM
-	// renderer — and they must NOT bleed into zero_kill_tests.
-	results := makeResults()
-	incidental := map[string][]string{
-		"example.com/pkg/foo": {"TestHelper"},
-		"example.com/pkg/bar": {"TestAlsoHelper"},
-	}
-	r := report.Build(results, makeInventory(), incidental)
-
-	wantIncidental := []string{
-		"example.com/pkg/bar.TestAlsoHelper",
-		"example.com/pkg/foo.TestHelper",
-	}
-	if !equalStrings(r.IncidentalCoverageTests, wantIncidental) {
-		t.Errorf("IncidentalCoverageTests: want %v, got %v", wantIncidental, r.IncidentalCoverageTests)
-	}
-
-	for _, n := range r.IncidentalCoverageTests {
-		for _, z := range r.ZeroKillTests {
-			if n == z {
-				t.Errorf("incidental test %q also appears in zero_kill_tests: incidental and zero-kill must be disjoint", n)
-			}
-		}
-	}
-
-	var textBuf bytes.Buffer
-	if err := report.WriteText(&textBuf, r); err != nil {
-		t.Fatal(err)
-	}
-	textOut := textBuf.String()
-	if !strings.Contains(textOut, "Incidental coverage (excluded from kill analysis):") {
-		t.Errorf("text output missing incidental section:\n%s", textOut)
-	}
-	if !strings.Contains(textOut, "example.com/pkg/foo.TestHelper") {
-		t.Errorf("text output missing example.com/pkg/foo.TestHelper:\n%s", textOut)
-	}
-
-	var llmBuf bytes.Buffer
-	if err := report.WriteLLM(&llmBuf, r, report.LLMSource{}); err != nil {
-		t.Fatal(err)
-	}
-	llmOut := llmBuf.String()
-	if !strings.Contains(llmOut, "## Incidental coverage") {
-		t.Errorf("LLM output missing incidental heading:\n%s", llmOut)
-	}
-	if !strings.Contains(llmOut, "`example.com/pkg/foo.TestHelper`") {
-		t.Errorf("LLM output missing example.com/pkg/foo.TestHelper:\n%s", llmOut)
-	}
-}
-
-func TestIncidentalCoverageSilentWhenEmpty(t *testing.T) {
-	// On full / non-scoped runs the incidental field stays empty, the LLM
-	// section must be absent, the text renderer must not emit the header,
-	// and the JSON serialisation must omit the key entirely.
-	r := report.Build(makeResults(), makeInventory(), nil)
-	if r.IncidentalCoverageTests != nil {
-		t.Errorf("IncidentalCoverageTests must be nil on empty input, got %v", r.IncidentalCoverageTests)
-	}
-
-	var textBuf bytes.Buffer
-	if err := report.WriteText(&textBuf, r); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(textBuf.String(), "Incidental coverage") {
-		t.Errorf("text output must not contain incidental section when empty:\n%s", textBuf.String())
-	}
-
-	var llmBuf bytes.Buffer
-	if err := report.WriteLLM(&llmBuf, r, report.LLMSource{}); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(llmBuf.String(), "## Incidental coverage") {
-		t.Errorf("LLM output must not contain incidental heading when empty:\n%s", llmBuf.String())
-	}
-
-	var jsonBuf bytes.Buffer
-	if err := report.WriteJSON(&jsonBuf, r); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(jsonBuf.String(), "incidental_coverage_tests") {
-		t.Errorf("JSON output must omit incidental_coverage_tests when empty:\n%s", jsonBuf.String())
-	}
-}
-
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -618,7 +532,7 @@ func TestBuildScoreExcludesNotViable(t *testing.T) {
 		},
 	}
 	inventory := map[string][]string{"p": {"TestA"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 
 	if r.Summary.NotViable != 1 {
 		t.Errorf("NotViable: want 1, got %d", r.Summary.NotViable)
@@ -640,7 +554,7 @@ func TestBuildScoreZeroDenominator(t *testing.T) {
 			Status:   mutation.StatusNotCovered,
 		},
 	}
-	r := report.Build(results, nil, nil)
+	r := report.Build(results, nil)
 	if r.Summary.Score != 0.0 {
 		t.Errorf("Score: want 0.0 when denominator is zero, got %v", r.Summary.Score)
 	}
@@ -661,7 +575,7 @@ func TestBuildPerPackageNotCoveredCount(t *testing.T) {
 		},
 	}
 	inventory := map[string][]string{"p": {"TestA"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 
 	if len(r.Packages) != 1 {
 		t.Fatalf("Packages: want 1, got %d", len(r.Packages))
@@ -677,7 +591,7 @@ func TestBuildPerPackageNotCoveredCount(t *testing.T) {
 
 func TestWriteJSONIndented(t *testing.T) {
 	// WriteJSON must use SetIndent so the output has 2-space-indented lines.
-	r := report.Build(makeResults(), makeInventory(), nil)
+	r := report.Build(makeResults(), makeInventory())
 	var buf bytes.Buffer
 	if err := report.WriteJSON(&buf, r); err != nil {
 		t.Fatal(err)
@@ -700,7 +614,7 @@ func TestBuildSurvivorsSortedByLine(t *testing.T) {
 			Status:   mutation.StatusSurvived,
 		},
 	}
-	r := report.Build(results, nil, nil)
+	r := report.Build(results, nil)
 
 	if len(r.SurvivorsByFunction) != 1 {
 		t.Fatalf("SurvivorsByFunction: want 1 group, got %d", len(r.SurvivorsByFunction))
@@ -727,7 +641,7 @@ func TestBuildSurvivorsSortedByFunction(t *testing.T) {
 			Status:   mutation.StatusSurvived,
 		},
 	}
-	r := report.Build(results, nil, nil)
+	r := report.Build(results, nil)
 
 	if len(r.SurvivorsByFunction) != 2 {
 		t.Fatalf("SurvivorsByFunction: want 2 groups, got %d", len(r.SurvivorsByFunction))
@@ -742,7 +656,7 @@ func TestWriteTextTopKillersShowsBothKillers(t *testing.T) {
 	// Both TestAdd and TestSub each kill 1 mutant; both must appear in the
 	// top-killers section.  If the `len(topKillers) == 5` break fires too
 	// early (mutant: `!= 5`), only the first entry is emitted.
-	r := report.Build(makeResults(), makeInventory(), nil)
+	r := report.Build(makeResults(), makeInventory())
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
@@ -762,7 +676,7 @@ func TestWriteTextNoTopKillersSection(t *testing.T) {
 		},
 	}
 	inventory := map[string][]string{"p": {"TestA"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
@@ -783,7 +697,7 @@ func TestWriteTextNoZeroKillSection(t *testing.T) {
 		},
 	}
 	inventory := map[string][]string{"p": {"TestA"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
@@ -795,7 +709,7 @@ func TestWriteTextNoZeroKillSection(t *testing.T) {
 
 func TestWriteTextNoRedundantSection(t *testing.T) {
 	// makeResults produces no redundant groups; the section must be absent.
-	r := report.Build(makeResults(), makeInventory(), nil)
+	r := report.Build(makeResults(), makeInventory())
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
@@ -820,7 +734,7 @@ func TestWriteTextTopKillersExactlyOne(t *testing.T) {
 		},
 	}
 	inventory := map[string][]string{"p": {"TestA", "TestB"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
@@ -842,7 +756,7 @@ func TestWriteTextRedundantSectionAppears(t *testing.T) {
 		},
 	}
 	inventory := map[string][]string{"p": {"TestA", "TestB"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 	var buf bytes.Buffer
 	if err := report.WriteText(&buf, r); err != nil {
 		t.Fatal(err)
@@ -863,7 +777,7 @@ func TestQualifyTestNameEmptyPackage(t *testing.T) {
 		},
 	}
 	inventory := map[string][]string{"": {"TestA"}}
-	r := report.Build(results, inventory, nil)
+	r := report.Build(results, inventory)
 	if len(r.ZeroKillTests) != 1 {
 		t.Fatalf("ZeroKillTests: want 1, got %d (%v)", len(r.ZeroKillTests), r.ZeroKillTests)
 	}
@@ -876,7 +790,7 @@ func TestQualifyTestNameEmptyPackage(t *testing.T) {
 // visible in every format, so a partial run cannot read as a full one.
 func TestPackageErrorsRendered(t *testing.T) {
 	long := "tests fail with no mutant applied:\n" + strings.Repeat("    x_test.go:1: boom\n", 40)
-	r := report.Build(nil, nil, nil)
+	r := report.Build(nil, nil)
 	r.Errors = []report.PackageError{{Package: "example.com/p", Stage: "baseline", Error: long}}
 
 	var text bytes.Buffer
@@ -907,7 +821,7 @@ func TestPackageErrorsRendered(t *testing.T) {
 	}
 
 	var empty bytes.Buffer
-	if err := report.WriteJSON(&empty, report.Build(nil, nil, nil)); err != nil {
+	if err := report.WriteJSON(&empty, report.Build(nil, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(empty.String(), `"errors"`) {
