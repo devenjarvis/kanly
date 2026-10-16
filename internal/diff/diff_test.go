@@ -399,3 +399,65 @@ func TestComputeIntegration(t *testing.T) {
 		t.Errorf("Patterns() = %v, want [\".\"]", patterns)
 	}
 }
+
+// Compute diffs against the merge-base: changes that landed on the base
+// branch after the branch point are not the branch's changes. Untracked
+// files count as changed.
+func TestComputeUsesMergeBaseAndUntracked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping git integration test in short mode")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@e.x",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@e.x",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("config", "commit.gpgsign", "false")
+	write("a.go", "package a\n\nfunc A() int { return 1 }\n")
+	write("b.go", "package a\n\nfunc B() int { return 1 }\n")
+	git("add", ".")
+	git("commit", "-q", "-m", "init")
+
+	git("checkout", "-q", "-b", "feature")
+	write("a.go", "package a\n\nfunc A() int { return 2 }\n")
+	git("commit", "-q", "-am", "feature change")
+
+	git("checkout", "-q", "main")
+	write("b.go", "package a\n\nfunc B() int { return 3 }\n")
+	git("commit", "-q", "-am", "main moved on")
+	git("checkout", "-q", "feature")
+
+	write("new.go", "package a\n\nfunc N() int { return 4 }\n")
+
+	d, err := diff.Compute(repo, "main")
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	want := []string{filepath.Join(repo, "a.go"), filepath.Join(repo, "new.go")}
+	if got := d.Files(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Files() = %v, want %v (b.go changed only on main)", got, want)
+	}
+	if !d.Includes(filepath.Join(repo, "new.go"), 3) {
+		t.Error("untracked new.go line 3 not included")
+	}
+}

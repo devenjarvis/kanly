@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -34,7 +35,10 @@ type Diff struct {
 // start and (optional) count: `@@ -<a>[,<b>] +<c>[,<d>] @@ [context]`.
 var hunkRe = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
 
-// Compute shells out to git and returns the diff between the working tree and base.
+// Compute shells out to git and returns what changed in the working tree
+// since it diverged from base: the diff against the merge-base of base and
+// HEAD, so commits that landed on base after the branch point do not count
+// as changes. Untracked (not ignored) files count as changed throughout.
 // workDir may be any directory inside the repo; paths in the result are absolute,
 // rooted at the repo top-level (so subdirectory invocations still produce paths
 // matching `Package.Files` keys).
@@ -50,7 +54,12 @@ func Compute(workDir, base string) (*Diff, error) {
 	}
 	root := strings.TrimSpace(string(rootOut))
 
-	diffCmd := exec.Command("git", "-C", workDir, "diff", "--unified=0", base)
+	from := base
+	if out, err := exec.Command("git", "-C", workDir, "merge-base", base, "HEAD").Output(); err == nil {
+		from = strings.TrimSpace(string(out))
+	}
+
+	diffCmd := exec.Command("git", "-C", workDir, "diff", "--unified=0", from)
 	var stderr bytes.Buffer
 	diffCmd.Stderr = &stderr
 	stdout, err := diffCmd.StdoutPipe()
@@ -67,6 +76,17 @@ func Compute(workDir, base string) (*Diff, error) {
 	}
 	if waitErr != nil {
 		return nil, fmt.Errorf("git diff failed: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+	}
+
+	untracked, err := exec.Command("git", "-C", root, "ls-files", "--others", "--exclude-standard", "-z").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files: %w", err)
+	}
+	for _, rel := range strings.Split(string(untracked), "\x00") {
+		if rel != "" {
+			f := filepath.Join(root, filepath.FromSlash(rel))
+			d.byFile[f] = append(d.byFile[f], LineRange{Start: 1, End: math.MaxInt})
+		}
 	}
 	return d, nil
 }
