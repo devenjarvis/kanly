@@ -1,3 +1,6 @@
 .refrain/
-.claude/
+# Local agent state stays out; the shared skill and hooks are committed.
+.claude/*
+!.claude/settings.json
+!.claude/skills/
 /kanly

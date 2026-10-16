@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && go run ./cmd/kanly hook stop --diff-base=origin/main --min-score=80",
+            "timeout": 900,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}
