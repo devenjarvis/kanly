@@ -57,6 +57,8 @@ type runConfig struct {
 	testsRegex    string          // if non-empty, narrows baseline + per-test coverage
 	mutantIDs     map[int]bool    // if non-nil, only these schema-assigned IDs run
 	operators     map[string]bool // if non-nil, only these operators' mutants run
+	buildFlags    []string        // extra `go test -c` flags (-tags)
+	testArgs      []string        // extra test binary flags (-test.short)
 	jobs          int             // worker pool size for per-test coverage and the mutant loop; >= 1
 	verifyKills   bool            // re-run every killed mutant alone to confirm the kill
 }
@@ -110,7 +112,7 @@ func establishBaseline(ctx context.Context, schemaBin, origBin, dir string, cfg 
 	var skip []string
 	var excluded []report.ExcludedTest
 	for round := 0; ; round++ {
-		b, err := runner.RunBaseline(ctx, schemaBin, dir, cfg.setupTimeout(), cfg.testsRegex, skip)
+		b, err := runner.RunBaseline(ctx, schemaBin, dir, cfg.setupTimeout(), cfg.testsRegex, skip, cfg.testArgs...)
 		if err == nil {
 			if len(b.Tests) == 0 && len(skip) > 0 {
 				return b, nil, errors.New("every test fails with no mutant applied")
@@ -121,8 +123,8 @@ func establishBaseline(ctx context.Context, schemaBin, origBin, dir string, cfg 
 		if !errors.As(err, &tf) || len(tf.Failed) == 0 || round == maxBaselineRounds {
 			return runner.Baseline{}, nil, explainBaselineFailure(ctx, origBin, dir, cfg, err)
 		}
-		origFailed, origErr := runner.RunTests(ctx, origBin, dir, cfg.setupTimeout(), tf.Failed)
-		schemaFailed, schemaErr := runner.RunTests(ctx, schemaBin, dir, cfg.setupTimeout(), tf.Failed)
+		origFailed, origErr := runner.RunTests(ctx, origBin, dir, cfg.setupTimeout(), tf.Failed, cfg.testArgs...)
+		schemaFailed, schemaErr := runner.RunTests(ctx, schemaBin, dir, cfg.setupTimeout(), tf.Failed, cfg.testArgs...)
 		failsOrig, failsSchema := toSet(origFailed), toSet(schemaFailed)
 		for _, name := range tf.Failed {
 			var reason string
@@ -148,7 +150,7 @@ func explainBaselineFailure(ctx context.Context, origBin, dir string, cfg runCon
 	if !errors.As(err, &tf) {
 		return err
 	}
-	if _, origErr := runner.RunTests(ctx, origBin, dir, cfg.setupTimeout(), nil); origErr == nil {
+	if _, origErr := runner.RunTests(ctx, origBin, dir, cfg.setupTimeout(), nil, cfg.testArgs...); origErr == nil {
 		return fmt.Errorf("the tests pass on the unmodified code but fail under Kanly's rewritten code; this is likely a Kanly bug, please report it:\n%s", tf.Output)
 	}
 	return fmt.Errorf("tests fail with no mutant applied:\n%s", tf.Output)
@@ -282,7 +284,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanOverlay()
 
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion, cfg.buildFlags...)
 	if err != nil {
 		return pkgResult{}, &stageError{"compile", err}
 	}
@@ -290,7 +292,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 
 	// Separate cover-instrumented binary built without overlay; used only
 	// for per-test coverage collection. See CompileCoverageBinary for why.
-	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath)
+	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath, cfg.buildFlags...)
 	if err != nil {
 		return pkgResult{}, &stageError{"compile", fmt.Errorf("coverage binary: %w", err)}
 	}
@@ -320,7 +322,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 
 	// Collect per-test coverage once; pays off across all mutants. A test
 	// that fails on its own cannot be trusted to judge a mutant either.
-	covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs)
+	covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs, cfg.testArgs...)
 	if err != nil {
 		return pkgResult{}, &stageError{"coverage", err}
 	}
@@ -384,7 +386,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 			continue
 		}
 		g.Go(func() error {
-			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.mutantTimeout(baseline, tests))
+			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.mutantTimeout(baseline, tests), cfg.testArgs...)
 			if err != nil {
 				return fmt.Errorf("run mutant %d: %w", mut.ID, err)
 			}
@@ -406,7 +408,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// the parallel loop.
 	rerun := func(r mutation.Result, timeoutScale float64) (mutation.Result, error) {
 		timeout := time.Duration(timeoutScale * float64(cfg.mutantTimeout(baseline, r.CoveringTests)))
-		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, r.Mutation.ID, pkg.Dir, r.CoveringTests, timeout)
+		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, r.Mutation.ID, pkg.Dir, r.CoveringTests, timeout, cfg.testArgs...)
 		if err != nil {
 			return r, fmt.Errorf("re-run mutant %d: %w", r.Mutation.ID, err)
 		}
@@ -448,6 +450,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	testsFlag := fs.String("tests", "", "regex narrowing the test inventory used by baseline and per-test coverage")
 	operatorsFlag := fs.String("operators", "", "comma-separated operators to run (default all)")
 	skipOperatorsFlag := fs.String("skip-operators", "", "comma-separated operators not to run")
+	tagsFlag := fs.String("tags", "", "comma-separated build tags, as for go build -tags")
+	shortFlag := fs.Bool("short", false, "run tests with -test.short")
 	excludeFlag := fs.String("exclude", "", "comma-separated file globs not to mutate, matched against the path relative to the working directory, the file name, or a directory prefix")
 	mutantFlag := fs.String("mutant", "", "comma-separated schema-assigned mutant IDs to re-run; others are skipped")
 	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
@@ -538,6 +542,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "no operators registered\n")
 		return 1
 	}
+	var buildFlags, testArgs []string
+	if *tagsFlag != "" {
+		buildFlags = append(buildFlags, "-tags="+*tagsFlag)
+	}
+	if *shortFlag {
+		testArgs = append(testArgs, "-test.short")
+	}
+
 	operatorSet, err := selectOperators(ops, *operatorsFlag, *skipOperatorsFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
@@ -565,7 +577,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	for _, spec := range specs {
-		pkgs, loadErrs, err := source.LoadAll("", spec.Pattern)
+		pkgs, loadErrs, err := source.LoadAllTags("", *tagsFlag, spec.Pattern)
 		if err != nil {
 			fmt.Fprintf(stderr, "error loading packages for %q: %v\n", spec.Pattern, err)
 			return 1
@@ -603,6 +615,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 				testsRegex:    *testsFlag,
 				mutantIDs:     mutantIDs,
 				operators:     operatorSet,
+				buildFlags:    buildFlags,
+				testArgs:      testArgs,
 				jobs:          *jobsFlag,
 				verifyKills:   *verifyKillsFlag,
 			}
@@ -632,11 +646,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rep := report.Build(allResults, testInventory)
 	rep.Scope = describeScope(specs, *diffFlag, *diffBaseFlag, *testsFlag, *mutantFlag)
 	for _, f := range []struct{ name, value string }{
-		{"operators", *operatorsFlag}, {"skip-operators", *skipOperatorsFlag}, {"exclude", *excludeFlag},
+		{"operators", *operatorsFlag}, {"skip-operators", *skipOperatorsFlag}, {"exclude", *excludeFlag}, {"tags", *tagsFlag},
 	} {
 		if f.value != "" {
 			rep.Scope = strings.TrimSpace(rep.Scope + " --" + f.name + "=" + f.value)
 		}
+	}
+	if *shortFlag {
+		rep.Scope = strings.TrimSpace(rep.Scope + " --short")
 	}
 	rep.Summary.Ignored = ignored
 	rep.Errors = pkgErrors

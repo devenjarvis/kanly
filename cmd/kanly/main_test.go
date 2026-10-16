@@ -1041,3 +1041,50 @@ func TestRunSuppression(t *testing.T) {
 		t.Errorf("--exclude=ignore.go: total %d, want 0", s.Total)
 	}
 }
+
+// --tags reaches the loader and both compiles; --short reaches every run.
+func TestRunTagsAndShort(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/tagsample")
+	statusByFunc := func(args ...string) map[string][]string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run(append(append([]string{"--format=json", "--operators=int_arith"}, args...), dir), &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v returned %d; stderr: %s", args, code, stderr.String())
+		}
+		var result struct {
+			Mutants []struct {
+				Mutation struct {
+					Function string `json:"function"`
+				} `json:"mutation"`
+				Status string `json:"status"`
+			} `json:"mutants"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		out := make(map[string][]string)
+		for _, m := range result.Mutants {
+			out[m.Mutation.Function] = append(out[m.Mutation.Function], m.Status)
+		}
+		return out
+	}
+
+	plain := statusByFunc()
+	if _, ok := plain["Sub"]; ok {
+		t.Errorf("without --tags, Sub (integration-tagged) was mutated: %v", plain)
+	}
+	if got := plain["Double"]; !reflect.DeepEqual(got, []string{"killed"}) {
+		t.Errorf("without --short, Double: %v, want [killed]", got)
+	}
+	tagged := statusByFunc("--tags=integration")
+	if got := tagged["Sub"]; !reflect.DeepEqual(got, []string{"killed"}) {
+		t.Errorf("with --tags=integration, Sub: %v, want [killed]", got)
+	}
+	short := statusByFunc("--short")
+	if got := short["Double"]; !reflect.DeepEqual(got, []string{"not_covered"}) {
+		t.Errorf("with --short, Double: %v, want [not_covered] (its only test skips)", got)
+	}
+}

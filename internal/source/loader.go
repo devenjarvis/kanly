@@ -103,6 +103,12 @@ type LoadError struct {
 // failing the whole load, so callers can still process its healthy siblings.
 // The error result is reserved for failures of the load itself.
 func LoadAll(workDir string, patterns ...string) ([]*Package, []LoadError, error) {
+	return LoadAllTags(workDir, "", patterns...)
+}
+
+// LoadAllTags is LoadAll with build tags, a comma-separated list as for
+// `go build -tags`.
+func LoadAllTags(workDir, tags string, patterns ...string) ([]*Package, []LoadError, error) {
 	if workDir == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -127,6 +133,9 @@ func LoadAll(workDir string, patterns ...string) ([]*Package, []LoadError, error
 	}
 
 	cfg := &packages.Config{Mode: loadMode, Dir: cfgDir, Tests: false}
+	if tags != "" {
+		cfg.BuildFlags = []string{"-tags=" + tags}
+	}
 	rawPkgs, err := packages.Load(cfg, loadPatterns...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("packages.Load: %w", err)
