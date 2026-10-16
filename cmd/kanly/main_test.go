@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devenjarvis/kanly/internal/mutation"
 	"github.com/devenjarvis/kanly/internal/selector"
 )
 
@@ -286,81 +288,46 @@ func equalStringsSorted(a, b []string) bool {
 	return true
 }
 
-// TestIncidentalCoverageDroppedFromScopedRun verifies the diff-line incidental
-// filter end-to-end. The incidentalsample fixture has TestAddTable (3 hits on
-// Add's return line) and TestHelperBehavior (1 hit, only via Helper's setup
-// call). When scoped to :Add, the filter must:
-//   - drop TestHelperBehavior from the Add mutant's CoveringTests (because
-//     maxHits == 3 > 1 and TestHelperBehavior touches only one scoped line
-//     with hits == 1),
-//   - surface it in incidental_coverage_tests instead of zero_kill_tests.
-func TestIncidentalCoverageDroppedFromScopedRun(t *testing.T) {
+// TestScopedRunKeepsSingleHitTests guards against narrowing a mutant's
+// covering tests by hit count. TestEnable executes Enable once and is the
+// only test that asserts on it; TestBulk executes it five times and asserts
+// nothing. A scoped run must reach the same verdict as a full run.
+func TestScopedRunKeepsSingleHitTests(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	sampleDir := relDir(t, "../../internal/runner/testdata/incidentalsample")
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--format=json", sampleDir + ":Add"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
-	}
-
-	var result struct {
-		ZeroKillTests           []string `json:"zero_kill_tests"`
-		IncidentalCoverageTests []string `json:"incidental_coverage_tests"`
-		Mutants                 []struct {
-			Mutation struct {
-				Function string `json:"function"`
-			} `json:"mutation"`
-			Status        string   `json:"status"`
-			CoveringTests []string `json:"covering_tests"`
-			KillingTests  []string `json:"killing_tests"`
-		} `json:"mutants"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
-	}
-
-	const wantIncidental = "github.com/devenjarvis/kanly/internal/runner/testdata/incidentalsample.TestHelperBehavior"
-	if !containsString(result.IncidentalCoverageTests, wantIncidental) {
-		t.Errorf("incidental_coverage_tests: want %q in %v", wantIncidental, result.IncidentalCoverageTests)
-	}
-	if containsString(result.ZeroKillTests, wantIncidental) {
-		t.Errorf("zero_kill_tests must not contain incidental test %q; got %v", wantIncidental, result.ZeroKillTests)
-	}
-
-	// The single Add mutation should have run only against TestAddTable.
-	if len(result.Mutants) != 1 {
-		t.Fatalf("expected exactly 1 mutation under :Add scope, got %d", len(result.Mutants))
-	}
-	m := result.Mutants[0]
-	if m.Mutation.Function != "Add" {
-		t.Errorf("mutant function: want Add, got %q", m.Mutation.Function)
-	}
-	if !equalStringsSorted(m.CoveringTests, []string{"TestAddTable"}) {
-		t.Errorf("covering_tests: want [TestAddTable], got %v", m.CoveringTests)
-	}
-}
-
-// TestIncidentalFilterInactiveOnFullRun is the regression guard for the
-// "applied only when a scope is active" invariant: on a full run, the
-// incidental filter must NOT fire, and incidental_coverage_tests must be
-// omitted from the JSON entirely.
-func TestIncidentalFilterInactiveOnFullRun(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	sampleDir := relDir(t, "../../internal/runner/testdata/incidentalsample")
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--format=json", sampleDir}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
-	}
-
-	if strings.Contains(stdout.String(), "incidental_coverage_tests") {
-		t.Errorf("full run JSON must omit incidental_coverage_tests key, got:\n%s", stdout.String())
+	sampleDir := relDir(t, "../../internal/runner/testdata/singlehitsample")
+	for _, arg := range []string{sampleDir, sampleDir + ":Enable"} {
+		t.Run(filepath.Base(arg), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"--format=json", arg}, &stdout, &stderr); code != 0 {
+				t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+			}
+			var result struct {
+				Mutants []struct {
+					Status        string   `json:"status"`
+					CoveringTests []string `json:"covering_tests"`
+					KillingTests  []string `json:"killing_tests"`
+				} `json:"mutants"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+			}
+			if len(result.Mutants) != 1 {
+				t.Fatalf("want 1 mutant, got %d", len(result.Mutants))
+			}
+			m := result.Mutants[0]
+			if m.Status != "killed" {
+				t.Errorf("status: want killed, got %s (covering %v)", m.Status, m.CoveringTests)
+			}
+			if !equalStringsSorted(m.CoveringTests, []string{"TestBulk", "TestEnable"}) {
+				t.Errorf("covering_tests: want [TestBulk TestEnable], got %v", m.CoveringTests)
+			}
+			if !equalStringsSorted(m.KillingTests, []string{"TestEnable"}) {
+				t.Errorf("killing_tests: want [TestEnable], got %v", m.KillingTests)
+			}
+		})
 	}
 }
 
@@ -713,5 +680,506 @@ func TestRunRejectsInvalidTimeoutFlags(t *testing.T) {
 		if code := run(args, &stdout, &stderr); code != 2 {
 			t.Errorf("run(%v) = %d, want 2; stderr: %s", args, code, stderr.String())
 		}
+	}
+}
+
+// Tests that fail without a mutant are excluded with a reason that says why,
+// and the package is still mutation-tested with the tests that pass.
+func TestRunExcludesFailingTests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/failingsample")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Excluded []struct {
+			Test   string `json:"test"`
+			Reason string `json:"reason"`
+		} `json:"excluded_tests"`
+		Mutants []struct {
+			Mutation struct {
+				Function string `json:"function"`
+			} `json:"mutation"`
+			Status       string   `json:"status"`
+			KillingTests []string `json:"killing_tests"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	wantReason := map[string]string{
+		"TestBroken":     "fails on the unmodified code",
+		"TestCallerName": "fails only under Kanly's rewritten code",
+		"TestSecond":     "fails when run on its own",
+	}
+	got := make(map[string]string)
+	for _, e := range result.Excluded {
+		got[e.Test] = e.Reason
+	}
+	for name, want := range wantReason {
+		if !strings.HasPrefix(got[name], want) {
+			t.Errorf("%s: reason %q, want prefix %q", name, got[name], want)
+		}
+	}
+	if len(got) != len(wantReason) {
+		t.Errorf("excluded tests = %v, want exactly %v", got, wantReason)
+	}
+	if !strings.Contains(got["TestSecond"], "TestFirst did not run first") {
+		t.Errorf("TestSecond reason should carry the failure message, got %q", got["TestSecond"])
+	}
+	for _, m := range result.Mutants {
+		if m.Mutation.Function == "Add" && m.Status != "killed" {
+			t.Errorf("Add mutant: status %s, want killed by TestAdd", m.Status)
+		}
+		for _, k := range m.KillingTests {
+			if _, excluded := wantReason[k]; excluded {
+				t.Errorf("excluded test %s was run against a mutant", k)
+			}
+		}
+	}
+}
+
+// A failure outside any test (here TestMain) cannot be narrowed to tests to
+// exclude, so the package is reported as not tested.
+func TestRunReportsTestMainFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/testmainfail")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", dir}, &stdout, &stderr); code != 1 {
+		t.Fatalf("run returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Errors []struct {
+			Stage string `json:"stage"`
+			Error string `json:"error"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Stage != "baseline" {
+		t.Fatalf("errors = %+v, want one baseline error", result.Errors)
+	}
+	for _, want := range []string{"fail with no mutant applied", "database unavailable"} {
+		if !strings.Contains(result.Errors[0].Error, want) {
+			t.Errorf("error %q does not mention %q", result.Errors[0].Error, want)
+		}
+	}
+
+	// A TestMain that fails only under the schema is reported as a Kanly bug.
+	stdout.Reset()
+	stderr.Reset()
+	dir = relDir(t, "../../internal/runner/testdata/testmainschema")
+	if code := run([]string{"--format=json", dir}, &stdout, &stderr); code != 1 {
+		t.Fatalf("run returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	result.Errors = nil
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Error, "pass on the unmodified code but fail under Kanly's rewritten code") {
+		t.Errorf("errors = %+v, want a baseline error blaming the rewrite", result.Errors)
+	}
+}
+
+func TestConfirmVerdicts(t *testing.T) {
+	mut := func(id int, status mutation.Status) mutation.Result {
+		return mutation.Result{Mutation: mutation.Mutation{ID: id}, Status: status, CoveringTests: []string{"TestX"}}
+	}
+	// rerun returns the verdict queued for the mutant and records the scale.
+	type call struct {
+		id    int
+		scale float64
+	}
+	fake := func(next map[int]mutation.Status, calls *[]call) func(mutation.Result, float64) (mutation.Result, error) {
+		return func(r mutation.Result, scale float64) (mutation.Result, error) {
+			*calls = append(*calls, call{r.Mutation.ID, scale})
+			r.Status = next[r.Mutation.ID]
+			return r, nil
+		}
+	}
+
+	t.Run("timeouts are re-run with a longer budget", func(t *testing.T) {
+		results := []mutation.Result{mut(1, mutation.StatusTimeout), mut(2, mutation.StatusTimeout), mut(3, mutation.StatusKilled)}
+		var calls []call
+		next := map[int]mutation.Status{1: mutation.StatusKilled, 2: mutation.StatusTimeout}
+		if err := confirmVerdicts(results, false, fake(next, &calls)); err != nil {
+			t.Fatal(err)
+		}
+		if want := []call{{1, confirmTimeoutScale}, {2, confirmTimeoutScale}}; !reflect.DeepEqual(calls, want) {
+			t.Errorf("re-runs = %v, want %v (kills are not re-run without verifyKills)", calls, want)
+		}
+		if results[0].Status != mutation.StatusKilled || results[0].Note == "" {
+			t.Errorf("mutant 1: got %s %q, want killed with a note", results[0].Status, results[0].Note)
+		}
+		if results[1].Status != mutation.StatusTimeout || results[1].Note != "" {
+			t.Errorf("mutant 2: got %s %q, want a confirmed timeout without a note", results[1].Status, results[1].Note)
+		}
+	})
+
+	t.Run("verifyKills demotes kills that do not reproduce", func(t *testing.T) {
+		results := []mutation.Result{mut(1, mutation.StatusKilled), mut(2, mutation.StatusKilled), mut(3, mutation.StatusSurvived)}
+		var calls []call
+		next := map[int]mutation.Status{1: mutation.StatusSurvived, 2: mutation.StatusKilled}
+		if err := confirmVerdicts(results, true, fake(next, &calls)); err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 2 {
+			t.Errorf("re-runs = %v, want the two kills only", calls)
+		}
+		if results[0].Status != mutation.StatusSurvived || !strings.Contains(results[0].Note, "not reproducible") {
+			t.Errorf("mutant 1: got %s %q, want survived with a note", results[0].Status, results[0].Note)
+		}
+		if results[1].Status != mutation.StatusKilled {
+			t.Errorf("mutant 2: got %s, want killed", results[1].Status)
+		}
+	})
+}
+
+// --verify-kills re-runs a kill alone and reports it as survived when it
+// does not reproduce.
+func TestRunVerifyKills(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/flakykill")
+	statuses := func(args ...string) []string {
+		t.Helper()
+		t.Setenv("FLAKY_MARKER", filepath.Join(t.TempDir(), "marker"))
+		var stdout, stderr bytes.Buffer
+		if code := run(append([]string{"--format=json", "--jobs=1", "--mutant=1"}, args...), &stdout, &stderr); code != 0 {
+			t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+		}
+		var result struct {
+			Mutants []struct {
+				Status string `json:"status"`
+			} `json:"mutants"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		var out []string
+		for _, m := range result.Mutants {
+			out = append(out, m.Status)
+		}
+		return out
+	}
+	if got := statuses(dir); !reflect.DeepEqual(got, []string{"killed"}) {
+		t.Errorf("without --verify-kills: statuses %v, want [killed]", got)
+	}
+	if got := statuses("--verify-kills", dir); !reflect.DeepEqual(got, []string{"survived"}) {
+		t.Errorf("with --verify-kills: statuses %v, want [survived]", got)
+	}
+}
+
+// Files that mutants make tests create in the package directory are moved
+// out of it, and each test process gets a private temporary directory.
+func TestRunCleansUpFilesTestsCreate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/fswrite")
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "fswrite-result.txt")); !os.IsNotExist(err) {
+		t.Errorf("file written into the package directory by a mutant was not moved out (stat: %v)", err)
+	}
+	if !strings.Contains(stderr.String(), "moved 1 file(s) created during the run to") {
+		t.Errorf("stderr does not report the move:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "fswrite-leftover")); !os.IsNotExist(err) {
+		t.Errorf("a test's leftover temporary file reached the real TMPDIR (stat: %v)", err)
+	}
+}
+
+func TestSelectOperators(t *testing.T) {
+	ops := mutation.Operators()
+	tests := []struct {
+		name, only, skip string
+		want             []string // nil means all operators
+		wantErr          string
+	}{
+		{name: "none", want: nil},
+		{name: "only", only: "int_arith, bool_logic", want: []string{"bool_logic", "int_arith"}},
+		{name: "only minus skip", only: "int_arith,bool_logic", skip: "bool_logic", want: []string{"int_arith"}},
+		{name: "unknown", only: "int_arth", wantErr: `--operators: unknown operator "int_arth"`},
+		{name: "unknown skip", skip: "nope", wantErr: `--skip-operators: unknown operator "nope"`},
+		{name: "nothing left", only: "int_arith", skip: "int_arith", wantErr: "leave no operator"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := selectOperators(ops, tt.only, tt.skip)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("got %v, want nil (all operators)", got)
+				}
+				return
+			}
+			var names []string
+			for n := range got {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			if !reflect.DeepEqual(names, tt.want) {
+				t.Errorf("got %v, want %v", names, tt.want)
+			}
+		})
+	}
+
+	// Skipping alone keeps every other operator.
+	got, err := selectOperators(ops, "", "call_delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["call_delete"] || len(got) != len(ops)-1 {
+		t.Errorf("skip-only: got %d operators (call_delete=%v), want %d", len(got), got["call_delete"], len(ops)-1)
+	}
+}
+
+func TestExcludeFilter(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := excludeFilter("internal/gen, *_mock.go, cmd/*/legacy.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		file string
+		want bool
+	}{
+		{"internal/gen/x.go", true},
+		{"internal/gen/sub/y.go", true},
+		{"internal/generated/x.go", false},
+		{"pkg/store_mock.go", true},
+		{"cmd/kanly/legacy.go", true},
+		{"cmd/kanly/main.go", false},
+	}
+	for _, tt := range tests {
+		if got := f(filepath.Join(cwd, tt.file)); got != tt.want {
+			t.Errorf("excluded(%s) = %v, want %v", tt.file, got, tt.want)
+		}
+	}
+	if f, err := excludeFilter(" , "); err != nil || f != nil {
+		t.Errorf("empty list: got (%v, %v), want (nil, nil)", f != nil, err)
+	}
+	if _, err := excludeFilter("[bad"); err == nil {
+		t.Error("malformed pattern: want an error")
+	}
+}
+
+// Ignore directives, --operators and --exclude reach the report.
+func TestRunSuppression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/ignoresample")
+	type summary struct {
+		Total   int `json:"total"`
+		Ignored int `json:"ignored"`
+	}
+	runJSON := func(args ...string) (summary, []string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run(append(append([]string{"--format=json"}, args...), dir), &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v returned %d; stderr: %s", args, code, stderr.String())
+		}
+		var result struct {
+			Summary summary `json:"summary"`
+			Mutants []struct {
+				Mutation struct {
+					Function string `json:"function"`
+					Operator string `json:"operator"`
+				} `json:"mutation"`
+			} `json:"mutants"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		var muts []string
+		for _, m := range result.Mutants {
+			muts = append(muts, m.Mutation.Function+" "+m.Mutation.Operator)
+		}
+		return result.Summary, muts
+	}
+
+	all, muts := runJSON()
+	if all.Ignored != 1 {
+		t.Errorf("ignored = %d, want 1 (Scale's int_arith)", all.Ignored)
+	}
+	for _, m := range muts {
+		if m == "Scale int_arith" {
+			t.Error("the ignored Scale int_arith mutant ran")
+		}
+	}
+	if _, muts := runJSON("--operators=int_arith"); !reflect.DeepEqual(muts, []string{"Add int_arith"}) {
+		t.Errorf("--operators=int_arith ran %v, want [Add int_arith]", muts)
+	}
+	if s, muts := runJSON("--skip-operators=int_arith"); s.Total != all.Total-1 || containsString(muts, "Add int_arith") {
+		t.Errorf("--skip-operators=int_arith ran %v (total %d of %d)", muts, s.Total, all.Total)
+	}
+	if s, _ := runJSON("--exclude=ignore.go"); s.Total != 0 {
+		t.Errorf("--exclude=ignore.go: total %d, want 0", s.Total)
+	}
+}
+
+// --tags reaches the loader and both compiles; --short reaches every run.
+func TestRunTagsAndShort(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/tagsample")
+	statusByFunc := func(args ...string) map[string][]string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run(append(append([]string{"--format=json", "--operators=int_arith"}, args...), dir), &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v returned %d; stderr: %s", args, code, stderr.String())
+		}
+		var result struct {
+			Mutants []struct {
+				Mutation struct {
+					Function string `json:"function"`
+				} `json:"mutation"`
+				Status string `json:"status"`
+			} `json:"mutants"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		out := make(map[string][]string)
+		for _, m := range result.Mutants {
+			out[m.Mutation.Function] = append(out[m.Mutation.Function], m.Status)
+		}
+		return out
+	}
+
+	plain := statusByFunc()
+	if _, ok := plain["Sub"]; ok {
+		t.Errorf("without --tags, Sub (integration-tagged) was mutated: %v", plain)
+	}
+	if got := plain["Double"]; !reflect.DeepEqual(got, []string{"killed"}) {
+		t.Errorf("without --short, Double: %v, want [killed]", got)
+	}
+	tagged := statusByFunc("--tags=integration")
+	if got := tagged["Sub"]; !reflect.DeepEqual(got, []string{"killed"}) {
+		t.Errorf("with --tags=integration, Sub: %v, want [killed]", got)
+	}
+	short := statusByFunc("--short")
+	if got := short["Double"]; !reflect.DeepEqual(got, []string{"not_covered"}) {
+		t.Errorf("with --short, Double: %v, want [not_covered] (its only test skips)", got)
+	}
+}
+
+func TestRunRejectsUnknownFormat(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=xml", "."}, &stdout, &stderr); code != 2 {
+		t.Errorf("exit code %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--format: must be text, json, llm or sarif") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// --min-score gates on the score including not-covered mutants; --quiet
+// silences progress.
+func TestRunMinScoreAndQuiet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/sample") // 1 of 2 mutants killed: 50%
+	tests := []struct {
+		args     []string
+		wantCode int
+	}{
+		{[]string{"--min-score=50"}, 0},
+		{[]string{"--min-score=60"}, 3},
+	}
+	for _, tt := range tests {
+		var stdout, stderr bytes.Buffer
+		if code := run(append(tt.args, dir), &stdout, &stderr); code != tt.wantCode {
+			t.Errorf("%v: exit code %d, want %d; stderr: %s", tt.args, code, tt.wantCode, stderr.String())
+		}
+		if tt.wantCode == 3 && !strings.Contains(stderr.String(), "is 50.0%, below --min-score=60") {
+			t.Errorf("%v: stderr does not explain the failure: %s", tt.args, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "kanly: github.com/devenjarvis/kanly/internal/runner/testdata/sample: done in") {
+			t.Errorf("%v: no progress on stderr: %s", tt.args, stderr.String())
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--quiet", dir}, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Errorf("--quiet: exit %d, stderr %q; want 0 and empty", code, stderr.String())
+	}
+	if code := run([]string{"--min-score=101", dir}, &stdout, &stderr); code != 2 {
+		t.Errorf("--min-score=101: exit %d, want 2", code)
+	}
+}
+
+func TestRunSARIF(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/sample")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=sarif", "--quiet", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, stderr.String())
+	}
+	var log struct {
+		Version string `json:"version"`
+		Runs    []struct {
+			Results []struct {
+				RuleID string `json:"ruleId"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &log); err != nil {
+		t.Fatalf("parse SARIF: %v\n%s", err, stdout.String())
+	}
+	if log.Version != "2.1.0" || len(log.Runs) != 1 || len(log.Runs[0].Results) != 1 || log.Runs[0].Results[0].RuleID != "int_arith" {
+		t.Errorf("SARIF = %s", stdout.String())
+	}
+}
+
+// A --tests regex that matches no test leaves every mutant not covered; it
+// is not a package failure.
+func TestRunTestsRegexMatchingNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/sample")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", "--quiet", "--tests=^TestNoSuchTest$", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Summary struct {
+			Total      int `json:"total"`
+			NotCovered int `json:"not_covered"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	if result.Summary.Total == 0 || result.Summary.NotCovered != result.Summary.Total {
+		t.Errorf("summary = %+v, want every mutant not covered", result.Summary)
 	}
 }

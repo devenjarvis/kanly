@@ -376,7 +376,7 @@ func TestCollectPerTestCoverageAttributesTests(t *testing.T) {
 	defer cleanCovBin()
 
 	inventory := []string{"TestAdd", "TestSub"}
-	covMap, err := runner.CollectPerTestCoverage(ctx, covBin, sampleDir, inventory, 30*time.Second, 1)
+	covMap, _, err := runner.CollectPerTestCoverage(ctx, covBin, sampleDir, inventory, 30*time.Second, 1)
 	if err != nil {
 		t.Fatalf("CollectPerTestCoverage: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestSchemaCompilesTrickyConstructs(t *testing.T) {
 		t.Fatalf("CompileTestBinary: %v", err)
 	}
 	defer cleanBin()
-	if _, err := runner.RunBaseline(ctx, binaryPath, dir, 30*time.Second, ""); err != nil {
+	if _, err := runner.RunBaseline(ctx, binaryPath, dir, 30*time.Second, "", nil); err != nil {
 		t.Fatalf("RunBaseline: %v", err)
 	}
 }

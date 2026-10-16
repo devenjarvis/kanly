@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "summary": {
     "total": 3,
     "killed": 2,
@@ -6,7 +7,8 @@
     "timeout": 0,
     "not_viable": 0,
     "not_covered": 0,
-    "score": 0.6666666666666666
+    "score": 0.6666666666666666,
+    "score_with_uncovered": 0.6666666666666666
   },
   "packages": [
     {
@@ -17,7 +19,8 @@
       "timeout": 0,
       "not_viable": 0,
       "not_covered": 0,
-      "score": 0
+      "score": 0,
+      "score_with_uncovered": 0
     },
     {
       "package": "example.com/pkg/foo",
@@ -27,7 +30,8 @@
       "timeout": 0,
       "not_viable": 0,
       "not_covered": 0,
-      "score": 1
+      "score": 1,
+      "score_with_uncovered": 1
     }
   ],
   "tests": [

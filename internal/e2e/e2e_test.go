@@ -1,7 +1,9 @@
 package e2e_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +32,18 @@ func buildBinary(t *testing.T) string {
 	return binPath
 }
 
+// stdoutOf runs a kanly command and returns its stdout, which holds the
+// report; stderr carries progress and is folded into the error on failure.
+func stdoutOf(cmd *exec.Cmd) ([]byte, error) {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return out, fmt.Errorf("%w\nstderr:\n%s", err, stderr.String())
+	}
+	return out, nil
+}
+
 func relDir(t *testing.T, sub string) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -53,7 +67,7 @@ func TestEndToEndSamplePackage(t *testing.T) {
 	sampleDir := relDir(t, "../runner/testdata/sample")
 
 	runCmd := exec.Command(binPath, "--format=json", sampleDir)
-	out, err := runCmd.CombinedOutput()
+	out, err := stdoutOf(runCmd)
 	if err != nil {
 		t.Fatalf("kanly run: %v\n%s", err, out)
 	}
@@ -139,7 +153,7 @@ func TestEndToEndMultiPackage(t *testing.T) {
 
 	runCmd := exec.Command(binPath, "--format=json", "./...")
 	runCmd.Dir = multipkgDir
-	out, err := runCmd.CombinedOutput()
+	out, err := stdoutOf(runCmd)
 	if err != nil {
 		t.Fatalf("kanly run: %v\n%s", err, out)
 	}
@@ -279,7 +293,7 @@ func TestSub(t *testing.T) {
 
 	runCmd := exec.Command(binPath, "--diff", "--format=json")
 	runCmd.Dir = repo
-	out, err := runCmd.CombinedOutput()
+	out, err := stdoutOf(runCmd)
 	if err != nil {
 		t.Fatalf("kanly --diff: %v\n%s", err, out)
 	}
@@ -367,7 +381,7 @@ func TestEndToEndDiffEmpty(t *testing.T) {
 
 	runCmd := exec.Command(binPath, "--diff", "--format=json")
 	runCmd.Dir = repo
-	out, err := runCmd.CombinedOutput()
+	out, err := stdoutOf(runCmd)
 	if err != nil {
 		t.Fatalf("kanly --diff: %v\n%s", err, out)
 	}
@@ -397,7 +411,7 @@ func TestEndToEndUncovered(t *testing.T) {
 	uncoveredDir := relDir(t, "../runner/testdata/uncoveredsample")
 
 	runCmd := exec.Command(binPath, "--format=json", uncoveredDir)
-	out, err := runCmd.CombinedOutput()
+	out, err := stdoutOf(runCmd)
 	if err != nil {
 		t.Fatalf("kanly run: %v\n%s", err, out)
 	}
@@ -462,7 +476,7 @@ func TestEndToEndFunctionSelector(t *testing.T) {
 	sampleDir := relDir(t, "../runner/testdata/sample")
 
 	runCmd := exec.Command(binPath, "--format=json", sampleDir+":Add")
-	out, err := runCmd.CombinedOutput()
+	out, err := stdoutOf(runCmd)
 	if err != nil {
 		t.Fatalf("kanly: %v\n%s", err, out)
 	}
@@ -504,7 +518,7 @@ func TestEndToEndBooleanPackage(t *testing.T) {
 	boolDir := relDir(t, "../runner/testdata/boolsample")
 
 	runCmd := exec.Command(binPath, "--format=json", boolDir)
-	out, err := runCmd.CombinedOutput()
+	out, err := stdoutOf(runCmd)
 	if err != nil {
 		t.Fatalf("kanly run: %v\n%s", err, out)
 	}
@@ -573,7 +587,7 @@ func TestEndToEndJobsParity(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command(binPath, "--format=json", "--jobs="+jobs, "./...")
 		cmd.Dir = multipkgDir
-		out, err := cmd.CombinedOutput()
+		out, err := stdoutOf(cmd)
 		if err != nil {
 			t.Fatalf("kanly --jobs=%s: %v\n%s", jobs, err, out)
 		}

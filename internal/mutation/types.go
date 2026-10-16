@@ -36,6 +36,9 @@ type Result struct {
 	KillingTests  []string      `json:"killing_tests"`
 	CoveringTests []string      `json:"covering_tests"`
 	Duration      time.Duration `json:"duration_ns"`
+	// Note explains a status that changed when the mutant was re-run alone
+	// to confirm it (see --verify-kills); empty otherwise.
+	Note string `json:"note,omitempty"`
 }
 
 // FuncRange identifies a top-level function's source range, used by the LLM

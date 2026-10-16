@@ -28,8 +28,8 @@ type FileLine struct {
 
 // TestHit records one test's coverage on a specific line. Hits is the summed
 // execution count across all cover blocks whose [StartLine, EndLine] span
-// includes the line — a per-test value, distinguishing setup-style traffic
-// (Hits == 1) from heavily-exercised assertion paths (Hits >> 1).
+// includes the line. A hit count says nothing about whether the test asserts
+// on the line, so it must not be used to decide which tests run a mutant.
 type TestHit struct {
 	Name string
 	Hits int
@@ -74,7 +74,8 @@ func schemaLangFlags(pkgPath, goVersion string) []string {
 // CompileTestBinary compiles a test binary for pkgPath using the given overlay file.
 // goVersion is the package's module `go` directive (source.Package.GoVersion);
 // see schemaLangFlags. Returns the binary path and a cleanup function.
-func CompileTestBinary(ctx context.Context, pkgPath, overlayPath, goVersion string) (binaryPath string, cleanup func(), err error) {
+// buildFlags are extra `go test -c` flags such as -tags.
+func CompileTestBinary(ctx context.Context, pkgPath, overlayPath, goVersion string, buildFlags ...string) (binaryPath string, cleanup func(), err error) {
 	tmpDir, err := os.MkdirTemp("", "kanly-bin-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp dir: %w", err)
@@ -89,6 +90,7 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath, goVersion stri
 	binPath := filepath.Join(tmpDir, "testbin")
 	args := []string{"test", "-c", "-vet=off", "-overlay=" + overlayPath}
 	args = append(args, schemaLangFlags(pkgPath, goVersion)...)
+	args = append(args, buildFlags...)
 	args = append(args, "-o", binPath, pkgPath)
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Env = os.Environ()
@@ -119,7 +121,8 @@ func CompileTestBinary(ctx context.Context, pkgPath, overlayPath, goVersion stri
 // expression-level rewrites that preserve line numbers, so a test that
 // touches line L on the baseline is the same test that could detect any
 // mutant injected at line L.
-func CompileCoverageBinary(ctx context.Context, pkgPath string) (binaryPath string, cleanup func(), err error) {
+// buildFlags are extra `go test -c` flags such as -tags.
+func CompileCoverageBinary(ctx context.Context, pkgPath string, buildFlags ...string) (binaryPath string, cleanup func(), err error) {
 	tmpDir, err := os.MkdirTemp("", "kanly-cov-bin-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp dir: %w", err)
@@ -133,20 +136,11 @@ func CompileCoverageBinary(ctx context.Context, pkgPath string) (binaryPath stri
 
 	binPath := filepath.Join(tmpDir, "covbin")
 	// -covermode=count records per-block execution counts (not just 0/1 as
-	// the default `set` mode does). The CLI uses those counts to distinguish
-	// incidental coverage (a line touched once via a helper/setup path) from
-	// assertion-bearing coverage (a line exercised many times by a table-
-	// driven test) when narrowing the per-mutant test set under --diff or
-	// pkg:func scope.
-	cmd := exec.CommandContext(ctx,
-		"go", "test", "-c",
-		"-vet=off",
-		"-cover",
-		"-covermode=count",
-		"-coverpkg="+pkgPath,
-		"-o", binPath,
-		pkgPath,
-	)
+	// the default `set` mode does); they are reported as TestHit.Hits.
+	args := []string{"test", "-c", "-vet=off", "-cover", "-covermode=count", "-coverpkg=" + pkgPath}
+	args = append(args, buildFlags...)
+	args = append(args, "-o", binPath, pkgPath)
+	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -199,13 +193,31 @@ func (b Baseline) MutantTimeout(tests []string, factor float64, slack time.Durat
 	return time.Duration(factor*float64(expected)) + slack
 }
 
+// TestFailure reports a test run that exited unsuccessfully. Failed lists
+// the top-level tests that reported "--- FAIL"; it is empty when the binary
+// failed outside any test (TestMain, package init, a crash before a test
+// reported).
+type TestFailure struct {
+	Failed []string
+	Output string // the run's output without -test.v progress lines
+}
+
+func (e *TestFailure) Error() string {
+	if len(e.Failed) == 0 {
+		return "test binary failed outside any test:\n" + e.Output
+	}
+	return fmt.Sprintf("tests failed: %s\n%s", strings.Join(e.Failed, ", "), e.Output)
+}
+
 // RunBaseline executes the compiled test binary with no active mutant (KANLY_MUTANT unset)
 // and `-test.v`, returning the tests that ran and how long they took.
 // If testRunRegex is non-empty it is passed as `-test.run=<regex>`, narrowing
 // the baseline to a subset of tests — useful when callers know which tests
 // exercise the focused mutation set and want to skip the rest of the package.
-// Returns an error if the baseline tests fail, indicating the package is already broken.
-func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration, testRunRegex string) (Baseline, error) {
+// Tests named in skip are excluded via `-test.skip`. testArgs are extra
+// test binary flags such as -test.short.
+// A run whose tests fail returns a *TestFailure.
+func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration, testRunRegex string, skip []string, testArgs ...string) (Baseline, error) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -213,32 +225,70 @@ func RunBaseline(ctx context.Context, binaryPath, pkgDir string, timeout time.Du
 	if testRunRegex != "" {
 		args = append(args, "-test.run="+testRunRegex)
 	}
-	cmd := exec.CommandContext(tctx, binaryPath, args...)
+	if len(skip) > 0 {
+		args = append(args, "-test.skip="+buildRunRegex(skip))
+	}
+	args = append(args, testArgs...)
+	cmd := testCommand(tctx, binaryPath, args...)
 	cmd.Dir = pkgDir
-	cmd.Env = os.Environ()
+	cmd.Env = filterEnv(os.Environ(), "KANLY_MUTANT")
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	out, err := runTestCommand(cmd)
 	wall := time.Since(start)
 
 	if tctx.Err() == context.DeadlineExceeded {
 		return Baseline{}, fmt.Errorf("baseline run timed out after %v", timeout)
 	}
 	if err != nil {
-		return Baseline{}, fmt.Errorf("tests fail with no mutant applied:\n%s", failureOutput(out))
+		return Baseline{}, &TestFailure{Failed: dedupe(parseTestNames(out, "--- FAIL: ")), Output: failureOutput(out)}
 	}
 
-	raw := parseTestNames(out, "--- PASS: ", "--- FAIL: ", "--- SKIP: ")
-	seen := make(map[string]struct{}, len(raw))
-	inventory := make([]string, 0, len(raw))
-	for _, n := range raw {
-		if _, ok := seen[n]; ok {
-			continue
-		}
-		seen[n] = struct{}{}
-		inventory = append(inventory, n)
-	}
+	inventory := dedupe(parseTestNames(out, "--- PASS: ", "--- FAIL: ", "--- SKIP: "))
 	sort.Strings(inventory)
 	return Baseline{Tests: inventory, Durations: parseTestDurations(out), Wall: wall}, nil
+}
+
+// RunTests runs the named tests (all tests when names is empty) with no
+// active mutant and returns the top-level tests that failed. err reports a
+// run that could not be judged: a timeout, or a failure outside any test.
+// testArgs are extra test binary flags such as -test.short.
+func RunTests(ctx context.Context, binaryPath, pkgDir string, timeout time.Duration, names []string, testArgs ...string) (failed []string, err error) {
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	args := []string{"-test.v"}
+	if len(names) > 0 {
+		args = append(args, "-test.run="+buildRunRegex(names))
+	}
+	args = append(args, testArgs...)
+	cmd := testCommand(tctx, binaryPath, args...)
+	cmd.Dir = pkgDir
+	cmd.Env = filterEnv(os.Environ(), "KANLY_MUTANT")
+	out, runErr := runTestCommand(cmd)
+	if tctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("test run timed out after %v", timeout)
+	}
+	if runErr == nil {
+		return nil, nil
+	}
+	failed = dedupe(parseTestNames(out, "--- FAIL: "))
+	if len(failed) == 0 {
+		return nil, &TestFailure{Output: failureOutput(out)}
+	}
+	return failed, nil
+}
+
+// dedupe returns names without repeats, keeping first occurrences in order.
+func dedupe(names []string) []string {
+	seen := make(map[string]bool, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // parseTestDurations extracts each top-level test's elapsed time from
@@ -290,7 +340,8 @@ func failureOutput(out []byte) string {
 // If testFilter is non-empty, only the named tests run (via -test.run='^(a|b|...)$').
 // Test names are regex-escaped, so callers can pass raw test identifiers.
 // Returns the status, names of killing tests, elapsed duration, and any exec error.
-func RunMutant(ctx context.Context, binaryPath string, mutID int, pkgDir string, testFilter []string, timeout time.Duration) (mutation.Status, []string, time.Duration, error) {
+// testArgs are extra test binary flags such as -test.short.
+func RunMutant(ctx context.Context, binaryPath string, mutID int, pkgDir string, testFilter []string, timeout time.Duration, testArgs ...string) (mutation.Status, []string, time.Duration, error) {
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -298,12 +349,13 @@ func RunMutant(ctx context.Context, binaryPath string, mutID int, pkgDir string,
 	if len(testFilter) > 0 {
 		args = append(args, "-test.run="+buildRunRegex(testFilter))
 	}
-	cmd := exec.CommandContext(tctx, binaryPath, args...)
+	args = append(args, testArgs...)
+	cmd := testCommand(tctx, binaryPath, args...)
 	cmd.Dir = pkgDir
 	cmd.Env = append(os.Environ(), fmt.Sprintf("KANLY_MUTANT=%d", mutID))
 
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	out, err := runTestCommand(cmd)
 	elapsed := time.Since(start)
 
 	if tctx.Err() == context.DeadlineExceeded {
@@ -433,17 +485,22 @@ func parseCoverProfile(data []byte) ([]coverBlock, error) {
 //
 // Coverprofile file paths are normalized via filepath.Join(pkgDir, basename),
 // which is correct for single-directory Go packages.
-func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inventory []string, timeout time.Duration, jobs int) (map[FileLine][]TestHit, error) {
+//
+// A test that fails when run on its own is not an error: it contributes no
+// coverage and is returned in the second map, test name → failure output.
+// testArgs are extra test binary flags such as -test.short.
+func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inventory []string, timeout time.Duration, jobs int, testArgs ...string) (map[FileLine][]TestHit, map[string]string, error) {
 	if jobs < 1 {
 		jobs = 1
 	}
 
 	tmpDir, err := os.MkdirTemp("", "kanly-cov-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temp dir: %w", err)
+		return nil, nil, fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
+	failures := make([]string, len(inventory))
 	localBlocks := make([][]coverBlock, len(inventory))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(jobs)
@@ -453,18 +510,32 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inve
 			profPath := filepath.Join(tmpDir, fmt.Sprintf("cov-%d.out", i))
 			tctx, cancel := context.WithTimeout(gctx, timeout)
 			defer cancel()
-			cmd := exec.CommandContext(tctx, binaryPath,
-				"-test.run="+buildRunRegex([]string{name}),
-				"-test.coverprofile="+profPath,
+			args := []string{
+				"-test.run=" + buildRunRegex([]string{name}),
+				"-test.coverprofile=" + profPath,
 				"-test.parallel=1",
-			)
+			}
+			cmd := testCommand(tctx, binaryPath, append(args, testArgs...)...)
 			cmd.Dir = pkgDir
 			// Inherit env but ensure KANLY_MUTANT is not set so coverage reflects
 			// the original code path.
 			cmd.Env = filterEnv(os.Environ(), "KANLY_MUTANT")
-			combined, runErr := cmd.CombinedOutput()
+			combined, runErr := runTestCommand(cmd)
+			if gctx.Err() != nil {
+				return gctx.Err()
+			}
 			if runErr != nil {
-				return fmt.Errorf("coverage run for %q failed: %w\n%s", name, runErr, combined)
+				// The test fails when run on its own: it depends on
+				// another test, is flaky, or hung. Callers exclude it.
+				msg := failureOutput(combined)
+				if tctx.Err() == context.DeadlineExceeded {
+					msg = fmt.Sprintf("timed out after %v", timeout)
+				}
+				failures[i] = msg
+				if failures[i] == "" {
+					failures[i] = runErr.Error()
+				}
+				return nil
 			}
 
 			data, err := os.ReadFile(profPath)
@@ -480,7 +551,14 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inve
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	failed := make(map[string]string)
+	for i, name := range inventory {
+		if failures[i] != "" {
+			failed[name] = failures[i]
+		}
 	}
 
 	// Serial merge in inventory order keeps the result map deterministic
@@ -514,7 +592,7 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir string, inve
 		sort.Slice(hits, func(i, j int) bool { return hits[i].Name < hits[j].Name })
 		result[k] = hits
 	}
-	return result, nil
+	return result, failed, nil
 }
 
 // filterEnv returns a copy of env with all entries for the given key removed.

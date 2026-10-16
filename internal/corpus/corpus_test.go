@@ -154,7 +154,7 @@ func checkPackage(t *testing.T, pkg *source.Package, rew *schema.Rewritten, know
 	}
 	defer cleanBin()
 
-	_, err = runner.RunBaseline(ctx, binaryPath, pkg.Dir, 5*time.Minute, "")
+	_, err = runner.RunBaseline(ctx, binaryPath, pkg.Dir, 5*time.Minute, "", nil)
 	switch {
 	case knownFailure == "" && err != nil:
 		t.Errorf("%s: baseline fails under the schema: %v", pkg.ImportPath, err)

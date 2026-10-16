@@ -154,9 +154,12 @@ type Rewritten struct {
 	Files      map[string]string // absolute file path → rewritten source
 	Dispatcher string            // source of the generated kanly_schema.go file
 	Mutations  []mutation.Mutation
+	// Ignored counts the in-scope candidates that //kanly:ignore suppressed.
+	Ignored int
 }
 
 // Rewrite transforms pkg's source files into a mutant schema using the provided operators.
+// It rewrites pkg's syntax trees in place, so pkg must not be rewritten again.
 //
 // Mutation IDs are deterministic: files are visited in path order, and every
 // candidate is numbered before the filter runs. A mutant therefore keeps its
@@ -168,6 +171,35 @@ type Rewritten struct {
 // filtering. The function name is the canonical funcDeclName form ("Foo",
 // "(T).Bar", "(*T).Bar") or "" when the candidate is outside any top-level FuncDecl.
 func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file string, line int, funcName string) bool) (*Rewritten, error) {
+	return RewriteWith(pkg, ops, Options{Filter: filter})
+}
+
+// Options configures RewriteWith.
+type Options struct {
+	// Filter, if non-nil, keeps only candidates whose (absolute file, line,
+	// enclosing function) it accepts; see Rewrite.
+	Filter func(file string, line int, funcName string) bool
+	// Operators, if non-nil, keeps only candidates of the named operators.
+	// Every operator in ops still numbers its candidates, so IDs match a run
+	// without this option.
+	Operators map[string]bool
+}
+
+// RewriteWith is Rewrite with every option. Candidates suppressed by a
+// //kanly:ignore directive are dropped after numbering, like filtered ones,
+// and counted in Rewritten.Ignored. Generated files (see ast.IsGenerated)
+// are not mutated.
+func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*Rewritten, error) {
+	filter := opts.Filter
+	known := make(map[string]bool)
+	for _, op := range mutation.Operators() {
+		known[op.Name()] = true
+	}
+	for _, op := range ops {
+		known[op.Name()] = true
+	}
+	ignored := 0
+
 	mutID := 0
 	var mutations []mutation.Mutation
 	rewrittenFiles := make(map[string]string)
@@ -180,6 +212,13 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 
 	for _, filePath := range filePaths {
 		file := pkg.Files[filePath]
+		if ast.IsGenerated(file) {
+			continue
+		}
+		ign, err := collectIgnores(pkg.Fset, file, known)
+		if err != nil {
+			return nil, err
+		}
 		type entry struct {
 			node ast.Node
 			cand mutation.Candidate
@@ -197,6 +236,13 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 				funcName := enclosingFunc(funcSpans, c.Pos)
 				mutID++
 				if filter != nil && !filter(filePath, pos.Line, funcName) {
+					continue
+				}
+				if opts.Operators != nil && !opts.Operators[op.Name()] {
+					continue
+				}
+				if ign.covers(op.Name(), c.Pos, pos.Line) {
+					ignored++
 					continue
 				}
 				mutations = append(mutations, mutation.Mutation{
@@ -296,5 +342,6 @@ func Rewrite(pkg *source.Package, ops []mutation.Operator, filter func(file stri
 		Files:      rewrittenFiles,
 		Dispatcher: dispatcher,
 		Mutations:  mutations,
+		Ignored:    ignored,
 	}, nil
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -14,6 +15,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -51,11 +54,16 @@ func resolveVersion() string {
 // runConfig collects the per-package knobs threaded from CLI flags into runPackage.
 type runConfig struct {
 	filter        func(file string, line int, funcName string) bool
-	timeout       time.Duration // fixed per-mutant timeout; 0 derives it from the baseline
-	timeoutFactor float64       // multiplier on baseline test time for derived timeouts
-	testsRegex    string        // if non-empty, narrows baseline + per-test coverage
-	mutantIDs     map[int]bool  // if non-nil, only these schema-assigned IDs run
-	jobs          int           // worker pool size for per-test coverage and the mutant loop; >= 1
+	timeout       time.Duration   // fixed per-mutant timeout; 0 derives it from the baseline
+	timeoutFactor float64         // multiplier on baseline test time for derived timeouts
+	testsRegex    string          // if non-empty, narrows baseline + per-test coverage
+	mutantIDs     map[int]bool    // if non-nil, only these schema-assigned IDs run
+	operators     map[string]bool // if non-nil, only these operators' mutants run
+	buildFlags    []string        // extra `go test -c` flags (-tags)
+	testArgs      []string        // extra test binary flags (-test.short)
+	progress      *progress       // informational output
+	jobs          int             // worker pool size for per-test coverage and the mutant loop; >= 1
+	verifyKills   bool            // re-run every killed mutant alone to confirm the kill
 }
 
 const (
@@ -94,17 +102,185 @@ type stageError struct {
 func (e *stageError) Error() string { return e.stage + ": " + e.err.Error() }
 func (e *stageError) Unwrap() error { return e.err }
 
-func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) ([]mutation.Result, []string, []string, map[string]mutation.FuncRange, error) {
-	rew, err := schema.Rewrite(pkg, ops, cfg.filter)
+// maxBaselineRounds bounds how many times the baseline is re-run with newly
+// failing tests skipped. A test that panics stops the binary, hiding the
+// tests after it, so one round may not reveal every failing test.
+const maxBaselineRounds = 3
+
+// establishBaseline runs the package's tests on the schema binary with no
+// mutant active. Tests that fail are excluded, after re-running them alone
+// on both binaries to say why, and the baseline is re-run without them. It
+// fails only when the binary fails outside any test or failures persist.
+func establishBaseline(ctx context.Context, schemaBin, origBin, dir string, cfg runConfig) (runner.Baseline, []report.ExcludedTest, error) {
+	var skip []string
+	var excluded []report.ExcludedTest
+	for round := 0; ; round++ {
+		b, err := runner.RunBaseline(ctx, schemaBin, dir, cfg.setupTimeout(), cfg.testsRegex, skip, cfg.testArgs...)
+		if err == nil {
+			if len(b.Tests) == 0 && len(skip) > 0 {
+				return b, nil, errors.New("every test fails with no mutant applied")
+			}
+			return b, excluded, nil
+		}
+		var tf *runner.TestFailure
+		if !errors.As(err, &tf) || len(tf.Failed) == 0 || round == maxBaselineRounds {
+			return runner.Baseline{}, nil, explainBaselineFailure(ctx, origBin, dir, cfg, err)
+		}
+		origFailed, origErr := runner.RunTests(ctx, origBin, dir, cfg.setupTimeout(), tf.Failed, cfg.testArgs...)
+		schemaFailed, schemaErr := runner.RunTests(ctx, schemaBin, dir, cfg.setupTimeout(), tf.Failed, cfg.testArgs...)
+		failsOrig, failsSchema := toSet(origFailed), toSet(schemaFailed)
+		for _, name := range tf.Failed {
+			var reason string
+			switch {
+			case origErr != nil || failsOrig[name]:
+				reason = "fails on the unmodified code"
+			case schemaErr != nil || failsSchema[name]:
+				reason = "fails only under Kanly's rewritten code; it may depend on allocations, call stacks or timing, otherwise please report it as a Kanly bug"
+			default:
+				reason = "failed in the baseline but passed when re-run alone: flaky, or depends on another test"
+			}
+			excluded = append(excluded, report.ExcludedTest{Test: name, Reason: reason})
+		}
+		skip = append(skip, tf.Failed...)
+	}
+}
+
+// explainBaselineFailure turns a baseline failure that is not attributable
+// to individual tests into an error saying whether the unmodified code fails
+// too, which separates a broken test suite from a Kanly bug.
+func explainBaselineFailure(ctx context.Context, origBin, dir string, cfg runConfig, err error) error {
+	var tf *runner.TestFailure
+	if !errors.As(err, &tf) {
+		return err
+	}
+	if _, origErr := runner.RunTests(ctx, origBin, dir, cfg.setupTimeout(), nil, cfg.testArgs...); origErr == nil {
+		return fmt.Errorf("the tests pass on the unmodified code but fail under Kanly's rewritten code; this is likely a Kanly bug, please report it:\n%s", tf.Output)
+	}
+	return fmt.Errorf("tests fail with no mutant applied:\n%s", tf.Output)
+}
+
+// displayPaths returns paths relative to the working directory when they
+// lie under it.
+func displayPaths(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = displayPath(p)
+	}
+	return out
+}
+
+func displayPath(p string) string {
+	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"rewrite", err}
+		return p
+	}
+	if rel, err := filepath.Rel(cwd, p); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return p
+}
+
+func toSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	return set
+}
+
+// failureMessage returns the first line of a test failure's output that is
+// not a "--- FAIL" / "FAIL" status line, falling back to the first line.
+func failureMessage(msg string) string {
+	first := ""
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if first == "" {
+			first = line
+		}
+		if !strings.HasPrefix(line, "--- FAIL") && !strings.HasPrefix(line, "FAIL") && !strings.HasPrefix(line, "exit status") {
+			return line
+		}
+	}
+	return first
+}
+
+// confirmTimeoutScale multiplies a mutant's timeout when a timeout is
+// re-run alone to confirm it.
+const confirmTimeoutScale = 2.0
+
+// confirmVerdicts re-runs, one at a time, the verdicts most likely to be
+// artifacts of running mutants in parallel. Every timeout is re-run with a
+// longer budget and takes the re-run's verdict, since a loaded machine can
+// push a killable or surviving mutant past its timeout. With verifyKills,
+// every kill is re-run too, and a kill that does not reproduce is reported
+// as survived: tests that collide over shared ports, files or databases
+// when run concurrently fail without detecting anything.
+func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(r mutation.Result, timeoutScale float64) (mutation.Result, error)) error {
+	for i, r := range results {
+		switch {
+		case r.Status == mutation.StatusTimeout:
+			again, err := rerun(r, confirmTimeoutScale)
+			if err != nil {
+				return err
+			}
+			if again.Status != mutation.StatusTimeout {
+				again.Note = fmt.Sprintf("timed out in the parallel run; %s when re-run alone", again.Status)
+			}
+			results[i] = again
+		case r.Status == mutation.StatusKilled && verifyKills:
+			again, err := rerun(r, 1)
+			if err != nil {
+				return err
+			}
+			if again.Status == mutation.StatusSurvived {
+				again.Note = "killed in the parallel run but survived when re-run alone; the kill was not reproducible"
+				results[i] = again
+			}
+		}
+	}
+	return nil
+}
+
+// progress writes informational lines to stderr unless --quiet is set. It
+// is safe for concurrent use.
+type progress struct {
+	mu sync.Mutex
+	w  io.Writer // nil when quiet
+}
+
+func (p *progress) printf(format string, args ...any) {
+	if p == nil || p.w == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fmt.Fprintf(p.w, "kanly: "+format+"\n", args...)
+}
+
+// pkgResult is what one package's pipeline contributes to the report.
+type pkgResult struct {
+	results    []mutation.Result
+	ignored    int                           // mutants suppressed by //kanly:ignore
+	inventory  []string                      // tests reported for the package
+	excluded   []report.ExcludedTest         // tests left out because they fail unmutated
+	funcRanges map[string]mutation.FuncRange // canonical func name → source range
+}
+
+func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) (pkgResult, error) {
+	rew, err := schema.RewriteWith(pkg, ops, schema.Options{Filter: cfg.filter, Operators: cfg.operators})
+	if err != nil {
+		return pkgResult{}, &stageError{"rewrite", err}
 	}
 
 	if len(rew.Mutations) == 0 {
-		return nil, nil, nil, nil, nil
+		return pkgResult{}, nil
 	}
 
 	funcRanges := schema.FuncRanges(pkg)
+	start := time.Now()
 
 	// Narrow by --mutant IDs after schema assignment. The dispatcher keeps all
 	// cases; un-listed IDs simply never get activated.
@@ -118,67 +294,93 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		}
 		mutations = filtered
 		if len(mutations) == 0 {
-			return nil, nil, nil, nil, nil
+			return pkgResult{}, nil
 		}
 	}
 
+	cfg.progress.printf("%s: %d mutants; compiling", pkg.ImportPath, len(mutations))
 	overlayPath, cleanOverlay, err := runner.BuildOverlay(rew, pkg.Dir)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"rewrite", fmt.Errorf("build overlay: %w", err)}
+		return pkgResult{}, &stageError{"rewrite", fmt.Errorf("build overlay: %w", err)}
 	}
 	defer cleanOverlay()
 
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion)
+	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion, cfg.buildFlags...)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"compile", err}
+		return pkgResult{}, &stageError{"compile", err}
 	}
 	defer cleanBin()
 
 	// Separate cover-instrumented binary built without overlay; used only
 	// for per-test coverage collection. See CompileCoverageBinary for why.
-	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath)
+	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath, cfg.buildFlags...)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"compile", fmt.Errorf("coverage binary: %w", err)}
+		return pkgResult{}, &stageError{"compile", fmt.Errorf("coverage binary: %w", err)}
 	}
 	defer cleanCovBin()
 
-	baseline, err := runner.RunBaseline(ctx, binaryPath, pkg.Dir, cfg.setupTimeout(), cfg.testsRegex)
-	if err != nil {
-		return nil, nil, nil, nil, &stageError{"baseline", err}
+	// Mutants run in the real checkout. Move what they leave behind in the
+	// package directory out of it (not delete: a file created during the
+	// run may be the user's), and warn about what cannot be undone.
+	if snap, err := runner.SnapshotDir(pkg.Dir); err == nil {
+		defer func() {
+			res, err := snap.Restore()
+			if err != nil {
+				fmt.Fprintf(stderr, "warning: %s: checking for files changed by tests: %v\n", pkg.ImportPath, err)
+			}
+			if len(res.Moved) > 0 {
+				fmt.Fprintf(stderr, "%s: moved %d file(s) created during the run to %s: %s\n", pkg.ImportPath, len(res.Moved), res.Quarantine, strings.Join(displayPaths(res.Moved), ", "))
+			}
+			if len(res.Unmoved) > 0 {
+				fmt.Fprintf(stderr, "warning: %s: %d file(s) were created during the run and could not be moved; remove them if unwanted: %s\n", pkg.ImportPath, len(res.Unmoved), strings.Join(displayPaths(res.Unmoved), ", "))
+			}
+			if len(res.Changed) > 0 {
+				fmt.Fprintf(stderr, "warning: %s: tests modified or deleted %d file(s); check them before committing: %s\n", pkg.ImportPath, len(res.Changed), strings.Join(displayPaths(res.Changed), ", "))
+			}
+		}()
 	}
 
-	inventory := baseline.Tests
-
-	// Collect per-test coverage once; pays off across all mutants.
-	covMap, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, inventory, cfg.setupTimeout(), cfg.jobs)
+	cfg.progress.printf("%s: running the tests unmutated", pkg.ImportPath)
+	baseline, excluded, err := establishBaseline(ctx, binaryPath, covBinaryPath, pkg.Dir, cfg)
 	if err != nil {
-		return nil, nil, nil, nil, &stageError{"coverage", err}
+		return pkgResult{}, &stageError{"baseline", err}
 	}
 
-	// Per-test profile across the kept mutation set: how many distinct
-	// (mutation file, line) pairs does each test touch. Used by the
-	// incidental-coverage filter — a test whose only contact with the scope
-	// is a single hit on a single line, when some other test hits that line
-	// harder, almost certainly reached it via shared setup or a helper call
-	// rather than via an assertion. We drop those from the per-mutant set so
-	// they don't (a) burn a `go test` invocation on a mutant they cannot
-	// kill or (b) land in zero-kill noise.
-	diffLinesByTest := make(map[string]int)
-	for _, mut := range mutations {
-		key := runner.FileLine{File: mut.File, Line: mut.Line}
-		for _, th := range covMap[key] {
-			diffLinesByTest[th.Name]++
+	// Collect per-test coverage once; pays off across all mutants. A test
+	// that fails on its own cannot be trusted to judge a mutant either.
+	covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs, cfg.testArgs...)
+	if err != nil {
+		return pkgResult{}, &stageError{"coverage", err}
+	}
+	var inventory []string
+	for _, name := range baseline.Tests {
+		if msg, failed := covFailed[name]; failed {
+			excluded = append(excluded, report.ExcludedTest{
+				Test:   name,
+				Reason: "fails when run on its own (it depends on another test, is flaky, or hangs): " + failureMessage(msg),
+			})
+			continue
 		}
+		inventory = append(inventory, name)
+	}
+	for i := range excluded {
+		excluded[i].Package = pkg.ImportPath
+	}
+	if len(inventory) == 0 && len(covFailed) > 0 {
+		return pkgResult{}, &stageError{"coverage", errors.New("no test passes when run on its own")}
 	}
 
 	// Per-mutant covering tests are read out up front so the parallel loop
-	// below does not touch covMap concurrently and so we can populate the
-	// `relevant` set (used to narrow the reported inventory) before any
+	// below does not touch covMap concurrently and so the `relevant` set
+	// (used to narrow the reported inventory) is complete before any
 	// goroutine starts. Indexed slices preserve schema-ID order across the
 	// parallel phase, keeping JSON output byte-identical to --jobs=1.
+	//
+	// Every covering test runs against the mutant, in scoped runs too:
+	// dropping a test by its hit count changes the verdict, since the one
+	// test that asserts on a line may well execute it only once.
 	perMut := make([][]string, len(mutations))
 	relevant := make(map[string]bool)
-	incidental := make(map[string]bool)
 	for i, mut := range mutations {
 		hits := covMap[runner.FileLine{File: mut.File, Line: mut.Line}]
 		if mut.PackageInit && len(hits) == 0 {
@@ -188,37 +390,23 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 				hits = append(hits, runner.TestHit{Name: name})
 			}
 		}
-		maxHits := 0
 		for _, th := range hits {
-			if th.Hits > maxHits {
-				maxHits = th.Hits
-			}
-		}
-		var kept []string
-		for _, th := range hits {
-			// Only drop when a scope is active: full runs preserve the
-			// existing covering-tests behavior so non-diff reports stay
-			// byte-identical to prior versions. The `maxHits > 1` guard
-			// keeps a lone single-hit test that is the only signal we
-			// have for the line.
-			if cfg.filter != nil && maxHits > 1 && th.Hits == 1 && diffLinesByTest[th.Name] == 1 {
-				incidental[th.Name] = true
-				continue
-			}
-			kept = append(kept, th.Name)
+			perMut[i] = append(perMut[i], th.Name)
 			relevant[th.Name] = true
 		}
-		perMut[i] = kept
 	}
 
-	// A test is marked incidental iff it touches exactly one diff line and
-	// is dropped from that line's covering set, so `incidental` and
-	// `relevant` are disjoint by construction.
-	incidentalNames := make([]string, 0, len(incidental))
-	for name := range incidental {
-		incidentalNames = append(incidentalNames, name)
+	covered := 0
+	for _, tests := range perMut {
+		if len(tests) > 0 {
+			covered++
+		}
 	}
-	sort.Strings(incidentalNames)
+	cfg.progress.printf("%s: testing %d covered mutants (%d not covered) with %d test(s)", pkg.ImportPath, covered, len(mutations)-covered, len(inventory))
+	var done atomic.Int64
+	reportEvery := max(covered/10, 1)
+	lastReport := time.Now()
+	var reportMu sync.Mutex
 
 	results := make([]mutation.Result, len(mutations))
 	g, gctx := errgroup.WithContext(ctx)
@@ -236,7 +424,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 			continue
 		}
 		g.Go(func() error {
-			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.mutantTimeout(baseline, tests))
+			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.mutantTimeout(baseline, tests), cfg.testArgs...)
 			if err != nil {
 				return fmt.Errorf("run mutant %d: %w", mut.ID, err)
 			}
@@ -247,12 +435,35 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 				CoveringTests: tests,
 				Duration:      dur,
 			}
+			n := int(done.Add(1))
+			reportMu.Lock()
+			if n < covered && (n%reportEvery == 0 || time.Since(lastReport) > 30*time.Second) {
+				lastReport = time.Now()
+				cfg.progress.printf("%s: %d/%d mutants tested", pkg.ImportPath, n, covered)
+			}
+			reportMu.Unlock()
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, nil, nil, nil, &stageError{"mutants", err}
+		return pkgResult{}, &stageError{"mutants", err}
 	}
+
+	// Re-run uncertain verdicts one at a time, away from the contention of
+	// the parallel loop.
+	rerun := func(r mutation.Result, timeoutScale float64) (mutation.Result, error) {
+		timeout := time.Duration(timeoutScale * float64(cfg.mutantTimeout(baseline, r.CoveringTests)))
+		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, r.Mutation.ID, pkg.Dir, r.CoveringTests, timeout, cfg.testArgs...)
+		if err != nil {
+			return r, fmt.Errorf("re-run mutant %d: %w", r.Mutation.ID, err)
+		}
+		r.Status, r.KillingTests, r.Duration = status, killingTests, dur
+		return r, nil
+	}
+	if err := confirmVerdicts(results, cfg.verifyKills, rerun); err != nil {
+		return pkgResult{}, &stageError{"mutants", err}
+	}
+	cfg.progress.printf("%s: done in %s", pkg.ImportPath, time.Since(start).Round(100*time.Millisecond))
 
 	// When a scope is active (filter or --mutant), drop tests from the reported
 	// inventory that don't cover any kept mutation. This keeps "zero_kill_tests"
@@ -268,23 +479,31 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		inventory = narrowed
 	}
 
-	return results, inventory, incidentalNames, funcRanges, nil
+	return pkgResult{results: results, inventory: inventory, excluded: excluded, funcRanges: funcRanges, ignored: rew.Ignored}, nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--version] [--format=text|json|llm] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	versionFlag := fs.Bool("version", false, "print version and exit")
-	formatFlag := fs.String("format", "text", "output format: text|json|llm")
+	formatFlag := fs.String("format", "text", "output format: text|json|llm|sarif")
+	minScoreFlag := fs.Float64("min-score", 0, "exit 3 when the score including not-covered mutants is below this percentage")
+	quietFlag := fs.Bool("quiet", false, "print no progress to stderr; errors and warnings are still printed")
 	timeoutFlag := fs.Duration("timeout", 0, "fixed per-mutant test timeout; 0 derives each mutant's timeout from the baseline run time of the tests it runs")
 	timeoutFactorFlag := fs.Float64("timeout-factor", defaultTimeoutFactor, "for derived timeouts, the multiple of the tests' baseline run time a mutant may take")
 	diffFlag := fs.Bool("diff", false, "only mutate lines changed since --diff-base")
 	diffBaseFlag := fs.String("diff-base", "HEAD", "git ref to diff against when --diff is set")
 	testsFlag := fs.String("tests", "", "regex narrowing the test inventory used by baseline and per-test coverage")
+	operatorsFlag := fs.String("operators", "", "comma-separated operators to run (default all)")
+	skipOperatorsFlag := fs.String("skip-operators", "", "comma-separated operators not to run")
+	tagsFlag := fs.String("tags", "", "comma-separated build tags, as for go build -tags")
+	shortFlag := fs.Bool("short", false, "run tests with -test.short")
+	excludeFlag := fs.String("exclude", "", "comma-separated file globs not to mutate, matched against the path relative to the working directory, the file name, or a directory prefix")
 	mutantFlag := fs.String("mutant", "", "comma-separated schema-assigned mutant IDs to re-run; others are skipped")
 	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
+	verifyKillsFlag := fs.Bool("verify-kills", false, "re-run every killed mutant alone and count kills that do not reproduce as survived")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(stderr, usage)
@@ -294,6 +513,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *versionFlag {
 		fmt.Fprintf(stdout, "kanly %s\n", resolveVersion())
 		return 0
+	}
+
+	switch *formatFlag {
+	case "text", "json", "llm", "sarif":
+	default:
+		fmt.Fprintf(stderr, "--format: must be text, json, llm or sarif, got %q\n", *formatFlag)
+		return 2
+	}
+	if *minScoreFlag < 0 || *minScoreFlag > 100 {
+		fmt.Fprintf(stderr, "--min-score: must be between 0 and 100, got %v\n", *minScoreFlag)
+		return 2
+	}
+	prog := &progress{w: stderr}
+	if *quietFlag {
+		prog.w = nil
 	}
 
 	if *timeoutFlag < 0 {
@@ -307,6 +541,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if *jobsFlag < 1 {
 		fmt.Fprintf(stderr, "--jobs: must be >= 1, got %d\n", *jobsFlag)
+		return 2
+	}
+
+	excludePred, err := excludeFilter(*excludeFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "--exclude: %v\n", err)
 		return 2
 	}
 
@@ -345,14 +585,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		diffPred = d.Includes
 		if len(d.Files()) == 0 {
-			return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil, nil), report.LLMSource{})
+			return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil), report.LLMSource{})
 		}
 		if len(specs) == 0 {
 			for _, p := range d.Patterns(cwd) {
 				specs = append(specs, selector.Spec{Pattern: p})
 			}
 			if len(specs) == 0 {
-				return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil, nil), report.LLMSource{})
+				return writeReport(stdout, stderr, *formatFlag, report.Build(nil, nil), report.LLMSource{})
 			}
 		}
 	} else if len(specs) == 0 {
@@ -365,16 +605,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "no operators registered\n")
 		return 1
 	}
+	var buildFlags, testArgs []string
+	if *tagsFlag != "" {
+		buildFlags = append(buildFlags, "-tags="+*tagsFlag)
+	}
+	if *shortFlag {
+		testArgs = append(testArgs, "-test.short")
+	}
+
+	operatorSet, err := selectOperators(ops, *operatorsFlag, *skipOperatorsFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
 
 	ctx := context.Background()
 	var allResults []mutation.Result
 	testInventory := make(map[string][]string)
-	incidentalByPkg := make(map[string][]string)
 	funcRangesByPkg := make(map[string]map[string]mutation.FuncRange)
 
 	// A package that fails is recorded and the run moves on, so one broken
 	// package cannot discard its siblings' results.
 	var pkgErrors []report.PackageError
+	var excludedTests []report.ExcludedTest
+	ignored := 0
 	recordFailure := func(pkg, stage string, err error) {
 		msg := err.Error()
 		first, rest, multiline := strings.Cut(msg, "\n")
@@ -386,7 +640,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	for _, spec := range specs {
-		pkgs, loadErrs, err := source.LoadAll("", spec.Pattern)
+		pkgs, loadErrs, err := source.LoadAllTags("", *tagsFlag, spec.Pattern)
 		if err != nil {
 			fmt.Fprintf(stderr, "error loading packages for %q: %v\n", spec.Pattern, err)
 			return 1
@@ -406,7 +660,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		for _, pkg := range pkgs {
 			testFiles, err := filepath.Glob(filepath.Join(pkg.Dir, "*_test.go"))
 			if err != nil || len(testFiles) == 0 {
-				fmt.Fprintf(stderr, "skip %s: no test files\n", pkg.ImportPath)
+				prog.printf("skip %s: no test files", pkg.ImportPath)
 				continue
 			}
 
@@ -418,15 +672,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 
 			cfg := runConfig{
-				filter:        composeFilter(diffPred, spec.Funcs),
+				filter:        composeFilter(diffPred, excludePred, spec.Funcs),
 				timeout:       *timeoutFlag,
 				timeoutFactor: *timeoutFactorFlag,
 				testsRegex:    *testsFlag,
 				mutantIDs:     mutantIDs,
+				operators:     operatorSet,
+				buildFlags:    buildFlags,
+				testArgs:      testArgs,
+				progress:      prog,
 				jobs:          *jobsFlag,
+				verifyKills:   *verifyKillsFlag,
 			}
 
-			results, inventory, incidental, funcRanges, err := runPackage(ctx, pkg, ops, cfg, stderr)
+			res, err := runPackage(ctx, pkg, ops, cfg, stderr)
 			if err != nil {
 				var se *stageError
 				if errors.As(err, &se) {
@@ -436,22 +695,33 @@ func run(args []string, stdout, stderr io.Writer) int {
 				}
 				continue
 			}
-			if len(results) == 0 {
-				fmt.Fprintf(stderr, "skip %s: no mutations\n", pkg.ImportPath)
+			if len(res.results) == 0 {
+				prog.printf("skip %s: no mutations", pkg.ImportPath)
 				continue
 			}
-			allResults = append(allResults, results...)
-			testInventory[pkg.ImportPath] = inventory
-			if len(incidental) > 0 {
-				incidentalByPkg[pkg.ImportPath] = incidental
-			}
-			funcRangesByPkg[pkg.ImportPath] = funcRanges
+			excludedTests = append(excludedTests, res.excluded...)
+			ignored += res.ignored
+			allResults = append(allResults, res.results...)
+			testInventory[pkg.ImportPath] = res.inventory
+			funcRangesByPkg[pkg.ImportPath] = res.funcRanges
 		}
 	}
 
-	rep := report.Build(allResults, testInventory, incidentalByPkg)
+	rep := report.Build(allResults, testInventory)
 	rep.Scope = describeScope(specs, *diffFlag, *diffBaseFlag, *testsFlag, *mutantFlag)
+	for _, f := range []struct{ name, value string }{
+		{"operators", *operatorsFlag}, {"skip-operators", *skipOperatorsFlag}, {"exclude", *excludeFlag}, {"tags", *tagsFlag},
+	} {
+		if f.value != "" {
+			rep.Scope = strings.TrimSpace(rep.Scope + " --" + f.name + "=" + f.value)
+		}
+	}
+	if *shortFlag {
+		rep.Scope = strings.TrimSpace(rep.Scope + " --short")
+	}
+	rep.Summary.Ignored = ignored
 	rep.Errors = pkgErrors
+	rep.ExcludedTests = excludedTests
 	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg}
 	if code := writeReport(stdout, stderr, *formatFlag, rep, llmSrc); code != 0 {
 		return code
@@ -461,18 +731,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// not: never let a partial result pass as success.
 		return 1
 	}
+	if got := rep.Summary.ScoreWithUncovered * 100; rep.Summary.Total > 0 && got < *minScoreFlag {
+		fmt.Fprintf(stderr, "kanly: score including not-covered mutants is %.1f%%, below --min-score=%v\n", got, *minScoreFlag)
+		return 3
+	}
 	return 0
 }
 
-// composeFilter combines an optional diff (file, line) predicate with an
-// optional function-name selector list. Returns nil when neither is active so
-// the rewriter takes the fast no-filter path.
-func composeFilter(diffPred func(file string, line int) bool, funcs []string) func(string, int, string) bool {
-	if diffPred == nil && len(funcs) == 0 {
+// composeFilter combines an optional diff (file, line) predicate, an
+// optional file-exclusion predicate and an optional function-name selector
+// list. Returns nil when none is active so the rewriter takes the fast
+// no-filter path.
+func composeFilter(diffPred func(file string, line int) bool, exclude func(file string) bool, funcs []string) func(string, int, string) bool {
+	if diffPred == nil && exclude == nil && len(funcs) == 0 {
 		return nil
 	}
 	return func(file string, line int, funcName string) bool {
 		if diffPred != nil && !diffPred(file, line) {
+			return false
+		}
+		if exclude != nil && exclude(file) {
 			return false
 		}
 		if len(funcs) > 0 && !selector.AnyMatch(funcs, funcName) {
@@ -480,6 +758,102 @@ func composeFilter(diffPred func(file string, line int) bool, funcs []string) fu
 		}
 		return true
 	}
+}
+
+// selectOperators returns the operator names to run given --operators and
+// --skip-operators, or nil for all of them. Unknown names are an error.
+func selectOperators(ops []mutation.Operator, only, skip string) (map[string]bool, error) {
+	if only == "" && skip == "" {
+		return nil, nil
+	}
+	known := make(map[string]bool, len(ops))
+	var names []string
+	for _, op := range ops {
+		known[op.Name()] = true
+		names = append(names, op.Name())
+	}
+	parse := func(flagName, list string) (map[string]bool, error) {
+		set := make(map[string]bool)
+		for _, n := range strings.Split(list, ",") {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			if !known[n] {
+				return nil, fmt.Errorf("--%s: unknown operator %q; known: %s", flagName, n, strings.Join(names, ", "))
+			}
+			set[n] = true
+		}
+		return set, nil
+	}
+	selected := known
+	if only != "" {
+		set, err := parse("operators", only)
+		if err != nil {
+			return nil, err
+		}
+		selected = set
+	}
+	skipped, err := parse("skip-operators", skip)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool)
+	for n := range selected {
+		if !skipped[n] {
+			out[n] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("--operators/--skip-operators leave no operator to run")
+	}
+	return out, nil
+}
+
+// excludeFilter parses --exclude into a predicate reporting whether an
+// absolute file path is excluded, or nil when the list is empty. A pattern
+// matches the path relative to the working directory, the file's base name,
+// or (without glob characters) a directory prefix of the relative path.
+func excludeFilter(list string) (func(file string) bool, error) {
+	var patterns []string
+	for _, p := range strings.Split(list, ",") {
+		p = strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(p)), "/")
+		p = strings.TrimPrefix(p, "./")
+		if p == "" {
+			continue
+		}
+		if _, err := path.Match(p, ""); err != nil {
+			return nil, fmt.Errorf("bad pattern %q: %w", p, err)
+		}
+		patterns = append(patterns, p)
+	}
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	return func(file string) bool {
+		rel := file
+		if r, err := filepath.Rel(cwd, file); err == nil {
+			rel = r
+		}
+		rel = filepath.ToSlash(rel)
+		base := path.Base(rel)
+		for _, p := range patterns {
+			if m, _ := path.Match(p, rel); m {
+				return true
+			}
+			if m, _ := path.Match(p, base); m {
+				return true
+			}
+			if strings.HasPrefix(rel, p+"/") {
+				return true
+			}
+		}
+		return false
+	}, nil
 }
 
 // validateFuncSelectors checks that every user-supplied function entry matches
@@ -623,6 +997,11 @@ func writeReport(stdout, stderr io.Writer, format string, r report.Report, llmSr
 	case "json":
 		if err := report.WriteJSON(stdout, r); err != nil {
 			fmt.Fprintf(stderr, "write JSON: %v\n", err)
+			return 1
+		}
+	case "sarif":
+		if err := report.WriteSARIF(stdout, r, resolveVersion()); err != nil {
+			fmt.Fprintf(stderr, "write sarif: %v\n", err)
 			return 1
 		}
 	case "llm":

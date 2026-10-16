@@ -13,59 +13,82 @@ go install github.com/devenjarvis/kanly/cmd/kanly@latest
 ## Usage
 
 ```
-kanly [--version] [--format=text|json|llm] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<ids>] [--jobs=N] <pattern>[:<func-list>]...
+kanly [flags] <pattern>[:<func-list>]...
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--version` | off | Print version and exit |
-| `--format` | `text` | Output format: `text`, `json`, or `llm` (Markdown artifact tailored for feeding to an LLM) |
+| `--format` | `text` | Output format: `text`, `json`, `llm` (Markdown artifact tailored for feeding to an LLM), or `sarif` (SARIF 2.1.0 for code-scanning annotations) |
+| `--min-score` | `0` | Exit 3 when the score including not-covered mutants is below this percentage |
 | `--timeout` | derived | Fixed per-mutant test timeout. By default each mutant's timeout is derived from the baseline: `--timeout-factor` × (the baseline run time of the tests it runs + process start-up) + 2s |
 | `--timeout-factor` | `3` | Multiple of the baseline run time a mutant may take before it counts as `Timeout` (ignored when `--timeout` is set) |
-| `--diff` | off | Only mutate lines changed since `--diff-base` |
+| `--diff` | off | Only mutate lines changed since the working tree diverged from `--diff-base` (see [Using Kanly in CI](#using-kanly-in-ci)) |
 | `--diff-base` | `HEAD` | Git ref to diff against when `--diff` is set |
 | `--tests` | (all) | Regex narrowing the test inventory used by baseline and per-test coverage |
 | `--mutant` | (all) | Comma-separated schema-assigned mutant IDs to re-run; others are skipped |
+| `--operators` | (all) | Comma-separated operators to run |
+| `--skip-operators` | (none) | Comma-separated operators not to run |
+| `--exclude` | (none) | Comma-separated file globs not to mutate, matched against the path relative to the working directory, the file name, or a directory prefix (`internal/gen`, `*_mock.go`) |
+| `--tags` | (none) | Build tags, as for `go build -tags`; tagged files are mutated and tagged tests run |
+| `--short` | off | Run tests with `-test.short` |
 | `--jobs` | `NumCPU` | Parallel worker processes for per-test coverage and the mutant loop (`1` = sequential) |
+| `--verify-kills` | off | Re-run every killed mutant alone and count kills that do not reproduce as survived (roughly doubles the run time) |
+| `--quiet` | off | Print no progress to stderr; errors and warnings are still printed |
 
 Positional arguments take the form `<pkg-pattern>[:<func-list>]`. The optional function list selects mutants by enclosing function — accepts plain names (`Foo`), method receivers in dotted form (`Server.Handle` matches both `(Server).Handle` and `(*Server).Handle`), or the explicit canonical form (`(*Server).Handle`). A function filter requires the pattern to resolve to a single package (no `./...`).
 
-### Exit status and failed packages
+### Exit status, failed packages and excluded tests
 
-A package that cannot be mutation-tested — it doesn't load or type-check, its schema doesn't compile, or its tests fail before any mutant is applied — is recorded and skipped; the other packages still run and are reported. Failed packages appear under `Packages not tested` in text and `--format=llm` output and in the JSON `errors` array (`package`, `stage`, `error`), where `stage` is one of `load`, `rewrite`, `compile`, `baseline`, `coverage`, `mutants`. A `baseline` failure means the package's own tests fail without Kanly; a `compile` failure is most likely a Kanly bug worth reporting.
+A test that fails with no mutant applied cannot tell a mutant from the original code, so Kanly leaves it out instead of giving up on the package. Excluded tests are listed under `Tests excluded` in text and `--format=llm` output and in the JSON `excluded_tests` array (`package`, `test`, `reason`). The reason says which of three cases applies: the test fails on the unmodified code; it fails only under Kanly's rewritten code (tests that count allocations or inspect call stacks do this; anything else is a Kanly bug worth reporting); or it failed in the full run but passes alone, or fails when run on its own (flaky or order-dependent).
+
+A package that cannot be mutation-tested at all — it doesn't load or type-check, its schema doesn't compile, or its test binary fails outside any single test (for example in `TestMain`) — is recorded and skipped; the other packages still run and are reported. Failed packages appear under `Packages not tested` in text and `--format=llm` output and in the JSON `errors` array (`package`, `stage`, `error`), where `stage` is one of `load`, `rewrite`, `compile`, `baseline`, `coverage`, `mutants`. A `baseline` error says whether the unmodified code fails too; a `compile` failure is most likely a Kanly bug worth reporting.
 
 | Exit | Meaning |
 |------|---------|
-| `0` | Every matched package was tested (survivors do not change the exit status) |
+| `0` | Every matched package was tested and the score met `--min-score` (survivors do not change the exit status otherwise) |
 | `1` | At least one package was not tested — the report covers the rest — or Kanly itself failed |
 | `2` | Invalid flags or arguments |
+| `3` | The score including not-covered mutants is below `--min-score` |
+
+Progress goes to stderr (`--quiet` silences it), so stdout holds only the report.
 
 ### Worked example
 
 ```
-$ kanly ./internal/runner/testdata/sample
-internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+
-Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Score: 50.0%
+$ kanly --quiet ./internal/runner/testdata/sample
+Scope: ./internal/runner/testdata/sample
 
-Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Score: 50.0%
+Survived (tests ran the mutated code but none failed):
+  internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+ (id 2)
+
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 50.0% (50.0% incl. not covered)
+
+Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 50.0% (50.0% incl. not covered)
+
+Top tests by kill count:
+  github.com/devenjarvis/kanly/internal/runner/testdata/sample.TestAdd (1)
+
+Tests that killed nothing:
+  github.com/devenjarvis/kanly/internal/runner/testdata/sample.TestSub
 ```
 
-The survived mutant on line 5 (`Sub`) means the test suite has a weak assertion on subtraction — it passes even when `-` is replaced with `+`.
+The survived mutant on line 5 (`Sub`) means the test suite has a weak assertion on subtraction — it passes even when `-` is replaced with `+`. Mutants no test executes are listed separately under `Not covered`.
 
 ### Multi-package
 
 Pass multiple patterns or use `./...` to mutate all packages in a module in a single run:
 
 ```
-$ kanly ./internal/runner/testdata/sample ./internal/runner/testdata/cmpsample
-internal/runner/testdata/sample/sample.go:5:35 [int_arith] -→+
-Package: github.com/devenjarvis/kanly/internal/runner/testdata/cmpsample | Total: 2 | Killed: 2 | Survived: 0 | Timeout: 0 | Score: 100.0%
-Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Score: 50.0%
+$ kanly --quiet ./internal/runner/testdata/sample ./internal/runner/testdata/cmpsample
+...
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/cmpsample | Total: 4 | Killed: 4 | Survived: 0 | Timeout: 0 | Not covered: 0 | Score: 100.0% (100.0% incl. not covered)
+Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 50.0% (50.0% incl. not covered)
 
-Total: 4 | Killed: 3 | Survived: 1 | Timeout: 0 | Score: 75.0%
+Total: 6 | Killed: 5 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 83.3% (83.3% incl. not covered)
 ```
 
-Each package's pipeline (rewrite → compile → baseline → mutant loop) runs independently. Packages with no test files or no mutations are skipped with a one-line stderr notice and the run continues. Within a package the per-test coverage pass and the mutant loop both run concurrently under a worker pool sized by `--jobs` (default `runtime.NumCPU()`; pass `--jobs=1` for serial execution). Cross-package parallelism is still sequential and is a planned future addition.
+Each package's pipeline (rewrite → compile → baseline → mutant loop) runs independently. Packages with no test files or no mutations are skipped with a one-line stderr notice (unless `--quiet`) and the run continues. Within a package the per-test coverage pass and the mutant loop both run concurrently under a worker pool sized by `--jobs` (default `runtime.NumCPU()`; pass `--jobs=1` for serial execution). Cross-package parallelism is still sequential and is a planned future addition.
 
 ### Focused mutation
 
@@ -94,7 +117,44 @@ When a scope is active (`pkg:Func`, `--tests`, `--mutant`, or `--diff`), the rep
 
 ### Mutation score
 
-Score = (killed + timeout) / (total − not covered − not viable). A mutant that makes the tests fail or hang has been detected; one no test executes (`not_covered`) is reported separately rather than counted as a survivor.
+Kanly reports two scores:
+
+- **Score** = (killed + timeout) / (total − not covered − not viable): how well the tests that run a piece of code check it.
+- **Score incl. not covered** (`score_with_uncovered` in JSON) = (killed + timeout) / (total − not viable): untested code counts against it, so it cannot be raised by leaving code untested. `--min-score` gates on this one.
+
+A mutant that makes the tests fail or hang has been detected. Timeouts are re-run alone with twice the budget before they count, so a slow, loaded machine does not turn surviving mutants into detected ones.
+
+### Suppressing mutants
+
+Some mutants cannot be killed because they do not change behaviour (equivalent mutants), and some code is not worth mutating. To keep the report actionable:
+
+```go
+// Every operator on this line:
+x := a + b //kanly:ignore
+
+// int_arith only, on the line after the directive, with a reason:
+//kanly:ignore int_arith -- the buffer size is only a hint
+n := size * 2
+
+// In a function's doc comment, the whole function:
+//
+//kanly:ignore
+func (c *Conn) Close() error { ... }
+```
+
+Operator names may be comma- or space-separated; text after `--` is a free-form reason. An unknown operator name is an error, so a typo cannot silently suppress nothing. Suppressed mutants are counted as `Ignored` in the report. Generated files (`// Code generated … DO NOT EDIT.`) are never mutated; `--exclude`, `--operators` and `--skip-operators` narrow a run from the command line. Suppression does not renumber mutants, so IDs still match a run without it.
+
+### Using Kanly in CI
+
+```
+kanly --quiet --diff --diff-base=origin/main --min-score=80 --format=sarif ./... > kanly.sarif
+```
+
+- `--diff` mutates only lines that changed since the branch diverged from `--diff-base` (the diff is taken against `git merge-base <base> HEAD`, so commits that landed on the base branch later are not counted), plus untracked files.
+- `--min-score` fails the job (exit 3) when the changed code's mutants go undetected or untested.
+- `--format=sarif` output can be uploaded with `github/codeql-action/upload-sarif` so survivors appear as annotations on the PR's changed lines. Run Kanly from the repository root so the SARIF paths resolve.
+- Tests that share ports, files or databases may collide when Kanly runs them in parallel. Use `--verify-kills` to re-check kills one at a time, or `--jobs=1`.
+- Mutants run in your checkout. Each test process gets a private `TMPDIR`; files created in the package directory or its `testdata` during the run are moved to a temporary quarantine directory afterwards (named on stderr, so nothing is lost), and files the tests modify or delete there are reported on stderr. Run Kanly in a clean checkout or a CI workspace you can discard.
 
 ## How it works
 
@@ -140,10 +200,11 @@ largest remaining gap in Kanly's coverage:
 
 ## Limitations
 
-- **Narrow operator surface.** Today Kanly mutates arithmetic operators (expression and statement forms — `+ - * / %` and `+= -= *= /= %=`), integer comparisons, integer bitwise/shift operators (binary and compound), boolean logic, integer increment/decrement, integer-literal values, `error`-typed return values, full return-value zeroing for integer/string/bool/nilable types, void-discarded call statements, non-empty string literals, slice/map indices, and slice-range bounds. Float arithmetic and channel/switch operators are not yet covered — see [Upcoming operators](#upcoming-operators). Deleting side-effecting calls (e.g. `close(ch)`, locks, or sync primitives) can cause hangs in concurrent code, and inverting a loop counter (`i++→i--`) likewise loops forever; the per-mutant timeout — a few times the tests' normal run time, see `--timeout-factor` — bounds these and surfaces them as `Timeout` rather than `Survived`. A timeout counts as detected in the score, as in PIT and Stryker. The baseline and coverage runs execute unmutated code and get at least 10 minutes. If a busy machine produces timeouts for mutants that should be killed or survive, raise `--timeout-factor`.
+- **Narrow operator surface.** Today Kanly mutates arithmetic operators (expression and statement forms — `+ - * / %` and `+= -= *= /= %=`), integer comparisons, integer bitwise/shift operators (binary and compound), boolean logic, integer increment/decrement, integer-literal values, `error`-typed return values, full return-value zeroing for integer/string/bool/nilable types, void-discarded call statements, non-empty string literals, slice/map indices, and slice-range bounds. Float arithmetic and channel/switch operators are not yet covered — see [Upcoming operators](#upcoming-operators). Deleting side-effecting calls (e.g. `close(ch)`, locks, or sync primitives) can cause hangs in concurrent code, and inverting a loop counter (`i++→i--`) likewise loops forever; the per-mutant timeout — a few times the tests' normal run time, see `--timeout-factor` — bounds these and surfaces them as `Timeout` rather than `Survived`. A timeout counts as detected in the score, as in PIT and Stryker, once a re-run alone with twice the budget confirms it. When a test starts subprocesses, Kanly kills the whole process group on timeout. The baseline and coverage runs execute unmutated code and get at least 10 minutes. If a busy machine still produces timeouts for mutants that should be killed or survive, raise `--timeout-factor`.
 - **Test-centric signals depend on operator coverage.** The `tests`, `zero_kill_tests`, and `survivors_by_function` views in the JSON report are only as sharp as the underlying operator set. Today, many entries in `zero_kill_tests` are tests exercising code that has no mutable operators in it — not tests with weak assertions. Read these views as exploration aids; broadening the operator set will turn them into a reliable test-quality signal.
 - **Some assertions are structurally unkillable.** A few test patterns can't be expressed as MSG mutants no matter how many operators are added — most notably tests that assert on struct field tags (e.g., JSON tag names read via reflection), because Go syntax requires struct tags to be uninterpreted string literals that cannot be rewritten to runtime-conditional expressions. Such tests will always appear in `zero_kill_tests`; treat them as "structurally unkillable" rather than weak.
 - **"Identical kill-sets" is not the same as "redundant tests."** Two tests can land in the same `redundant_test_groups` entry because they coincidentally trip the same mutated lines while asserting on entirely different concerns. Treat the grouping as a "look here" prompt, not a "delete one" recommendation.
+- **Only a package's own tests can kill its mutants.** Code tested through another package (handler tests, end-to-end suites) shows up as not covered.
 - **Sequential multi-package only.** `./...` and multiple positional args are supported; packages run sequentially. Within a package the per-test coverage pass and the mutant loop are already parallel (`--jobs N`, default `runtime.NumCPU()`); cross-package parallelism is tracked for a future release.
 
 ## Development

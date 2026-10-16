@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,13 +18,35 @@ import (
 const fileScopeFunc = "<file-scope>"
 
 type Summary struct {
-	Total      int     `json:"total"`
-	Killed     int     `json:"killed"`
-	Survived   int     `json:"survived"`
-	Timeout    int     `json:"timeout"`
-	NotViable  int     `json:"not_viable"`
-	NotCovered int     `json:"not_covered"`
-	Score      float64 `json:"score"`
+	Total      int `json:"total"`
+	Killed     int `json:"killed"`
+	Survived   int `json:"survived"`
+	Timeout    int `json:"timeout"`
+	NotViable  int `json:"not_viable"`
+	NotCovered int `json:"not_covered"`
+	// Ignored counts mutants suppressed by //kanly:ignore; they are not in
+	// Total. Set on the report's overall summary only.
+	Ignored int     `json:"ignored,omitempty"`
+	Score   float64 `json:"score"`
+	// ScoreWithUncovered also counts not-covered mutants as undetected, so
+	// untested code lowers it; see scoreWithUncovered.
+	ScoreWithUncovered float64 `json:"score_with_uncovered"`
+}
+
+// SchemaVersion is the JSON report's schema_version. It changes when a field
+// is removed or changes meaning; added fields keep it.
+const SchemaVersion = 2
+
+// scoreWithUncovered is the fraction of viable mutants the tests detected,
+// covered or not. Unlike score it cannot be raised by leaving code untested:
+// a package with one covered, killed mutant and a thousand uncovered ones
+// scores 100% on score but 0.1% here.
+func scoreWithUncovered(s Summary) float64 {
+	denominator := s.Total - s.NotViable
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(s.Killed+s.Timeout) / float64(denominator)
 }
 
 // score is the mutation score: the fraction of covered, viable mutants the
@@ -45,35 +68,42 @@ type PackageSummary struct {
 
 // PackageError records a package that was matched but not mutation-tested.
 // Stage names the pipeline step that failed: "load", "rewrite", "compile",
-// "baseline", "coverage" or "mutants". A failed baseline means the package's
-// tests fail before any mutant is applied.
+// "baseline", "coverage" or "mutants". A failed baseline means the test binary
+// fails outside any individual test (TestMain, init, a crash); failing tests
+// are excluded instead (see ExcludedTest). The error says whether the
+// unmodified code fails too.
 type PackageError struct {
 	Package string `json:"package"`
 	Stage   string `json:"stage"`
 	Error   string `json:"error"`
 }
 
+// ExcludedTest records a test that was left out of mutation testing because
+// it fails without any mutant applied, so it cannot tell a mutant apart from
+// the original code.
+type ExcludedTest struct {
+	Package string `json:"package"`
+	Test    string `json:"test"`
+	Reason  string `json:"reason"`
+}
+
 type Report struct {
-	Scope                   string                       `json:"scope,omitempty"`
-	Summary                 Summary                      `json:"summary"`
-	Packages                []PackageSummary             `json:"packages"`
-	Errors                  []PackageError               `json:"errors,omitempty"`
-	Tests                   []mutation.TestStats         `json:"tests"`
-	ZeroKillTests           []string                     `json:"zero_kill_tests"`
-	IncidentalCoverageTests []string                     `json:"incidental_coverage_tests,omitempty"`
-	RedundantTestGroups     [][]string                   `json:"redundant_test_groups"`
-	SurvivorsByFunction     []mutation.FunctionSurvivors `json:"survivors_by_function"`
-	Mutants                 []mutation.Result            `json:"mutants"`
+	SchemaVersion       int                          `json:"schema_version"`
+	Scope               string                       `json:"scope,omitempty"`
+	Summary             Summary                      `json:"summary"`
+	Packages            []PackageSummary             `json:"packages"`
+	Errors              []PackageError               `json:"errors,omitempty"`
+	ExcludedTests       []ExcludedTest               `json:"excluded_tests,omitempty"`
+	Tests               []mutation.TestStats         `json:"tests"`
+	ZeroKillTests       []string                     `json:"zero_kill_tests"`
+	RedundantTestGroups [][]string                   `json:"redundant_test_groups"`
+	SurvivorsByFunction []mutation.FunctionSurvivors `json:"survivors_by_function"`
+	Mutants             []mutation.Result            `json:"mutants"`
 }
 
 // Build assembles a Report from per-mutant Results plus the per-package test
-// inventory and the per-package incidental-coverage list (tests that the
-// caller filtered out of the per-mutant runs because their statement coverage
-// of a scoped line looked like setup traffic rather than an assertion). Pass
-// nil for incidental on full / non-scoped runs to keep the report shape
-// byte-identical to prior behavior — the field is `omitempty` and the LLM
-// renderer's incidental section is silent when empty.
-func Build(results []mutation.Result, testInventory map[string][]string, incidental map[string][]string) Report {
+// inventory.
+func Build(results []mutation.Result, testInventory map[string][]string) Report {
 	var s Summary
 	s.Total = len(results)
 	for _, r := range results {
@@ -91,6 +121,7 @@ func Build(results []mutation.Result, testInventory map[string][]string, inciden
 		}
 	}
 	s.Score = score(s)
+	s.ScoreWithUncovered = scoreWithUncovered(s)
 
 	// Build per-package summaries.
 	pkgMap := make(map[string]*Summary)
@@ -127,29 +158,22 @@ func Build(results []mutation.Result, testInventory map[string][]string, inciden
 	for _, name := range pkgNames {
 		ps := pkgMap[name]
 		ps.Score = score(*ps)
+		ps.ScoreWithUncovered = scoreWithUncovered(*ps)
 		pkgSummaries = append(pkgSummaries, PackageSummary{Package: name, Summary: *ps})
 	}
 
 	tests, zeroKill, redundant := buildTestAggregations(results, testInventory)
 	survivors := buildSurvivorsByFunction(results)
 
-	var incidentalFlat []string
-	for pkg, names := range incidental {
-		for _, n := range names {
-			incidentalFlat = append(incidentalFlat, qualifyTestName(pkg, n))
-		}
-	}
-	sort.Strings(incidentalFlat)
-
 	return Report{
-		Summary:                 s,
-		Packages:                pkgSummaries,
-		Tests:                   tests,
-		ZeroKillTests:           zeroKill,
-		IncidentalCoverageTests: incidentalFlat,
-		RedundantTestGroups:     redundant,
-		SurvivorsByFunction:     survivors,
-		Mutants:                 results,
+		SchemaVersion:       SchemaVersion,
+		Summary:             s,
+		Packages:            pkgSummaries,
+		Tests:               tests,
+		ZeroKillTests:       zeroKill,
+		RedundantTestGroups: redundant,
+		SurvivorsByFunction: survivors,
+		Mutants:             results,
 	}
 }
 
@@ -329,9 +353,9 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMUncoveredSection(&b, r, uncovered, src.FuncRanges, readFile)
 	writeLLMRedundant(&b, r.RedundantTestGroups)
 	writeLLMZeroKill(&b, r.ZeroKillTests)
-	writeLLMIncidental(&b, r.IncidentalCoverageTests)
 	writeLLMTestInventory(&b, r.Tests)
 	writeLLMErrors(&b, r.Errors)
+	writeLLMExcluded(&b, r.ExcludedTests)
 	writeLLMNextIteration(&b, survivors, uncovered)
 
 	out := b.String()
@@ -358,10 +382,10 @@ func writeLLMPreamble(b *strings.Builder) {
 
 func writeLLMSummary(b *strings.Builder, s Summary) {
 	b.WriteString("## Summary\n\n")
-	b.WriteString("| Total | Killed | Survived | Timeout | NotCovered | NotViable | Score |\n")
-	b.WriteString("|-------|--------|----------|---------|------------|-----------|-------|\n")
-	fmt.Fprintf(b, "| %d | %d | %d | %d | %d | %d | %.1f%% |\n\n",
-		s.Total, s.Killed, s.Survived, s.Timeout, s.NotCovered, s.NotViable, s.Score*100)
+	b.WriteString("| Total | Killed | Survived | Timeout | NotCovered | NotViable | Score | Score incl. not covered |\n")
+	b.WriteString("|-------|--------|----------|---------|------------|-----------|-------|-------------------------|\n")
+	fmt.Fprintf(b, "| %d | %d | %d | %d | %d | %d | %.1f%% | %.1f%% |\n\n",
+		s.Total, s.Killed, s.Survived, s.Timeout, s.NotCovered, s.NotViable, s.Score*100, s.ScoreWithUncovered*100)
 }
 
 // splitUnkilled groups survived and not-covered mutants by (package,
@@ -618,12 +642,6 @@ func writeLLMZeroKill(b *strings.Builder, tests []string) {
 	b.WriteString("\n")
 }
 
-// writeLLMIncidental renders the incidental-coverage section. Silent on empty
-// input so full / non-scoped runs render byte-identically to prior versions.
-// The wording emphasises that these tests still belong to the suite — kanly
-// only excluded them from this scoped run's per-mutant set because their
-// statement coverage of a scoped line looked like helper / setup traffic
-// rather than an assertion. They are NOT deletion candidates.
 // errorExcerptLines caps how much of a package's error the text and llm
 // renderers print; the JSON report carries the full message.
 const errorExcerptLines = 15
@@ -643,20 +661,20 @@ func writeLLMErrors(b *strings.Builder, errs []PackageError) {
 		return
 	}
 	b.WriteString("## Packages not tested\n\n")
-	b.WriteString("These packages matched but produced no mutation results, so the scores above do not cover them. A `baseline` failure means the package's tests fail before any mutant is applied — fix those first.\n\n")
+	b.WriteString("These packages matched but produced no mutation results, so the scores above do not cover them. A `baseline` failure means the test binary fails outside any single test (for example in `TestMain`); the error says whether the unmodified code fails too.\n\n")
 	for _, e := range errs {
 		fmt.Fprintf(b, "### %s (%s)\n\n```\n%s\n```\n\n", e.Package, e.Stage, errorExcerpt(e.Error, errorExcerptLines))
 	}
 }
 
-func writeLLMIncidental(b *strings.Builder, tests []string) {
+func writeLLMExcluded(b *strings.Builder, tests []ExcludedTest) {
 	if len(tests) == 0 {
 		return
 	}
-	b.WriteString("## Incidental coverage (excluded from scope analysis)\n\n")
-	b.WriteString("These tests touched a scoped line via shared setup or a helper call but were not run against the targeted mutants — their single hit on the line, alongside another test hitting it harder, indicates the line is not what they're asserting on. They still run in the full suite; this section only documents the exclusion so they don't appear as zero-kill noise.\n\n")
+	b.WriteString("## Tests excluded\n\n")
+	b.WriteString("These tests fail without any mutant applied, so they were not run against mutants and their kills are not counted. Fix them to bring them back into the analysis.\n\n")
 	for _, t := range tests {
-		fmt.Fprintf(b, "- `%s`\n", t)
+		fmt.Fprintf(b, "- `%s`: %s\n", qualifyTestName(t.Package, t.Test), t.Reason)
 	}
 	b.WriteString("\n")
 }
@@ -695,28 +713,46 @@ func WriteText(w io.Writer, r Report) error {
 			return err
 		}
 	}
-	// Surviving mutants first — they are the actionable signal.
-	for _, m := range r.Mutants {
-		if m.Status == mutation.StatusSurvived {
-			if _, err := fmt.Fprintf(w, "%s:%d:%d [%s] %s→%s\n",
-				m.Mutation.File, m.Mutation.Line, m.Mutation.Column,
-				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant,
-			); err != nil {
+	// Unkilled mutants first — they are the actionable signal.
+	for _, sec := range []struct {
+		title  string
+		status mutation.Status
+	}{
+		{"Survived (tests ran the mutated code but none failed)", mutation.StatusSurvived},
+		{"Not covered (no test runs the mutated code)", mutation.StatusNotCovered},
+	} {
+		muts := sortedByLocation(r.Mutants, sec.status)
+		if len(muts) == 0 {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "%s:\n", sec.title); err != nil {
+			return err
+		}
+		for _, m := range muts {
+			line := fmt.Sprintf("  %s:%d:%d [%s] %s→%s (id %d)",
+				relPath(m.Mutation.File), m.Mutation.Line, m.Mutation.Column,
+				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant, m.Mutation.ID)
+			if m.Note != "" {
+				line += " — " + m.Note
+			}
+			if _, err := fmt.Fprintln(w, line); err != nil {
 				return err
 			}
 		}
-	}
-	for _, ps := range r.Packages {
-		if _, err := fmt.Fprintf(w, "Package: %s | Total: %d | Killed: %d | Survived: %d | Timeout: %d | Score: %.1f%%\n",
-			ps.Package, ps.Total, ps.Killed, ps.Survived, ps.Timeout, ps.Score*100,
-		); err != nil {
+		if _, err := fmt.Fprintln(w); err != nil {
 			return err
 		}
 	}
-	if _, err := fmt.Fprintf(w, "\nTotal: %d | Killed: %d | Survived: %d | Timeout: %d | Score: %.1f%%\n",
-		r.Summary.Total, r.Summary.Killed, r.Summary.Survived, r.Summary.Timeout,
-		r.Summary.Score*100,
-	); err != nil {
+	for _, ps := range r.Packages {
+		if _, err := fmt.Fprintf(w, "Package: %s | %s\n", ps.Package, summaryLine(ps.Summary)); err != nil {
+			return err
+		}
+	}
+	total := "\n" + summaryLine(r.Summary)
+	if r.Summary.Ignored > 0 {
+		total += fmt.Sprintf(" | Ignored: %d", r.Summary.Ignored)
+	}
+	if _, err := fmt.Fprintln(w, total); err != nil {
 		return err
 	}
 
@@ -727,6 +763,17 @@ func WriteText(w io.Writer, r Report) error {
 		for _, e := range r.Errors {
 			excerpt := strings.ReplaceAll(errorExcerpt(e.Error, errorExcerptLines), "\n", "\n    ")
 			if _, err := fmt.Fprintf(w, "  %s [%s]: %s\n", e.Package, e.Stage, excerpt); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(r.ExcludedTests) > 0 {
+		if _, err := fmt.Fprintf(w, "\nTests excluded (%d):\n", len(r.ExcludedTests)); err != nil {
+			return err
+		}
+		for _, t := range r.ExcludedTests {
+			if _, err := fmt.Fprintf(w, "  %s: %s\n", qualifyTestName(t.Package, t.Test), t.Reason); err != nil {
 				return err
 			}
 		}
@@ -765,17 +812,6 @@ func WriteText(w io.Writer, r Report) error {
 		}
 	}
 
-	if len(r.IncidentalCoverageTests) > 0 {
-		if _, err := fmt.Fprintln(w, "\nIncidental coverage (excluded from kill analysis):"); err != nil {
-			return err
-		}
-		for _, n := range r.IncidentalCoverageTests {
-			if _, err := fmt.Fprintf(w, "  %s\n", n); err != nil {
-				return err
-			}
-		}
-	}
-
 	if len(r.RedundantTestGroups) > 0 {
 		if _, err := fmt.Fprintln(w, "\nRedundant test groups (identical kill sets):"); err != nil {
 			return err
@@ -788,4 +824,54 @@ func WriteText(w io.Writer, r Report) error {
 	}
 
 	return nil
+}
+
+// summaryLine renders a Summary's counts and both scores on one line.
+func summaryLine(s Summary) string {
+	return fmt.Sprintf("Total: %d | Killed: %d | Survived: %d | Timeout: %d | Not covered: %d | Score: %.1f%% (%.1f%% incl. not covered)",
+		s.Total, s.Killed, s.Survived, s.Timeout, s.NotCovered, s.Score*100, s.ScoreWithUncovered*100)
+}
+
+// sortedByLocation returns the results with any of the given statuses,
+// ordered by file, line, column and ID.
+func sortedByLocation(results []mutation.Result, statuses ...mutation.Status) []mutation.Result {
+	var out []mutation.Result
+	for _, r := range results {
+		for _, st := range statuses {
+			if r.Status == st {
+				out = append(out, r)
+				break
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i].Mutation, out[j].Mutation
+		if a.File != b.File {
+			return a.File < b.File
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		if a.Column != b.Column {
+			return a.Column < b.Column
+		}
+		return a.ID < b.ID
+	})
+	return out
+}
+
+// relPath returns an absolute path relative to the working directory when
+// it lies beneath it, and the path unchanged otherwise.
+func relPath(p string) string {
+	if !filepath.IsAbs(p) {
+		return p
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return p
+	}
+	if rel, err := filepath.Rel(cwd, p); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return p
 }

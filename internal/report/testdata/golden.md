@@ -13,9 +13,9 @@ After editing tests, verify with `kanly --mutant=<ids> <pkg>` (see the iteration
 
 ## Summary
 
-| Total | Killed | Survived | Timeout | NotCovered | NotViable | Score |
-|-------|--------|----------|---------|------------|-----------|-------|
-| 3 | 1 | 1 | 0 | 1 | 0 | 50.0% |
+| Total | Killed | Survived | Timeout | NotCovered | NotViable | Score | Score incl. not covered |
+|-------|--------|----------|---------|------------|-----------|-------|-------------------------|
+| 3 | 1 | 1 | 0 | 1 | 0 | 50.0% | 33.3% |
 
 ## Live mutants (covered but not killed)
 
