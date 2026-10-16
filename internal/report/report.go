@@ -17,13 +17,16 @@ import (
 const fileScopeFunc = "<file-scope>"
 
 type Summary struct {
-	Total      int     `json:"total"`
-	Killed     int     `json:"killed"`
-	Survived   int     `json:"survived"`
-	Timeout    int     `json:"timeout"`
-	NotViable  int     `json:"not_viable"`
-	NotCovered int     `json:"not_covered"`
-	Score      float64 `json:"score"`
+	Total      int `json:"total"`
+	Killed     int `json:"killed"`
+	Survived   int `json:"survived"`
+	Timeout    int `json:"timeout"`
+	NotViable  int `json:"not_viable"`
+	NotCovered int `json:"not_covered"`
+	// Ignored counts mutants suppressed by //kanly:ignore; they are not in
+	// Total. Set on the report's overall summary only.
+	Ignored int     `json:"ignored,omitempty"`
+	Score   float64 `json:"score"`
 }
 
 // score is the mutation score: the fraction of covered, viable mutants the

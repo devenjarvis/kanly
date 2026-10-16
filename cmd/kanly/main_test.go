@@ -900,3 +900,144 @@ func TestRunCleansUpFilesTestsCreate(t *testing.T) {
 		t.Errorf("a test's leftover temporary file reached the real TMPDIR (stat: %v)", err)
 	}
 }
+
+func TestSelectOperators(t *testing.T) {
+	ops := mutation.Operators()
+	tests := []struct {
+		name, only, skip string
+		want             []string // nil means all operators
+		wantErr          string
+	}{
+		{name: "none", want: nil},
+		{name: "only", only: "int_arith, bool_logic", want: []string{"bool_logic", "int_arith"}},
+		{name: "only minus skip", only: "int_arith,bool_logic", skip: "bool_logic", want: []string{"int_arith"}},
+		{name: "unknown", only: "int_arth", wantErr: `--operators: unknown operator "int_arth"`},
+		{name: "unknown skip", skip: "nope", wantErr: `--skip-operators: unknown operator "nope"`},
+		{name: "nothing left", only: "int_arith", skip: "int_arith", wantErr: "leave no operator"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := selectOperators(ops, tt.only, tt.skip)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("got %v, want nil (all operators)", got)
+				}
+				return
+			}
+			var names []string
+			for n := range got {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			if !reflect.DeepEqual(names, tt.want) {
+				t.Errorf("got %v, want %v", names, tt.want)
+			}
+		})
+	}
+
+	// Skipping alone keeps every other operator.
+	got, err := selectOperators(ops, "", "call_delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["call_delete"] || len(got) != len(ops)-1 {
+		t.Errorf("skip-only: got %d operators (call_delete=%v), want %d", len(got), got["call_delete"], len(ops)-1)
+	}
+}
+
+func TestExcludeFilter(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := excludeFilter("internal/gen, *_mock.go, cmd/*/legacy.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		file string
+		want bool
+	}{
+		{"internal/gen/x.go", true},
+		{"internal/gen/sub/y.go", true},
+		{"internal/generated/x.go", false},
+		{"pkg/store_mock.go", true},
+		{"cmd/kanly/legacy.go", true},
+		{"cmd/kanly/main.go", false},
+	}
+	for _, tt := range tests {
+		if got := f(filepath.Join(cwd, tt.file)); got != tt.want {
+			t.Errorf("excluded(%s) = %v, want %v", tt.file, got, tt.want)
+		}
+	}
+	if f, err := excludeFilter(" , "); err != nil || f != nil {
+		t.Errorf("empty list: got (%v, %v), want (nil, nil)", f != nil, err)
+	}
+	if _, err := excludeFilter("[bad"); err == nil {
+		t.Error("malformed pattern: want an error")
+	}
+}
+
+// Ignore directives, --operators and --exclude reach the report.
+func TestRunSuppression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/ignoresample")
+	type summary struct {
+		Total   int `json:"total"`
+		Ignored int `json:"ignored"`
+	}
+	runJSON := func(args ...string) (summary, []string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run(append(append([]string{"--format=json"}, args...), dir), &stdout, &stderr); code != 0 {
+			t.Fatalf("run %v returned %d; stderr: %s", args, code, stderr.String())
+		}
+		var result struct {
+			Summary summary `json:"summary"`
+			Mutants []struct {
+				Mutation struct {
+					Function string `json:"function"`
+					Operator string `json:"operator"`
+				} `json:"mutation"`
+			} `json:"mutants"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		var muts []string
+		for _, m := range result.Mutants {
+			muts = append(muts, m.Mutation.Function+" "+m.Mutation.Operator)
+		}
+		return result.Summary, muts
+	}
+
+	all, muts := runJSON()
+	if all.Ignored != 1 {
+		t.Errorf("ignored = %d, want 1 (Scale's int_arith)", all.Ignored)
+	}
+	for _, m := range muts {
+		if m == "Scale int_arith" {
+			t.Error("the ignored Scale int_arith mutant ran")
+		}
+	}
+	if _, muts := runJSON("--operators=int_arith"); !reflect.DeepEqual(muts, []string{"Add int_arith"}) {
+		t.Errorf("--operators=int_arith ran %v, want [Add int_arith]", muts)
+	}
+	if s, muts := runJSON("--skip-operators=int_arith"); s.Total != all.Total-1 || containsString(muts, "Add int_arith") {
+		t.Errorf("--skip-operators=int_arith ran %v (total %d of %d)", muts, s.Total, all.Total)
+	}
+	if s, _ := runJSON("--exclude=ignore.go"); s.Total != 0 {
+		t.Errorf("--exclude=ignore.go: total %d, want 0", s.Total)
+	}
+}

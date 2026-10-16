@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -51,12 +52,13 @@ func resolveVersion() string {
 // runConfig collects the per-package knobs threaded from CLI flags into runPackage.
 type runConfig struct {
 	filter        func(file string, line int, funcName string) bool
-	timeout       time.Duration // fixed per-mutant timeout; 0 derives it from the baseline
-	timeoutFactor float64       // multiplier on baseline test time for derived timeouts
-	testsRegex    string        // if non-empty, narrows baseline + per-test coverage
-	mutantIDs     map[int]bool  // if non-nil, only these schema-assigned IDs run
-	jobs          int           // worker pool size for per-test coverage and the mutant loop; >= 1
-	verifyKills   bool          // re-run every killed mutant alone to confirm the kill
+	timeout       time.Duration   // fixed per-mutant timeout; 0 derives it from the baseline
+	timeoutFactor float64         // multiplier on baseline test time for derived timeouts
+	testsRegex    string          // if non-empty, narrows baseline + per-test coverage
+	mutantIDs     map[int]bool    // if non-nil, only these schema-assigned IDs run
+	operators     map[string]bool // if non-nil, only these operators' mutants run
+	jobs          int             // worker pool size for per-test coverage and the mutant loop; >= 1
+	verifyKills   bool            // re-run every killed mutant alone to confirm the kill
 }
 
 const (
@@ -240,13 +242,14 @@ func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(r m
 // pkgResult is what one package's pipeline contributes to the report.
 type pkgResult struct {
 	results    []mutation.Result
+	ignored    int                           // mutants suppressed by //kanly:ignore
 	inventory  []string                      // tests reported for the package
 	excluded   []report.ExcludedTest         // tests left out because they fail unmutated
 	funcRanges map[string]mutation.FuncRange // canonical func name → source range
 }
 
 func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) (pkgResult, error) {
-	rew, err := schema.Rewrite(pkg, ops, cfg.filter)
+	rew, err := schema.RewriteWith(pkg, ops, schema.Options{Filter: cfg.filter, Operators: cfg.operators})
 	if err != nil {
 		return pkgResult{}, &stageError{"rewrite", err}
 	}
@@ -428,7 +431,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		inventory = narrowed
 	}
 
-	return pkgResult{results: results, inventory: inventory, excluded: excluded, funcRanges: funcRanges}, nil
+	return pkgResult{results: results, inventory: inventory, excluded: excluded, funcRanges: funcRanges, ignored: rew.Ignored}, nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -443,6 +446,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	diffFlag := fs.Bool("diff", false, "only mutate lines changed since --diff-base")
 	diffBaseFlag := fs.String("diff-base", "HEAD", "git ref to diff against when --diff is set")
 	testsFlag := fs.String("tests", "", "regex narrowing the test inventory used by baseline and per-test coverage")
+	operatorsFlag := fs.String("operators", "", "comma-separated operators to run (default all)")
+	skipOperatorsFlag := fs.String("skip-operators", "", "comma-separated operators not to run")
+	excludeFlag := fs.String("exclude", "", "comma-separated file globs not to mutate, matched against the path relative to the working directory, the file name, or a directory prefix")
 	mutantFlag := fs.String("mutant", "", "comma-separated schema-assigned mutant IDs to re-run; others are skipped")
 	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
 	verifyKillsFlag := fs.Bool("verify-kills", false, "re-run every killed mutant alone and count kills that do not reproduce as survived")
@@ -468,6 +474,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if *jobsFlag < 1 {
 		fmt.Fprintf(stderr, "--jobs: must be >= 1, got %d\n", *jobsFlag)
+		return 2
+	}
+
+	excludePred, err := excludeFilter(*excludeFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "--exclude: %v\n", err)
 		return 2
 	}
 
@@ -526,6 +538,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "no operators registered\n")
 		return 1
 	}
+	operatorSet, err := selectOperators(ops, *operatorsFlag, *skipOperatorsFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
 
 	ctx := context.Background()
 	var allResults []mutation.Result
@@ -536,6 +553,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// package cannot discard its siblings' results.
 	var pkgErrors []report.PackageError
 	var excludedTests []report.ExcludedTest
+	ignored := 0
 	recordFailure := func(pkg, stage string, err error) {
 		msg := err.Error()
 		first, rest, multiline := strings.Cut(msg, "\n")
@@ -579,11 +597,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 
 			cfg := runConfig{
-				filter:        composeFilter(diffPred, spec.Funcs),
+				filter:        composeFilter(diffPred, excludePred, spec.Funcs),
 				timeout:       *timeoutFlag,
 				timeoutFactor: *timeoutFactorFlag,
 				testsRegex:    *testsFlag,
 				mutantIDs:     mutantIDs,
+				operators:     operatorSet,
 				jobs:          *jobsFlag,
 				verifyKills:   *verifyKillsFlag,
 			}
@@ -603,6 +622,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				continue
 			}
 			excludedTests = append(excludedTests, res.excluded...)
+			ignored += res.ignored
 			allResults = append(allResults, res.results...)
 			testInventory[pkg.ImportPath] = res.inventory
 			funcRangesByPkg[pkg.ImportPath] = res.funcRanges
@@ -611,6 +631,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	rep := report.Build(allResults, testInventory)
 	rep.Scope = describeScope(specs, *diffFlag, *diffBaseFlag, *testsFlag, *mutantFlag)
+	for _, f := range []struct{ name, value string }{
+		{"operators", *operatorsFlag}, {"skip-operators", *skipOperatorsFlag}, {"exclude", *excludeFlag},
+	} {
+		if f.value != "" {
+			rep.Scope = strings.TrimSpace(rep.Scope + " --" + f.name + "=" + f.value)
+		}
+	}
+	rep.Summary.Ignored = ignored
 	rep.Errors = pkgErrors
 	rep.ExcludedTests = excludedTests
 	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg}
@@ -625,15 +653,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// composeFilter combines an optional diff (file, line) predicate with an
-// optional function-name selector list. Returns nil when neither is active so
-// the rewriter takes the fast no-filter path.
-func composeFilter(diffPred func(file string, line int) bool, funcs []string) func(string, int, string) bool {
-	if diffPred == nil && len(funcs) == 0 {
+// composeFilter combines an optional diff (file, line) predicate, an
+// optional file-exclusion predicate and an optional function-name selector
+// list. Returns nil when none is active so the rewriter takes the fast
+// no-filter path.
+func composeFilter(diffPred func(file string, line int) bool, exclude func(file string) bool, funcs []string) func(string, int, string) bool {
+	if diffPred == nil && exclude == nil && len(funcs) == 0 {
 		return nil
 	}
 	return func(file string, line int, funcName string) bool {
 		if diffPred != nil && !diffPred(file, line) {
+			return false
+		}
+		if exclude != nil && exclude(file) {
 			return false
 		}
 		if len(funcs) > 0 && !selector.AnyMatch(funcs, funcName) {
@@ -641,6 +673,102 @@ func composeFilter(diffPred func(file string, line int) bool, funcs []string) fu
 		}
 		return true
 	}
+}
+
+// selectOperators returns the operator names to run given --operators and
+// --skip-operators, or nil for all of them. Unknown names are an error.
+func selectOperators(ops []mutation.Operator, only, skip string) (map[string]bool, error) {
+	if only == "" && skip == "" {
+		return nil, nil
+	}
+	known := make(map[string]bool, len(ops))
+	var names []string
+	for _, op := range ops {
+		known[op.Name()] = true
+		names = append(names, op.Name())
+	}
+	parse := func(flagName, list string) (map[string]bool, error) {
+		set := make(map[string]bool)
+		for _, n := range strings.Split(list, ",") {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			if !known[n] {
+				return nil, fmt.Errorf("--%s: unknown operator %q; known: %s", flagName, n, strings.Join(names, ", "))
+			}
+			set[n] = true
+		}
+		return set, nil
+	}
+	selected := known
+	if only != "" {
+		set, err := parse("operators", only)
+		if err != nil {
+			return nil, err
+		}
+		selected = set
+	}
+	skipped, err := parse("skip-operators", skip)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool)
+	for n := range selected {
+		if !skipped[n] {
+			out[n] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("--operators/--skip-operators leave no operator to run")
+	}
+	return out, nil
+}
+
+// excludeFilter parses --exclude into a predicate reporting whether an
+// absolute file path is excluded, or nil when the list is empty. A pattern
+// matches the path relative to the working directory, the file's base name,
+// or (without glob characters) a directory prefix of the relative path.
+func excludeFilter(list string) (func(file string) bool, error) {
+	var patterns []string
+	for _, p := range strings.Split(list, ",") {
+		p = strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(p)), "/")
+		p = strings.TrimPrefix(p, "./")
+		if p == "" {
+			continue
+		}
+		if _, err := path.Match(p, ""); err != nil {
+			return nil, fmt.Errorf("bad pattern %q: %w", p, err)
+		}
+		patterns = append(patterns, p)
+	}
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	return func(file string) bool {
+		rel := file
+		if r, err := filepath.Rel(cwd, file); err == nil {
+			rel = r
+		}
+		rel = filepath.ToSlash(rel)
+		base := path.Base(rel)
+		for _, p := range patterns {
+			if m, _ := path.Match(p, rel); m {
+				return true
+			}
+			if m, _ := path.Match(p, base); m {
+				return true
+			}
+			if strings.HasPrefix(rel, p+"/") {
+				return true
+			}
+		}
+		return false
+	}, nil
 }
 
 // validateFuncSelectors checks that every user-supplied function entry matches
