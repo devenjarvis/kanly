@@ -56,6 +56,7 @@ type runConfig struct {
 	testsRegex    string        // if non-empty, narrows baseline + per-test coverage
 	mutantIDs     map[int]bool  // if non-nil, only these schema-assigned IDs run
 	jobs          int           // worker pool size for per-test coverage and the mutant loop; >= 1
+	verifyKills   bool          // re-run every killed mutant alone to confirm the kill
 }
 
 const (
@@ -176,6 +177,43 @@ func failureMessage(msg string) string {
 		}
 	}
 	return first
+}
+
+// confirmTimeoutScale multiplies a mutant's timeout when a timeout is
+// re-run alone to confirm it.
+const confirmTimeoutScale = 2.0
+
+// confirmVerdicts re-runs, one at a time, the verdicts most likely to be
+// artifacts of running mutants in parallel. Every timeout is re-run with a
+// longer budget and takes the re-run's verdict, since a loaded machine can
+// push a killable or surviving mutant past its timeout. With verifyKills,
+// every kill is re-run too, and a kill that does not reproduce is reported
+// as survived: tests that collide over shared ports, files or databases
+// when run concurrently fail without detecting anything.
+func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(r mutation.Result, timeoutScale float64) (mutation.Result, error)) error {
+	for i, r := range results {
+		switch {
+		case r.Status == mutation.StatusTimeout:
+			again, err := rerun(r, confirmTimeoutScale)
+			if err != nil {
+				return err
+			}
+			if again.Status != mutation.StatusTimeout {
+				again.Note = fmt.Sprintf("timed out in the parallel run; %s when re-run alone", again.Status)
+			}
+			results[i] = again
+		case r.Status == mutation.StatusKilled && verifyKills:
+			again, err := rerun(r, 1)
+			if err != nil {
+				return err
+			}
+			if again.Status == mutation.StatusSurvived {
+				again.Note = "killed in the parallel run but survived when re-run alone; the kill was not reproducible"
+				results[i] = again
+			}
+		}
+	}
+	return nil
 }
 
 // pkgResult is what one package's pipeline contributes to the report.
@@ -323,6 +361,21 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		return pkgResult{}, &stageError{"mutants", err}
 	}
 
+	// Re-run uncertain verdicts one at a time, away from the contention of
+	// the parallel loop.
+	rerun := func(r mutation.Result, timeoutScale float64) (mutation.Result, error) {
+		timeout := time.Duration(timeoutScale * float64(cfg.mutantTimeout(baseline, r.CoveringTests)))
+		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, r.Mutation.ID, pkg.Dir, r.CoveringTests, timeout)
+		if err != nil {
+			return r, fmt.Errorf("re-run mutant %d: %w", r.Mutation.ID, err)
+		}
+		r.Status, r.KillingTests, r.Duration = status, killingTests, dur
+		return r, nil
+	}
+	if err := confirmVerdicts(results, cfg.verifyKills, rerun); err != nil {
+		return pkgResult{}, &stageError{"mutants", err}
+	}
+
 	// When a scope is active (filter or --mutant), drop tests from the reported
 	// inventory that don't cover any kept mutation. This keeps "zero_kill_tests"
 	// and the redundant-group analysis focused on tests an LLM could actually
@@ -341,7 +394,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly [--version] [--format=text|json|llm] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly [--version] [--format=text|json|llm] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -354,6 +407,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	testsFlag := fs.String("tests", "", "regex narrowing the test inventory used by baseline and per-test coverage")
 	mutantFlag := fs.String("mutant", "", "comma-separated schema-assigned mutant IDs to re-run; others are skipped")
 	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
+	verifyKillsFlag := fs.Bool("verify-kills", false, "re-run every killed mutant alone and count kills that do not reproduce as survived")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(stderr, usage)
@@ -493,6 +547,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				testsRegex:    *testsFlag,
 				mutantIDs:     mutantIDs,
 				jobs:          *jobsFlag,
+				verifyKills:   *verifyKillsFlag,
 			}
 
 			res, err := runPackage(ctx, pkg, ops, cfg, stderr)

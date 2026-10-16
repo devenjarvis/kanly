@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devenjarvis/kanly/internal/mutation"
 	"github.com/devenjarvis/kanly/internal/selector"
 )
 
@@ -782,5 +783,95 @@ func TestRunReportsTestMainFailure(t *testing.T) {
 	}
 	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Error, "pass on the unmodified code but fail under Kanly's rewritten code") {
 		t.Errorf("errors = %+v, want a baseline error blaming the rewrite", result.Errors)
+	}
+}
+
+func TestConfirmVerdicts(t *testing.T) {
+	mut := func(id int, status mutation.Status) mutation.Result {
+		return mutation.Result{Mutation: mutation.Mutation{ID: id}, Status: status, CoveringTests: []string{"TestX"}}
+	}
+	// rerun returns the verdict queued for the mutant and records the scale.
+	type call struct {
+		id    int
+		scale float64
+	}
+	fake := func(next map[int]mutation.Status, calls *[]call) func(mutation.Result, float64) (mutation.Result, error) {
+		return func(r mutation.Result, scale float64) (mutation.Result, error) {
+			*calls = append(*calls, call{r.Mutation.ID, scale})
+			r.Status = next[r.Mutation.ID]
+			return r, nil
+		}
+	}
+
+	t.Run("timeouts are re-run with a longer budget", func(t *testing.T) {
+		results := []mutation.Result{mut(1, mutation.StatusTimeout), mut(2, mutation.StatusTimeout), mut(3, mutation.StatusKilled)}
+		var calls []call
+		next := map[int]mutation.Status{1: mutation.StatusKilled, 2: mutation.StatusTimeout}
+		if err := confirmVerdicts(results, false, fake(next, &calls)); err != nil {
+			t.Fatal(err)
+		}
+		if want := []call{{1, confirmTimeoutScale}, {2, confirmTimeoutScale}}; !reflect.DeepEqual(calls, want) {
+			t.Errorf("re-runs = %v, want %v (kills are not re-run without verifyKills)", calls, want)
+		}
+		if results[0].Status != mutation.StatusKilled || results[0].Note == "" {
+			t.Errorf("mutant 1: got %s %q, want killed with a note", results[0].Status, results[0].Note)
+		}
+		if results[1].Status != mutation.StatusTimeout || results[1].Note != "" {
+			t.Errorf("mutant 2: got %s %q, want a confirmed timeout without a note", results[1].Status, results[1].Note)
+		}
+	})
+
+	t.Run("verifyKills demotes kills that do not reproduce", func(t *testing.T) {
+		results := []mutation.Result{mut(1, mutation.StatusKilled), mut(2, mutation.StatusKilled), mut(3, mutation.StatusSurvived)}
+		var calls []call
+		next := map[int]mutation.Status{1: mutation.StatusSurvived, 2: mutation.StatusKilled}
+		if err := confirmVerdicts(results, true, fake(next, &calls)); err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 2 {
+			t.Errorf("re-runs = %v, want the two kills only", calls)
+		}
+		if results[0].Status != mutation.StatusSurvived || !strings.Contains(results[0].Note, "not reproducible") {
+			t.Errorf("mutant 1: got %s %q, want survived with a note", results[0].Status, results[0].Note)
+		}
+		if results[1].Status != mutation.StatusKilled {
+			t.Errorf("mutant 2: got %s, want killed", results[1].Status)
+		}
+	})
+}
+
+// --verify-kills re-runs a kill alone and reports it as survived when it
+// does not reproduce.
+func TestRunVerifyKills(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/flakykill")
+	statuses := func(args ...string) []string {
+		t.Helper()
+		t.Setenv("FLAKY_MARKER", filepath.Join(t.TempDir(), "marker"))
+		var stdout, stderr bytes.Buffer
+		if code := run(append([]string{"--format=json", "--jobs=1", "--mutant=1"}, args...), &stdout, &stderr); code != 0 {
+			t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+		}
+		var result struct {
+			Mutants []struct {
+				Status string `json:"status"`
+			} `json:"mutants"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		var out []string
+		for _, m := range result.Mutants {
+			out = append(out, m.Status)
+		}
+		return out
+	}
+	if got := statuses(dir); !reflect.DeepEqual(got, []string{"killed"}) {
+		t.Errorf("without --verify-kills: statuses %v, want [killed]", got)
+	}
+	if got := statuses("--verify-kills", dir); !reflect.DeepEqual(got, []string{"survived"}) {
+		t.Errorf("with --verify-kills: statuses %v, want [survived]", got)
 	}
 }
