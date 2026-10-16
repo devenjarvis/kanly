@@ -7,8 +7,9 @@ d7f604b98ee1 with an empty format, fmt still prints the path and JSON error as %
 841dd9a633d8 with an empty format, fmt still prints the error as %!(EXTRA ...), so only a test pinning the message could tell
 0dac67a4fde2 with an empty format, fmt still prints the error as %!(EXTRA ...), so only a test pinning the message could tell
 12812f23e778 with an empty format, fmt still prints the path and command as %!(EXTRA ...), so only a test pinning the message could tell
-d903e3d396be indentation of the generated settings.json; checking it would pin the exact bytes of the file
-9b775eaf4a55 os.WriteFile fails here only after the directory was created and the file read, which needs filesystem fault injection
+1afb6f14a9ee indentation of the generated settings.json; checking it would pin the exact bytes of the file
+0d5d34400f46 indentation of the generated settings.json; checking it would pin the exact bytes of the file
+8961f0c69c21 os.WriteFile fails here only after the directory was created and the file read, which needs filesystem fault injection
 14568e6ea335 os.WriteFile fails here only after the directory was created and the file read, which needs filesystem fault injection
 04a017ed28f6 equivalent: callers ignore the bool when writeSkill returns an error
 c8249fb57490 equivalent: callers ignore the bool when writeSkill returns an error
