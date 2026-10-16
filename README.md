@@ -195,6 +195,8 @@ Kanly implements the Mutant Schema Generation (MSG) technique: instead of recomp
 | `int_compound_assign` | `+=↔-=`, `*=↔/=`, `%=→*=`, `&=↔\|=`, `^=→&=`, `<<=↔>>=`, `&^=→&=` | AOR (statement-level), PIT MATH (compound variant) |
 | `struct_field_zero` | keyed struct-literal field value → zero of T (shares the `return_zero` dispatcher) | PIT EMPTY\_RETURNS family (field-position variant) |
 
+`string_literal` also skips the help text passed as the `usage` argument to package `flag` (`fs.String("out", "-", "where to write")`): only a test pinning `--help` output could kill it.
+
 Integer operators (`int_arith`, `int_cmp_*`, `int_bitwise`, `slice_index`, `slice_range`, `inc_dec`, `int_compound_assign`) target operands whose underlying type is a basic integer — `int`, sized signed/unsigned variants (`int8`/`int32`/`uint64`/…), `byte`, `rune`, `uintptr`, and named wrappers like `type UserID int64` or `time.Duration`. Binary forms additionally require both operands to share the same defined type (`types.Identical`), so `int + int32` is not mutated cross-type. Boolean operators (`bool_logic`, `bool_not`) follow the same policy for `bool` and named-bool wrappers like `type MyBool bool`; in a named-bool context they fire only when the (left) operand carries its own type, since an untyped operand such as `n < 1` would infer plain `bool`. Integer comparisons (`int_cmp_*`) return plain `bool` and are skipped in named-bool contexts like `var b MyBool = n < 5`. Type-bearing dispatchers are generic (`func __cMutInt[T __cInteger](a, b T, …) T`) so the rewritten code stays type-safe across the full family. `int_literal`, `bool_literal`, and `string_literal` are exceptions — they remain restricted to plain `int` / `bool` / `string` because the rewriter cannot infer the contextual type at an untyped-literal call site (so `var c Color = "red"` is not mutated); sized/named literal coverage is tracked in [Upcoming operators](#upcoming-operators). `err_return_nil` restricts to expressions whose static type is exactly the universe `error` interface (not concrete types like `*MyError`), and ignores naked `return` statements in functions with named results. `call_delete` targets `*ast.ExprStmt`-wrapped calls only (so `defer` and `go` statements are naturally excluded); it skips the builtins `panic`, `print`, and `println`, and `recover` (which only works when called directly by a deferred function, so it cannot be wrapped), but keeps `close`, `delete`, and `clear`, whose deletion produces observable behavior changes (hangs, residual map entries). Under an active mutant the call's argument expressions are not evaluated either — lazy semantics matching PIT's "Void Method Call Removal". `string_literal` skips empty strings, import paths, struct field tags, and const-decl initializers (each must syntactically remain a literal in Go and cannot be replaced by a function call). Literal operators also skip array lengths and array/slice composite-literal keys (`[]string{0: "a"}`), which must be constants. `slice_index` and `slice_range` exclude purely-constant indices. `inc_dec` and `int_compound_assign` use a shared closure-swap dispatcher so non-trivial LHS forms like `m[k]++` or `m[k] += y` are evaluated exactly once.
 
 ## Upcoming operators
@@ -240,9 +242,24 @@ Every pull request runs the [ci](.github/workflows/ci.yml) workflow: gofmt, `go 
 
 ## Dogfooding
 
-Every pull request on this repo runs Kanly against `./internal/...`, and again against just the lines the PR changes (`--diff`), via the [mutation-test](.github/workflows/mutation-test.yml) GitHub Actions workflow. The workflow posts each result as a PR comment (updated in-place on re-pushes) and never fails the check — it is informational only.
+Every pull request on this repo runs Kanly against `./internal/...`, and again against just the lines the PR changes (`--diff`), via the [mutation-test](.github/workflows/mutation-test.yml) GitHub Actions workflow. Each result is posted as a PR comment (updated in place on re-pushes) and in the job summary. The diff job fails below 80% on the changed lines, counting mutants no test reaches, and its comment is the `--format=llm` brief, so an agent working on the PR can act on it directly; the full run fails below a floor that only moves up. Coding agents working in this repo get the same loop locally from the skill and Stop hook in `.claude/` (see [Coding agents](#coding-agents)).
 
 **Fork PRs:** `GITHUB_TOKEN` on fork pull requests does not receive `pull-requests: write` permission, so the comment step will silently no-op for contributions from forks.
+
+## Coding agents
+
+Kanly carries its own instructions, so a repository does not need paragraphs of them in `AGENTS.md`:
+
+```
+kanly guide                    # print the workflow for any coding agent
+kanly init --agent=claude      # write it as a Claude Code skill and register the stop hook
+```
+
+`kanly init --agent=claude` writes `.claude/skills/kanly/SKILL.md`, which Claude Code loads when it writes or changes Go code or tests, and adds a Stop hook to `.claude/settings.json` (other settings are kept; re-running updates the hook rather than adding another). Flags: `--command` (how to invoke Kanly, e.g. `go run ./cmd/kanly`), `--diff-base` (default `origin/main`), `--min-score` (default `80`), `--no-hook`, `--dir`. Delete the generated-file marker line in `SKILL.md` to keep local edits across re-runs. For other agents, one line in `AGENTS.md` is enough: "Before finishing a Go change, run `kanly guide` and follow it."
+
+`kanly hook stop` is the hook. When the agent stops, it runs `kanly --diff --fail-fast --format=llm --min-score=<n>` on what changed since `--diff-base`. If the score including not-covered mutants is below the threshold, it blocks the stop and hands the agent the brief (cut at 10,000 characters). It blocks once per stop: when the agent stops again, it is let through, so an agent that cannot reach the score is never trapped; CI stays the hard gate. If Kanly cannot test a package, the hook reports it on stderr without blocking. Turns that change no non-test Go file cost nothing. Arguments after `--` go to the Kanly run (`kanly hook stop -- --tags=integration`).
+
+A score gate gives an agent a cheap way out: accepting every survivor in `.kanlyignore`. The guide forbids it, and reviewers should read `.kanlyignore` changes as closely as code.
 
 ## LLM-driven test repair
 

@@ -1,0 +1,3 @@
+c563a92946ef equivalent: a span starts at a `case` keyword, where no operator places a mutation
+c65ea5c591b2 equivalent: a span ends at a case clause's colon, where no operator places a mutation
+9982c292548e equivalent: case clauses never share a start position, so > and >= pick the same innermost span

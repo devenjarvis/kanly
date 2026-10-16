@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"go/types"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -292,6 +293,33 @@ func TestRewriteMutationMetadata(t *testing.T) {
 // TestRewriteCallDeleteAndIntArithCoexist verifies that two operators with
 // different DispatcherKeys can target distinct nodes in the same file without
 // stomping on each other in the rewriter's node→group flattening.
+// Mutations in a case expression list report the line of their switch or
+// select statement as CoverLine; anything else, including the switch tag and
+// case bodies, reports none. A nested statement's case list wins.
+func TestRewriteSetsCoverLineForCaseExpressions(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "testdata/casespan"))
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntArith{}}, nil)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	got := map[int]int{}
+	for _, m := range rew.Mutations {
+		got[m.Line] = m.CoverLine
+	}
+	want := map[int]int{
+		4: 0, 5: 4, 6: 4, 7: 0, // expression switch: tag, two-line case list, body
+		10: 9, 11: 0, // select
+		17: 16, 19: 14, // switch inside a case expression of another
+		22: 0,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CoverLine by line: want %v, got %v", want, got)
+	}
+}
+
 func TestRewriteCallDeleteAndIntArithCoexist(t *testing.T) {
 	pkg, err := source.Load(relDir(t, "../operators/testdata/calldelete"))
 	if err != nil {
