@@ -87,7 +87,8 @@ type runConfig struct {
 	failFast      bool               // stop each mutant run at its first failing test
 	dependents    []runner.Dependent // other packages whose tests also run against the mutants (--cross-package)
 	cache         *setupCache        // dependents' setups across runs; nil disables it
-	moduleStamp   string             // the module's non-code files, part of the cache key
+	kills         *killCache         // kills across runs; nil disables it
+	moduleStamp   string             // the module's non-code files, part of the cache keys
 }
 
 // mutantArgs returns the test binary flags for a run against a mutant.
@@ -393,6 +394,48 @@ func runMutantSuites(ctx context.Context, suites []suite, id int, tests [][]stri
 	return status, killers, total, nil
 }
 
+// reusedKiller returns the first of covering, the tests that now cover a
+// mutant, that killed it in an earlier run whose entry e has the mutant's
+// current key, provided the test's source is unchanged; "" when there is
+// none.
+func reusedKiller(e killEntry, key string, testHash map[string]string, covering []string) string {
+	if key == "" || e.Key != key {
+		return ""
+	}
+	for _, name := range covering {
+		if h, ok := e.Killers[name]; ok && h != "" && h == testHash[name] {
+			return name
+		}
+	}
+	return ""
+}
+
+// killUpdates returns the kill cache entries a run's results change: a fresh
+// kill is stored with its killers' source hashes, and any other verdict
+// drops the mutant's entry. Reused kills and mutants without a key are left
+// alone.
+func killUpdates(results []mutation.Result, keys []string, testHash map[string]string) map[string]killEntry {
+	set := make(map[string]killEntry)
+	for i, r := range results {
+		if keys[i] == "" || r.Cached {
+			continue
+		}
+		e := killEntry{Key: keys[i]}
+		if r.Status == mutation.StatusKilled {
+			for _, name := range r.KillingTests {
+				if h := testHash[name]; h != "" {
+					if e.Killers == nil {
+						e.Killers = make(map[string]string)
+					}
+					e.Killers[name] = h
+				}
+			}
+		}
+		set[r.Mutation.Fingerprint] = e
+	}
+	return set
+}
+
 // dependentSuites compiles each of cfg.dependents' tests against pkg's
 // mutant schema, runs them unmutated and collects their coverage of pkg. A
 // dependent that cannot be set up is skipped with a warning: its tests only
@@ -617,19 +660,54 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		}
 	}
 
-	covered := 0
-	for _, tests := range covering {
-		if len(tests) > 0 {
-			covered++
+	// Kills from earlier runs are reused only for a verdict alone: a kill
+	// matrix needs every killer, and --verify-kills asks for a fresh run.
+	kills := cfg.kills
+	if cfg.moduleStamp == "" {
+		kills = nil
+	}
+	keys := kills.mutantKeys(mutations, cfg.moduleStamp, pkg.ImportPath, fmt.Sprint(cfg.buildFlags), fmt.Sprint(cfg.testArgs))
+	testHash := make(map[string]string) // result name → test source hash
+	var stored map[string]killEntry
+	if kills != nil {
+		for _, s := range suites {
+			for name, h := range testHashes(s.dir) {
+				testHash[s.resultName(name)] = h
+			}
+		}
+		if cfg.failFast && !cfg.verifyKills {
+			stored = kills.load(pkg.ImportPath)
 		}
 	}
-	cfg.progress.printf("%s: testing %d covered mutants (%d not covered) with %d test(s)", pkg.ImportPath, covered, len(mutations)-covered, len(inventory))
+
+	results := make([]mutation.Result, len(mutations))
+	covered, reused := 0, 0
+	for i, tests := range covering {
+		if len(tests) == 0 {
+			continue
+		}
+		covered++
+		if killer := reusedKiller(stored[mutations[i].Fingerprint], keys[i], testHash, tests); killer != "" {
+			results[i] = mutation.Result{
+				Mutation:      mutations[i],
+				Status:        mutation.StatusKilled,
+				KillingTests:  []string{killer},
+				CoveringTests: tests,
+				Cached:        true,
+			}
+			reused++
+		}
+	}
+	if reused > 0 {
+		cfg.progress.printf("%s: reusing %d kills from earlier runs", pkg.ImportPath, reused)
+	}
+	cfg.progress.printf("%s: testing %d covered mutants (%d not covered) with %d test(s)", pkg.ImportPath, covered-reused, len(mutations)-covered, len(inventory))
 	var done atomic.Int64
-	reportEvery := max(covered/10, 1)
+	toRun := covered - reused
+	reportEvery := max(toRun/10, 1)
 	lastReport := time.Now()
 	var reportMu sync.Mutex
 
-	results := make([]mutation.Result, len(mutations))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(cfg.jobs)
 	for i, mut := range mutations {
@@ -641,6 +719,9 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 				Mutation: mut,
 				Status:   mutation.StatusNotCovered,
 			}
+			continue
+		}
+		if results[i].Cached {
 			continue
 		}
 		g.Go(func() error {
@@ -657,9 +738,9 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 			}
 			n := int(done.Add(1))
 			reportMu.Lock()
-			if n < covered && (n%reportEvery == 0 || time.Since(lastReport) > 30*time.Second) {
+			if n < toRun && (n%reportEvery == 0 || time.Since(lastReport) > 30*time.Second) {
 				lastReport = time.Now()
-				cfg.progress.printf("%s: %d/%d mutants tested", pkg.ImportPath, n, covered)
+				cfg.progress.printf("%s: %d/%d mutants tested", pkg.ImportPath, n, toRun)
 			}
 			reportMu.Unlock()
 			return nil
@@ -683,6 +764,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		return pkgResult{}, &stageError{"mutants", err}
 	}
 	cfg.progress.printf("%s: done in %s", pkg.ImportPath, time.Since(start).Round(100*time.Millisecond))
+	kills.update(pkg.ImportPath, killUpdates(results, keys, testHash))
 
 	// When a scope is active (filter or --mutant), drop tests from the reported
 	// inventory that don't cover any kept mutation. This keeps "zero_kill_tests"
@@ -702,7 +784,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly guide | kanly init --agent=claude | kanly hook stop | kanly show <pkg> <mutant>... | kanly test [--in=<pkg>] <pkg> <mutant> [go test flags]\n       kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-or-fp-list>] [--jobs=N] [--verify-kills] [--kill-matrix] [--cross-package [--no-cache]] [--llm-limit=30] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly guide | kanly init --agent=claude | kanly hook stop | kanly show <pkg> <mutant>... | kanly test [--in=<pkg>] <pkg> <mutant> [go test flags]\n       kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-or-fp-list>] [--jobs=N] [--verify-kills] [--kill-matrix] [--cross-package] [--no-cache] [--llm-limit=30] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -729,7 +811,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	failFastFlag := fs.Bool("fail-fast", false, "stop testing each mutant at its first failing test (the default; see --kill-matrix)")
 	llmLimitFlag := fs.Int("llm-limit", defaultLLMLimit, "most mutants the llm brief lists, those in the functions with the most first; 0 lists all")
 	crossPackageFlag := fs.Bool("cross-package", false, "also run the tests of the module's other packages that import the mutated package")
-	noCacheFlag := fs.Bool("no-cache", false, "with --cross-package, set up every dependent's tests afresh instead of reusing an unchanged setup")
+	noCacheFlag := fs.Bool("no-cache", false, "run every mutant, and with --cross-package set up every dependent's tests, instead of reusing results of earlier runs")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(stderr, usage)
@@ -868,27 +950,39 @@ func run(args []string, stdout, stderr io.Writer) int {
 	matchedFPs := make(map[string]bool)
 	ignored := 0
 	var cache *setupCache
-	if *crossPackageFlag && !*noCacheFlag {
-		cache = openSetupCache()
+	var kills *killCache
+	if !*noCacheFlag {
+		kills = openKillCache()
+		if *crossPackageFlag {
+			cache = openSetupCache()
+		}
 	}
-	// Dependents are listed, and the module stamped for the cache, once
-	// per module on first use: before any test runs, so files tests leave
-	// behind do not change the stamp.
-	dependentsByModule := make(map[string]map[string][]runner.Dependent)
+	// The module is stamped for the caches, and its dependents listed, once
+	// per module on first use: before any of its tests run, so files tests
+	// leave behind do not change the stamp.
 	stamps := make(map[string]string)
+	stampOf := func(pkg *source.Package) string {
+		if (cache == nil && kills == nil) || pkg.ModuleDir == "" {
+			return ""
+		}
+		stamp, ok := stamps[pkg.ModuleDir]
+		if !ok {
+			var err error
+			stamp, err = moduleStamp(pkg.ModuleDir)
+			if err != nil {
+				fmt.Fprintf(stderr, "warning: not reusing results of earlier runs: %v\n", err)
+			}
+			stamps[pkg.ModuleDir] = stamp
+		}
+		return stamp
+	}
+	dependentsByModule := make(map[string]map[string][]runner.Dependent)
 	dependentsOf := func(pkg *source.Package) []runner.Dependent {
 		if !*crossPackageFlag || pkg.ModuleDir == "" {
 			return nil
 		}
 		deps, ok := dependentsByModule[pkg.ModuleDir]
 		if !ok {
-			if cache != nil {
-				stamp, err := moduleStamp(pkg.ModuleDir)
-				if err != nil {
-					fmt.Fprintf(stderr, "warning: --cross-package: not caching dependents' setups: %v\n", err)
-				}
-				stamps[pkg.ModuleDir] = stamp
-			}
 			var err error
 			deps, err = runner.TestDependents(ctx, pkg.ModuleDir, buildFlags...)
 			if err != nil {
@@ -940,6 +1034,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				}
 			}
 
+			stamp := stampOf(pkg)
 			deps := dependentsOf(pkg)
 			cfg := runConfig{
 				filter:        composeFilter(diffPred, excludePred, spec.Funcs),
@@ -956,7 +1051,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 				failFast:      !*killMatrixFlag,
 				dependents:    deps,
 				cache:         cache,
-				moduleStamp:   stamps[pkg.ModuleDir],
+				kills:         kills,
+				moduleStamp:   stamp,
 			}
 
 			res, err := runPackage(ctx, pkg, ops, cfg, stderr)

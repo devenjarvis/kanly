@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/devenjarvis/kanly/internal/runner"
+	"github.com/devenjarvis/kanly/internal/schema"
 )
 
 // A dependent's tests are set up (baseline and per-test coverage) once per
@@ -97,8 +98,8 @@ func (c *setupCache) key(bins []string, parts ...string) (string, bool) {
 }
 
 // moduleStamp hashes the path, size and modification time of the files
-// under dir, skipping hidden directories such as .git and Go files outside
-// testdata (see above).
+// under dir, skipping hidden directories such as .git, Go files outside
+// testdata (see above) and .kanlyignore files, which tests never read.
 func moduleStamp(dir string) (string, error) {
 	h := sha256.New()
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -112,7 +113,7 @@ func moduleStamp(dir string) (string, error) {
 			return nil
 		}
 		rel := strings.TrimPrefix(path, dir)
-		if strings.HasSuffix(path, ".go") && !inTestdata(rel) {
+		if strings.HasSuffix(path, ".go") && !inTestdata(rel) || d.Name() == schema.IgnoreFileName {
 			return nil
 		}
 		info, err := d.Info()

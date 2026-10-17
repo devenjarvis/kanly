@@ -48,6 +48,9 @@ type Result struct {
 	// Note explains a status that changed when the mutant was re-run alone
 	// to confirm it (see --verify-kills); empty otherwise.
 	Note string `json:"note,omitempty"`
+	// Cached is set on a kill reused from an earlier run instead of
+	// re-running the mutant: its code and killing test are unchanged.
+	Cached bool `json:"cached,omitempty"`
 }
 
 // FuncRange identifies a top-level function's source range, used by the LLM
