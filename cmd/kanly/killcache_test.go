@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -53,6 +54,11 @@ func B() int {
 	}
 	if after[10] == before[10] || after[3] == before[3] {
 		t.Error("editing B left the hash of B, or of the file, unchanged")
+	}
+	// The declaration's last character counts too.
+	writeFiles(t, dir, map[string]string{"p.go": strings.Replace(src, "var c = 1", "var c = 2", 1)})
+	if declHashes(file)[4] == before[4] {
+		t.Error("editing the end of c's declaration left its hash unchanged")
 	}
 
 	if declHashes(filepath.Join(dir, "missing.go")) != nil {
@@ -161,6 +167,8 @@ func TestKillCacheUpdate(t *testing.T) {
 	if got := c.load("m/p"); got != nil {
 		t.Errorf("load of a corrupt file = %+v, want nil", got)
 	}
+	// Nothing to change writes nothing.
+	c.update("m/empty", nil)
 	// A failed write leaves no temporary file behind.
 	if err := os.Remove(c.path("m/q")); err != nil {
 		t.Fatal(err)
@@ -190,16 +198,17 @@ func TestMutantKeys(t *testing.T) {
 	const src = "package p\n\nfunc A(a int) int {\n\treturn a + 1\n}\n\nfunc B(b int) int {\n\treturn b - 1\n}\n"
 	writeFiles(t, dir, map[string]string{"p.go": src})
 	muts := []mutation.Mutation{
-		{File: file, Line: 4, Fingerprint: "fa"},
+		{File: file, Line: 3, Fingerprint: "fa"}, // A's first line
 		{File: file, Line: 8, Fingerprint: "fb"},
 		{File: file, Line: 10, Fingerprint: "fc"}, // one past the last line
 		{File: filepath.Join(dir, "missing.go"), Line: 1, Fingerprint: "fd"},
 		{File: file, Line: 0, Fingerprint: "fe"},
+		{File: file, Line: 1, Fingerprint: "ff"}, // the package clause
 	}
 	c := &killCache{salt: "s"}
 	before := c.mutantKeys(muts, "stamp")
-	if before[0] == "" || before[1] == "" || before[0] == before[1] || before[2] != "" || before[3] != "" || before[4] != "" {
-		t.Fatalf("mutantKeys = %q: want distinct keys for A and B, none outside the file's lines or for a missing file", before)
+	if before[0] == "" || before[1] == "" || before[0] == before[1] || before[2] != "" || before[3] != "" || before[4] != "" || before[5] == "" {
+		t.Fatalf("mutantKeys = %q: want distinct keys for A, B and line 1, none outside the file's lines or for a missing file", before)
 	}
 	if got := c.mutantKeys(muts, "other stamp"); got[0] == before[0] {
 		t.Error("changing a run-wide part left the key unchanged")
@@ -236,6 +245,12 @@ func TestOpenKillCache(t *testing.T) {
 	}
 }
 
+func TestHashStringsDelimitsParts(t *testing.T) {
+	if hashStrings("ab", "c") == hashStrings("a", "bc") {
+		t.Error(`hashStrings("ab", "c") == hashStrings("a", "bc")`)
+	}
+}
+
 func TestHashFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{"a": "x", "b": "y"})
@@ -260,8 +275,8 @@ func TestRunReusesKills(t *testing.T) {
 	}
 	t.Setenv("KANLY_CACHE_DIR", t.TempDir())
 	dir := t.TempDir()
-	const code = "package kc\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n\nfunc Sub(a, b int) int {\n\treturn a - b\n}\n\nfunc Mul(a, b int) int {\n\treturn a * b\n}\n"
-	const tests = "package kc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(2, 3) != 5 {\n\t\tt.Fatal(\"Add\")\n\t}\n}\n\nfunc TestSub(t *testing.T) {\n\tif Sub(5, 3) != 2 {\n\t\tt.Fatal(\"Sub\")\n\t}\n}\n\nfunc TestMul(t *testing.T) { Mul(1, 1) }\n"
+	const code = "package kc\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n\nfunc Sub(a, b int) int {\n\treturn a - b\n}\n\nfunc Mul(a, b int) int {\n\treturn a * b\n}\n\nfunc Div(a, b int) int {\n\treturn a / b\n}\n\nfunc Unused(a int) int {\n\treturn a + 1\n}\n"
+	const tests = "package kc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(2, 3) != 5 {\n\t\tt.Fatal(\"Add\")\n\t}\n}\n\nfunc TestSub(t *testing.T) {\n\tif Sub(5, 3) != 2 {\n\t\tt.Fatal(\"Sub\")\n\t}\n}\n\nfunc TestMul(t *testing.T) { Mul(1, 1); Div(1, 1) }\n"
 	writeFiles(t, dir, map[string]string{"go.mod": "module example.com/kc\n\ngo 1.23\n", "kc.go": code, "kc_test.go": tests})
 	chdir(t, dir)
 
@@ -288,7 +303,10 @@ func TestRunReusesKills(t *testing.T) {
 	}
 	// cachedBy returns, per function, whether each mutant was reused, and
 	// checks that verdicts match the first run.
-	first, _ := runJSON()
+	first, firstErr := runJSON()
+	if strings.Contains(firstErr, "kills from earlier runs") {
+		t.Errorf("first run reports reused kills:\n%s", firstErr)
+	}
 	cachedBy := func(ms []mutant) map[string][]bool {
 		t.Helper()
 		if len(ms) != len(first) {
@@ -333,8 +351,40 @@ func TestRunReusesKills(t *testing.T) {
 	if !all(got["Add"], true) || !all(got["Sub"], true) || !all(got["Mul"], false) {
 		t.Errorf("second run reused %v; want every Add and Sub mutant, no Mul survivor", got)
 	}
-	if !strings.Contains(stderr, "kills from earlier runs") {
-		t.Errorf("progress does not mention reused kills:\n%s", stderr)
+	// Progress counts only the mutants left to run.
+	notCovered, reused := 0, 0
+	for _, m := range second {
+		if m.Status == "not_covered" {
+			notCovered++
+		}
+		if m.Cached {
+			reused++
+		}
+	}
+	toRun := len(second) - notCovered - reused
+	if notCovered == 0 || toRun < 2 {
+		t.Fatalf("%d not covered and %d to run; the progress checks need some of each", notCovered, toRun)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("reusing %d kills from earlier runs", reused),
+		fmt.Sprintf("testing %d covered mutants (%d not covered) with 3 test(s)", toRun, notCovered),
+		fmt.Sprintf(" 1/%d mutants tested", toRun),
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("progress lacks %q:\n%s", want, stderr)
+		}
+	}
+	if last := fmt.Sprintf("%d/%d mutants tested", toRun, toRun); strings.Contains(stderr, last) {
+		t.Errorf("progress has %q, which the closing line already covers:\n%s", last, stderr)
+	}
+	// A run of a single killed mutant reuses just that one.
+	for _, m := range second {
+		if m.Cached {
+			if _, stderr := runJSON("--mutant=" + m.Mutation.Fingerprint); !strings.Contains(stderr, "reusing 1 kills from earlier runs") {
+				t.Errorf("--mutant=%s: progress lacks the one reused kill:\n%s", m.Mutation.Fingerprint, stderr)
+			}
+			break
+		}
 	}
 
 	// Editing the killing test of Sub, or the code of Add, re-runs them.

@@ -1,0 +1,1 @@
+c778a027ba13 write error from the report writer; like every other write in WriteText, only a failing io.Writer reaches it

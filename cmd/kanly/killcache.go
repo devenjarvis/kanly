@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/devenjarvis/kanly/internal/mutation"
 )
@@ -153,7 +152,7 @@ func (c *killCache) mutantKeys(muts []mutation.Mutation, parts ...string) []stri
 			lines = declHashes(m.File)
 			declsByFile[m.File] = lines
 		}
-		if m.Line <= 0 || m.Line >= len(lines) || lines[m.Line] == "" {
+		if m.Line <= 0 || m.Line >= len(lines) {
 			continue
 		}
 		keys[i] = hashStrings(append([]string{c.salt, m.Fingerprint, lines[m.Line]}, parts...)...)
@@ -195,8 +194,7 @@ func declHashes(file string) []string {
 // dir's _test.go files, by name. A name declared in several files (under
 // different build tags) hashes all of them.
 func testHashes(dir string) map[string]string {
-	files, _ := filepath.Glob(filepath.Join(dir, "*_test.go"))
-	sort.Strings(files)
+	files, _ := filepath.Glob(filepath.Join(dir, "*_test.go")) // sorted
 	srcs := make(map[string][]string)
 	for _, file := range files {
 		src, err := os.ReadFile(file)

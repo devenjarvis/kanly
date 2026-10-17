@@ -19,3 +19,23 @@ ce9ac77d5c35 os.Exit in main cannot run inside a test process; dispatch is teste
 c14fb5056377 os.Exit in main cannot run inside a test process; dispatch is tested directly
 1da08a7efe6c os.Exit in main cannot run inside a test process; dispatch is tested directly
 d7d457bc3bcd os.Exit in main cannot run inside a test process; dispatch is tested directly
+# kill cache (killcache.go)
+13b34bacf1a7 write and close errors on a temp file in the cache dir cannot be produced by a test
+65ec74fcbab3 the .json extension only names the file; any fixed suffix works
+020f93621b8d the temp-file pattern only names a file that is renamed or removed
+4d7fa9a7a82b shifting the hashed window of a declaration by one leading character drops its keyword's first letter, which no edit changes alone
+541eeb4f194b shifting the hashed window of a declaration by one leading character takes in the newline before it, which is always there
+bb6e4e90ae00 widening the hashed window of a declaration by one takes in the newline after it, which is always there
+b38c92422495 a test function's source always starts with "func"; dropping its first letter changes no comparison
+8fa6d01c08dc a test function's source is always preceded by a newline or comment; one more character changes no comparison
+7db9860ac2a9 a test function's source is always followed by a newline; one more character changes no comparison
+c3b247359e50 a test function's source always ends with "}"; dropping it changes no comparison
+# progress output in runPackage
+8c84c68397f8 moduleStamp fails only on an unreadable module directory, which the test that loads the module cannot have
+908bdedbb012 moduleStamp fails only on an unreadable module directory, which the test that loads the module cannot have
+cf829b257cb8 the 30-second progress fallback: only a test that runs a mutant loop for 30 seconds could tell > from >=
+c23239959005 the 30-second progress fallback prints extra progress lines; asserting on that would be a change-detector test
+d99ab72b6348 with both caches off the stamp is computed but never read; only the run time differs
+0aa4ecc3ef02 progress cadence: dividing by -10 instead of 10 only changes how often progress lines print on large runs
+c38c89a04142 progress cadence: dividing by 11 instead of 10 only changes how often progress lines print on large runs
+c1b14253964f progress cadence: dividing by 9 instead of 10 only changes how often progress lines print on large runs

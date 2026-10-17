@@ -1124,6 +1124,11 @@ func TestRunCleansUpFilesTestsCreate(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 	dir := relDir(t, "../../internal/runner/testdata/fswrite")
+	// A run that did not move the file away (Kanly testing itself, with a
+	// mutant in that code) must not fail every later run.
+	if err := os.Remove(filepath.Join(dir, "fswrite-result.txt")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 	var stdout, stderr bytes.Buffer
@@ -1451,6 +1456,11 @@ func TestRunCrossPackage(t *testing.T) {
 	// a file there. orderdep's TestSecond fails on its own, mainfail's
 	// TestMain fails and brokentest's tests do not compile.
 	root := relDir(t, "../../internal/runner/testdata/crosspkg")
+	// A run that did not move the file away (Kanly testing itself, with a
+	// mutant in that code) must not fail every later run.
+	if err := os.Remove(filepath.Join(root, "reader", "scratch.txt")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	chdir(t, root)
 	t.Setenv("KANLY_CACHE_DIR", t.TempDir())
 	type mutant struct {
