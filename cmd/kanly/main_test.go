@@ -282,7 +282,7 @@ func TestRunMutantFingerprintFilter(t *testing.T) {
 		t.Fatalf("no Sub mutant in %+v", probe)
 	}
 
-	got, stderr := runJSON("--mutant=" + subFP)
+	got, stderr := runJSON("--kill-matrix", "--mutant="+subFP)
 	if len(got.Mutants) != 1 || got.Mutants[0].Mutation.Fingerprint != subFP {
 		t.Errorf("--mutant=%s ran %+v, want just that mutant", subFP, got.Mutants)
 	}
@@ -326,7 +326,7 @@ func TestRunTestsRegexNarrowsInventory(t *testing.T) {
 	sampleDir := relDir(t, "../../internal/runner/testdata/sample")
 	var stdout, stderr bytes.Buffer
 	// Restrict to TestAdd only — Sub mutant should now appear as not_covered.
-	code := run([]string{"--format=json", "--tests=^TestAdd$", sampleDir}, &stdout, &stderr)
+	code := run([]string{"--format=json", "--kill-matrix", "--tests=^TestAdd$", sampleDir}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
 	}
@@ -1031,8 +1031,9 @@ func TestRunVerifyKills(t *testing.T) {
 }
 
 // A .kanlyignore entry hides its mutant, and an entry matching no mutant is
-// reported as stale. --fail-fast keeps every verdict but stops each mutant
-// at its first failing test, so the per-test views are dropped.
+// reported as stale. By default each mutant stops at its first failing test:
+// every verdict matches a --kill-matrix run, but the per-test views are
+// dropped.
 func TestRunAcceptedMutantsAndFailFast(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -1069,7 +1070,7 @@ func TestRunAcceptedMutantsAndFailFast(t *testing.T) {
 		return r
 	}
 
-	full := runJSON()
+	full := runJSON("--kill-matrix")
 	if full.Summary.Ignored != 1 {
 		t.Errorf("ignored = %d, want 1", full.Summary.Ignored)
 	}
@@ -1082,29 +1083,37 @@ func TestRunAcceptedMutantsAndFailFast(t *testing.T) {
 		t.Errorf("stale_ignores = %+v, want just 0123456789ab", full.StaleIgnores)
 	}
 	if full.FailFast || len(full.Tests) == 0 {
-		t.Errorf("full run: fail_fast = %v with %d tests, want false with tests", full.FailFast, len(full.Tests))
+		t.Errorf("--kill-matrix: fail_fast = %v with %d tests, want false with tests", full.FailFast, len(full.Tests))
 	}
 
-	fast := runJSON("--fail-fast")
+	fast := runJSON()
 	if !fast.FailFast || len(fast.Tests) != 0 {
-		t.Errorf("--fail-fast: fail_fast = %v with %d tests, want true with none", fast.FailFast, len(fast.Tests))
+		t.Errorf("default run: fail_fast = %v with %d tests, want true with none", fast.FailFast, len(fast.Tests))
+	}
+	if legacy := runJSON("--fail-fast"); !legacy.FailFast || len(legacy.Tests) != 0 {
+		t.Errorf("--fail-fast: fail_fast = %v with %d tests, want true with none", legacy.FailFast, len(legacy.Tests))
 	}
 	if len(fast.Mutants) != len(full.Mutants) {
-		t.Fatalf("--fail-fast ran %d mutants, full run %d", len(fast.Mutants), len(full.Mutants))
+		t.Fatalf("default run ran %d mutants, --kill-matrix run %d", len(fast.Mutants), len(full.Mutants))
 	}
 	multi := false
 	for i, m := range fast.Mutants {
 		want := full.Mutants[i]
 		if m.Status != want.Status {
-			t.Errorf("mutant %d: --fail-fast status %s, full run %s", m.Mutation.ID, m.Status, want.Status)
+			t.Errorf("mutant %d: default status %s, --kill-matrix %s", m.Mutation.ID, m.Status, want.Status)
 		}
 		multi = multi || len(want.KillingTests) > 1
 		if m.Status == "killed" && len(m.KillingTests) != 1 {
-			t.Errorf("mutant %d: --fail-fast killing tests %v, want exactly one", m.Mutation.ID, m.KillingTests)
+			t.Errorf("mutant %d: default killing tests %v, want exactly one", m.Mutation.ID, m.KillingTests)
 		}
 	}
 	if !multi {
-		t.Error("no mutant has several killers in the full run, so --fail-fast is not exercised")
+		t.Error("no mutant has several killers in the --kill-matrix run, so stopping early is not exercised")
+	}
+
+	var stderr bytes.Buffer
+	if code := run([]string{"--fail-fast", "--kill-matrix", dir}, &bytes.Buffer{}, &stderr); code != 2 || !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Errorf("--fail-fast --kill-matrix: exit %d, stderr %q; want 2 and a conflict message", code, stderr.String())
 	}
 }
 

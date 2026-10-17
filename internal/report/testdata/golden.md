@@ -71,11 +71,11 @@ Mutants killed per test:
 
 ## Next iteration
 
-After editing tests or code, re-run only these mutants (the iterative loop validated in arXiv:2506.02954). `--fail-fast` stops each mutant at its first failing test, which is all a verdict needs:
+After editing tests or code, re-run only these mutants (the iterative loop validated in arXiv:2506.02954):
 
 ```
-kanly --fail-fast --mutant=7d793037a076 example.com/pkg/bar
-kanly --fail-fast --mutant=5d41402abc4b example.com/pkg/foo
+kanly --mutant=7d793037a076 example.com/pkg/bar
+kanly --mutant=5d41402abc4b example.com/pkg/foo
 ```
 
 Mutants are named by fingerprint (`fp`), which survives edits elsewhere in the package. Editing a mutant's own line gives it a new fingerprint, and the re-run reports the old one as not found: re-run the package or `<pkg>:<Func>` to judge that line again.

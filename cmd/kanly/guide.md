@@ -14,7 +14,7 @@ Coverage says which lines a test runs. Kanly says whether the tests would notice
    - **Test it.** Write or sharpen a test so the original code and the mutant behave differently through the package's API. While writing it, `{{command}} test <pkg> <fp> -run <TestName>` runs it with the mutant applied (`--in=<pkg>` for a test in another package): it should fail. `{{command}} show <pkg> <fp>` prints the mutated line.
    - **Simplify the code.** A mutant nothing can observe often marks dead or redundant code. Delete it and the mutant goes with it.
    - **Accept it.** If no input tells the mutant apart from the original, or only a contrived test could kill it, append `<fp> <reason>` to `.kanlyignore` in the package's directory.
-3. Re-run only those mutants with the `--fail-fast --mutant=<fingerprints>` command at the end of the brief. Fingerprints survive edits elsewhere; one listed under "Mutants not found" had its line edited, so judge that line again from a fresh run. Repeat until nothing is left to decide, then run step 1 again: a brief lists a limited number of mutants and names the functions it left out.
+3. Re-run only those mutants with the `--mutant=<fingerprints>` command at the end of the brief. Fingerprints survive edits elsewhere; one listed under "Mutants not found" had its line edited, so judge that line again from a fresh run. Repeat until nothing is left to decide, then run step 1 again: a brief lists a limited number of mutants and names the functions it left out.
 
 ## Rules
 

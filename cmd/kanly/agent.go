@@ -243,7 +243,7 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	runArgs := []string{"--quiet", "--diff", "--diff-base=" + *base, "--fail-fast", "--format=llm", fmt.Sprintf("--llm-limit=%d", hookLLMLimit), fmt.Sprintf("--min-score=%v", *minScore)}
+	runArgs := []string{"--quiet", "--diff", "--diff-base=" + *base, "--format=llm", fmt.Sprintf("--llm-limit=%d", hookLLMLimit), fmt.Sprintf("--min-score=%v", *minScore)}
 	runArgs = append(runArgs, fs.Args()...)
 	var brief bytes.Buffer
 	code := run(runArgs, &brief, stderr)

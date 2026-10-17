@@ -34,7 +34,8 @@ kanly [flags] <pattern>[:<func-list>]...
 | `--short` | off | Run tests with `-test.short` |
 | `--jobs` | `NumCPU` | Parallel worker processes for per-test coverage and the mutant loop (`1` = sequential) |
 | `--verify-kills` | off | Re-run every killed mutant alone and count kills that do not reproduce as survived (roughly doubles the run time) |
-| `--fail-fast` | off | Stop testing each mutant at its first failing test. Verdicts are unchanged, but each kill names one test, so the per-test views (`tests`, `zero_kill_tests`, `redundant_test_groups`) are left out. Meant for the inner loop of re-running a few mutants |
+| `--kill-matrix` | off | Run every covering test against each killed mutant instead of stopping at the first failure, so the report gets the per-test views (`tests`, `zero_kill_tests`, `redundant_test_groups`). Verdicts are the same either way; this makes killed mutants several times slower. Without it, each kill names one test and those views are left out |
+| `--fail-fast` | on | Stop testing each mutant at its first failing test. This is the default; the flag is kept for existing scripts and conflicts with `--kill-matrix` |
 | `--cross-package` | off | Also run the tests of the module's other packages that import the mutated package, so code tested through another package (handler tests, integration suites) counts as covered. See [Cross-package tests](#cross-package-tests) |
 | `--no-cache` | off | With `--cross-package`, set up every dependent's tests afresh instead of reusing an unchanged setup |
 | `--llm-limit` | `30` | Most mutants the `--format=llm` brief lists, the functions with the most live mutants first; the functions left out are named. `0` lists all |
@@ -70,14 +71,20 @@ Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2
 
 Total: 2 | Killed: 1 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 50.0% (50.0% incl. not covered)
 
+Test-level analysis skipped: each mutant stopped at its first failing test. Run with --kill-matrix for it.
+```
+
+The survived mutant on line 5 (`Sub`) means the test suite has a weak assertion on subtraction — it passes even when `-` is replaced with `+`. Mutants no test executes are listed separately under `Not covered`. `id` is the mutant's number for `--mutant`; `fp` is its [fingerprint](#accepting-mutants), which survives edits elsewhere in the package.
+
+With `--kill-matrix`, every covering test runs against each mutant, and the report closes with the per-test views instead of the last line:
+
+```
 Top tests by kill count:
   github.com/devenjarvis/kanly/internal/runner/testdata/sample.TestAdd (1)
 
 Tests that killed nothing (by itself no reason to delete a test):
   github.com/devenjarvis/kanly/internal/runner/testdata/sample.TestSub
 ```
-
-The survived mutant on line 5 (`Sub`) means the test suite has a weak assertion on subtraction — it passes even when `-` is replaced with `+`. Mutants no test executes are listed separately under `Not covered`. `id` is the mutant's number for `--mutant`; `fp` is its [fingerprint](#accepting-mutants), which survives edits elsewhere in the package.
 
 ### Multi-package
 
@@ -109,7 +116,7 @@ $ kanly './internal/foo:Compute,(*Server).Handle'
 $ kanly --tests='^TestCompute' ./internal/foo:Compute
 
 # Re-verify two survivors after editing the tests or code; stop each at its first failing test.
-$ kanly --fail-fast --mutant=5e0d8f5590d5,45a983f95ba4 ./internal/foo
+$ kanly --mutant=5e0d8f5590d5,45a983f95ba4 ./internal/foo
 
 # Look at one mutant, then try a single test against it with go test.
 $ kanly show ./internal/foo 5e0d8f5590d5
@@ -123,7 +130,7 @@ $ kanly --diff ./internal/foo:Compute
 
 `kanly show <pkg> <mutant>...` prints each mutant's position, change and source line, with a caret under the mutated column and, for operator and literal mutants, the line as the mutant has it. `kanly test [--in=<pkg>] <pkg> <mutant> [go test flags]` runs `go test` on the package (or on the `--in` package, such as one that imports it) with that one mutant applied, so a test that kills the mutant fails; its exit status is go test's. Both rewrite the package afresh on every call, find mutants by fingerprint after edits, and take `--tags`.
 
-When a scope is active (`pkg:Func`, `--tests`, `--mutant`, or `--diff`), the report's `scope` field and the text-mode `Scope:` header announce exactly what was tested. The inventory used for `zero_kill_tests` / `redundant_test_groups` is also narrowed to tests that touch a kept mutation, so the signal stays focused on the targeted change.
+When a scope is active (`pkg:Func`, `--tests`, `--mutant`, or `--diff`), the report's `scope` field and the text-mode `Scope:` header announce exactly what was tested. With `--kill-matrix`, the inventory used for `zero_kill_tests` / `redundant_test_groups` is also narrowed to tests that touch a kept mutation, so the signal stays focused on the targeted change.
 
 ### Cross-package tests
 
@@ -272,7 +279,7 @@ kanly init --agent=claude      # write it as a Claude Code skill and register th
 
 `kanly init --agent=claude` writes `.claude/skills/kanly/SKILL.md`, which Claude Code loads when it writes or changes Go code or tests, and adds a Stop hook to `.claude/settings.json` (other settings are kept; re-running updates the hook rather than adding another). Flags: `--command` (how to invoke Kanly, e.g. `go run ./cmd/kanly`), `--diff-base` (default `origin/main`), `--min-score` (default `80`), `--no-hook`, `--dir`. Delete the generated-file marker line in `SKILL.md` to keep local edits across re-runs. For other agents, one line in `AGENTS.md` is enough: "Before finishing a Go change, run `kanly guide` and follow it."
 
-`kanly hook stop` is the hook. When the agent stops, it runs `kanly --diff --fail-fast --format=llm --llm-limit=10 --min-score=<n>` on what changed since `--diff-base`. If the score including not-covered mutants is below the threshold, it blocks the stop and hands the agent the brief (cut at 10,000 characters). It blocks once per stop: when the agent stops again, it is let through, so an agent that cannot reach the score is never trapped; CI stays the hard gate. If Kanly cannot test a package, the hook reports it on stderr without blocking. Turns that change no non-test Go file cost nothing. Arguments after `--` go to the Kanly run (`kanly hook stop -- --tags=integration`, or `-- --cross-package` for a module whose packages are tested through each other).
+`kanly hook stop` is the hook. When the agent stops, it runs `kanly --diff --format=llm --llm-limit=10 --min-score=<n>` on what changed since `--diff-base`. If the score including not-covered mutants is below the threshold, it blocks the stop and hands the agent the brief (cut at 10,000 characters). It blocks once per stop: when the agent stops again, it is let through, so an agent that cannot reach the score is never trapped; CI stays the hard gate. If Kanly cannot test a package, the hook reports it on stderr without blocking. Turns that change no non-test Go file cost nothing. Arguments after `--` go to the Kanly run (`kanly hook stop -- --tags=integration`, or `-- --cross-package` for a module whose packages are tested through each other).
 
 A score gate gives an agent a cheap way out: accepting every survivor in `.kanlyignore`. The guide forbids it, and reviewers should read `.kanlyignore` changes as closely as code.
 
@@ -282,7 +289,7 @@ A score gate gives an agent a cheap way out: accepting every survivor in `.kanly
 
 Not every survivor deserves a test, and a model told only to raise the score will write contorted tests for mutants that cannot or should not be killed. The artifact therefore offers three outcomes per mutant: **test it**, **simplify the code** (a survivor often reveals dead code, such as a field that is never read), or **accept it** in [`.kanlyignore`](#accepting-mutants) with a reason. It also asks for tests that check behaviour through the package's API rather than change-detector tests that pin error strings or internal details. Tests that killed nothing are listed, with a warning that this alone is no reason to delete them. The ones that ran a live mutant are marked, since only those point at a weak assertion.
 
-To keep large runs affordable, each mutant takes one line: position within the function snippet, change, fingerprint, and at most five covering tests by short name. Functions with the most mutants come first, since one sharper test there settles the most, and the brief lists at most `--llm-limit` mutants (30 by default), naming the functions it leaves out. The artifact closes with a `kanly --fail-fast --mutant=<fingerprints>` command per package that re-runs only the listed mutants, which is the iterative verify-after-edit loop validated in the same paper, and points at `kanly test` for trying one test against one mutant.
+To keep large runs affordable, each mutant takes one line: position within the function snippet, change, fingerprint, and at most five covering tests by short name. Functions with the most mutants come first, since one sharper test there settles the most, and the brief lists at most `--llm-limit` mutants (30 by default), naming the functions it leaves out. The artifact closes with a `kanly --mutant=<fingerprints>` command per package that re-runs only the listed mutants, which is the iterative verify-after-edit loop validated in the same paper, and points at `kanly test` for trying one test against one mutant.
 
 ## References
 
