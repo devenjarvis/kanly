@@ -38,6 +38,7 @@ func TestModuleStamp(t *testing.T) {
 	write("p/testdata/fixture.go", "package fixture\n")
 	write("p/testdata/input.txt", "in\n")
 	write(".git/HEAD", "ref\n")
+	write("p/.kanlyignore", "0123456789ab equivalent\n")
 	base := stamp()
 
 	for _, tt := range []struct {
@@ -47,6 +48,7 @@ func TestModuleStamp(t *testing.T) {
 		{"p/p.go", false},      // compiled code is in the binaries
 		{"p/p_test.go", false}, // editing the mutated package's tests
 		{".git/HEAD", false},
+		{"p/.kanlyignore", false},       // accepting a mutant changes no test
 		{"p/testdata/fixture.go", true}, // read by tests at run time
 		{"p/testdata/input.txt", true},
 		{"go.mod", true},

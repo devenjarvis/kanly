@@ -37,7 +37,7 @@ kanly [flags] <pattern>[:<func-list>]...
 | `--kill-matrix` | off | Run every covering test against each killed mutant instead of stopping at the first failure, so the report gets the per-test views (`tests`, `zero_kill_tests`, `redundant_test_groups`). Verdicts are the same either way; this makes killed mutants several times slower. Without it, each kill names one test and those views are left out |
 | `--fail-fast` | on | Stop testing each mutant at its first failing test. This is the default; the flag is kept for existing scripts and conflicts with `--kill-matrix` |
 | `--cross-package` | off | Also run the tests of the module's other packages that import the mutated package, so code tested through another package (handler tests, integration suites) counts as covered. See [Cross-package tests](#cross-package-tests) |
-| `--no-cache` | off | With `--cross-package`, set up every dependent's tests afresh instead of reusing an unchanged setup |
+| `--no-cache` | off | Run every mutant instead of reusing kills from earlier runs (see [Reused kills](#reused-kills)), and with `--cross-package` set up every dependent's tests afresh |
 | `--llm-limit` | `30` | Most mutants the `--format=llm` brief lists, the functions with the most live mutants first; the functions left out are named. `0` lists all |
 | `--quiet` | off | Print no progress to stderr; errors and warnings are still printed |
 
@@ -130,13 +130,19 @@ $ kanly --diff ./internal/foo:Compute
 
 `kanly show <pkg> <mutant>...` prints each mutant's position, change and source line, with a caret under the mutated column and, for operator and literal mutants, the line as the mutant has it. `kanly test [--in=<pkg>] <pkg> <mutant> [go test flags]` runs `go test` on the package (or on the `--in` package, such as one that imports it) with that one mutant applied, so a test that kills the mutant fails; its exit status is go test's. Both rewrite the package afresh on every call, find mutants by fingerprint after edits, and take `--tags`.
 
+### Reused kills
+
+Re-running a package after editing it mostly repeats verdicts Kanly already has, so it reuses kills from earlier runs. A killed mutant is not run again when all of these are unchanged: its fingerprint, the declaration it sits in (the whole function, not only its line), the test that killed it, and the Kanly binary, build tags and test flags. The killing test must also still run the mutant's line, and fixtures and other files the tests may read must be untouched, as for [the setup cache](#cross-package-tests). Survivors, timeouts and not-covered mutants always run again, so a new or sharpened test is always tried against them. A reused kill has `"cached": true` in JSON, and the progress line says how many were reused.
+
+The risk is a kill that no longer holds because of an edit outside the mutant's function and its killing test, such as a helper the test calls. `--no-cache` runs every mutant; `--kill-matrix` and `--verify-kills` never reuse kills, since they need every killer or a fresh run. Kills live next to the setup cache, in the user's cache directory or `$KANLY_CACHE_DIR`.
+
 When a scope is active (`pkg:Func`, `--tests`, `--mutant`, or `--diff`), the report's `scope` field and the text-mode `Scope:` header announce exactly what was tested. With `--kill-matrix`, the inventory used for `zero_kill_tests` / `redundant_test_groups` is also narrowed to tests that touch a kept mutation, so the signal stays focused on the targeted change.
 
 ### Cross-package tests
 
 By default only a package's own tests can kill its mutants, so code that is tested through another package shows up as not covered. With `--cross-package`, Kanly also finds the module's packages whose test binaries link the mutated package, directly or through others, compiles each one's tests against the mutant schema, runs them unmutated, and collects which of them run each line. Every covering test, the package's own and its dependents', then runs against each mutant; the mutant is killed when any of them fails. Dependents' tests are named by import path in `killing_tests` and `covering_tests` (`example.com/m/app.TestArea`), and the report sets `cross_package`. A dependent whose tests cannot be compiled or run unmutated is skipped with a warning; its failing tests are excluded as for the package's own.
 
-Setting up a dependent costs a run of its tests plus one coverage run per test, for each mutated package. Kanly caches that setup in the user's cache directory (`$KANLY_CACHE_DIR` overrides it) under a key made of the two test binaries, which hold the mutated package's code but not its tests, the test flags, and the size and modification time of the module's files other than compiled Go code. Editing a package's tests and re-running it therefore reuses its dependents' setup; editing its code, a dependent, or a fixture under `testdata` does not. Only setups in which every test passed are cached. `--no-cache` turns the cache off.
+Setting up a dependent costs a run of its tests plus one coverage run per test, for each mutated package. Kanly caches that setup in the user's cache directory (`$KANLY_CACHE_DIR` overrides it) under a key made of the two test binaries, which hold the mutated package's code but not its tests, the test flags, and the size and modification time of the module's files other than compiled Go code and `.kanlyignore`. Editing a package's tests and re-running it therefore reuses its dependents' setup; editing its code, a dependent, or a fixture under `testdata` does not. Only setups in which every test passed are cached. `--no-cache` turns the cache off, along with reused kills.
 
 ### Mutation score
 
