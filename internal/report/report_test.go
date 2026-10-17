@@ -893,8 +893,8 @@ func TestWriteTextUnkilledSections(t *testing.T) {
 	}
 }
 
-// With --fail-fast the kill sets are partial, so the test-level sections
-// would mislead and are replaced by one note.
+// Without --kill-matrix the kill sets are partial, so the test-level
+// sections would mislead and are replaced by one note.
 func TestWriteLLMFailFastSkipsTestAnalysis(t *testing.T) {
 	r := report.Build(makeLLMResults(), map[string][]string{"example.com/pkg/foo": {"TestAdd", "TestAddSmoke"}})
 	r.FailFast = true
@@ -910,6 +910,23 @@ func TestWriteLLMFailFastSkipsTestAnalysis(t *testing.T) {
 	}
 	if !strings.Contains(out, "kill sets are incomplete") {
 		t.Errorf("fail-fast note missing:\n%s", out)
+	}
+}
+
+// The text report says why the per-test views are missing, and how to get
+// them, only when the kill sets are partial.
+func TestWriteTextFailFastNote(t *testing.T) {
+	const note = "Run with --kill-matrix for it."
+	for _, failFast := range []bool{false, true} {
+		r := report.Build(makeLLMResults(), map[string][]string{"example.com/pkg/foo": {"TestAdd", "TestAddSmoke"}})
+		r.FailFast = failFast
+		var buf bytes.Buffer
+		if err := report.WriteText(&buf, r); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(buf.String(), note); got != failFast {
+			t.Errorf("FailFast=%v: note present = %v, want %v:\n%s", failFast, got, failFast, buf.String())
+		}
 	}
 }
 
@@ -1036,8 +1053,8 @@ func TestLLMSameIDInTwoPackages(t *testing.T) {
 	for _, want := range []string{
 		"fp `aaaaaaaaaaaa` · ran by `TestA`\n",
 		"fp `bbbbbbbbbbbb` · ran by `TestB`\n",
-		"kanly --fail-fast --mutant=aaaaaaaaaaaa m/a\n",
-		"kanly --fail-fast --mutant=bbbbbbbbbbbb m/b\n",
+		"kanly --mutant=aaaaaaaaaaaa m/a\n",
+		"kanly --mutant=bbbbbbbbbbbb m/b\n",
 		"## Mutants not found",
 		"`cccccccccccc`, `dddddddddddd`",
 	} {

@@ -433,7 +433,7 @@ func TestHookStop(t *testing.T) {
 	if decision.Decision != "block" {
 		t.Errorf("weak test: decision: want block, got %q", decision.Decision)
 	}
-	for _, want := range []string{"changed since main scores below 80%", "## Live mutants", "--fail-fast --mutant="} {
+	for _, want := range []string{"changed since main scores below 80%", "## Live mutants", "kanly --mutant="} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Errorf("weak test: reason does not contain %q:\n%s", want, decision.Reason)
 		}

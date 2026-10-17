@@ -702,7 +702,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly guide | kanly init --agent=claude | kanly hook stop | kanly show <pkg> <mutant>... | kanly test [--in=<pkg>] <pkg> <mutant> [go test flags]\n       kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-or-fp-list>] [--jobs=N] [--verify-kills] [--fail-fast] [--cross-package [--no-cache]] [--llm-limit=30] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly guide | kanly init --agent=claude | kanly hook stop | kanly show <pkg> <mutant>... | kanly test [--in=<pkg>] <pkg> <mutant> [go test flags]\n       kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-or-fp-list>] [--jobs=N] [--verify-kills] [--kill-matrix] [--cross-package [--no-cache]] [--llm-limit=30] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -723,7 +723,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	mutantFlag := fs.String("mutant", "", "comma-separated mutant IDs or fingerprints to re-run; others are skipped")
 	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
 	verifyKillsFlag := fs.Bool("verify-kills", false, "re-run every killed mutant alone and count kills that do not reproduce as survived")
-	failFastFlag := fs.Bool("fail-fast", false, "stop testing each mutant at its first failing test; verdicts are unchanged, but per-test kill analysis is skipped")
+	killMatrixFlag := fs.Bool("kill-matrix", false, "run every covering test against each killed mutant, for the per-test views (tests, zero_kill_tests, redundant_test_groups); slower")
+	// Stopping at the first failing test is the default; the flag is kept
+	// so existing scripts and hooks keep working.
+	failFastFlag := fs.Bool("fail-fast", false, "stop testing each mutant at its first failing test (the default; see --kill-matrix)")
 	llmLimitFlag := fs.Int("llm-limit", defaultLLMLimit, "most mutants the llm brief lists, those in the functions with the most first; 0 lists all")
 	crossPackageFlag := fs.Bool("cross-package", false, "also run the tests of the module's other packages that import the mutated package")
 	noCacheFlag := fs.Bool("no-cache", false, "with --cross-package, set up every dependent's tests afresh instead of reusing an unchanged setup")
@@ -769,6 +772,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if *jobsFlag < 1 {
 		fmt.Fprintf(stderr, "--jobs: must be >= 1, got %d\n", *jobsFlag)
+		return 2
+	}
+
+	if *failFastFlag && *killMatrixFlag {
+		fmt.Fprintln(stderr, "--fail-fast and --kill-matrix are mutually exclusive")
 		return 2
 	}
 
@@ -945,7 +953,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				progress:      prog,
 				jobs:          *jobsFlag,
 				verifyKills:   *verifyKillsFlag,
-				failFast:      *failFastFlag,
+				failFast:      !*killMatrixFlag,
 				dependents:    deps,
 				cache:         cache,
 				moduleStamp:   stamps[pkg.ModuleDir],
@@ -993,8 +1001,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		rep.Scope = strings.TrimSpace(rep.Scope + " --cross-package")
 		rep.CrossPackage = true
 	}
-	if *failFastFlag {
-		rep.Scope = strings.TrimSpace(rep.Scope + " --fail-fast")
+	if !*killMatrixFlag {
 		// Each kill set holds only the first failing test, so the
 		// per-test views would call tests that kill plenty useless.
 		rep.FailFast = true

@@ -107,10 +107,11 @@ type Report struct {
 	// UnmatchedMutants lists --mutant fingerprints that matched no mutant
 	// in scope: the mutated line changed, or the mutant was accepted.
 	UnmatchedMutants []string `json:"unmatched_mutants,omitempty"`
-	// FailFast is set when each mutant stopped at its first failing test
-	// (--fail-fast): killing_tests then names that test only, and the
-	// test-level views (tests, zero_kill_tests, redundant_test_groups) are
-	// left empty because partial kill sets would make them wrong.
+	// FailFast is set when each mutant stopped at its first failing test,
+	// the default unless --kill-matrix: killing_tests then names that test
+	// only, and the test-level views (tests, zero_kill_tests,
+	// redundant_test_groups) are left empty because partial kill sets would
+	// make them wrong.
 	FailFast bool `json:"fail_fast,omitempty"`
 	// CrossPackage is set when the tests of the module's other packages
 	// that import a mutated package ran against its mutants too
@@ -386,7 +387,7 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMUncoveredSection(&b, r, uncovered, src.FuncRanges, readFile)
 	writeLLMOmitted(&b, "uncovered", omittedUncovered, src.Limit)
 	if r.FailFast {
-		b.WriteString("_Test-level analysis skipped: `--fail-fast` stopped each mutant at its first failing test, so kill sets are incomplete._\n\n")
+		b.WriteString("_Test-level analysis skipped: each mutant stopped at its first failing test, so kill sets are incomplete. Run with `--kill-matrix` for it._\n\n")
 	} else {
 		writeLLMRedundant(&b, r.RedundantTestGroups)
 		writeLLMZeroKill(&b, r)
@@ -672,12 +673,12 @@ func writeLLMNextIteration(b *strings.Builder, survived, notCovered []mutation.F
 	sort.Strings(pkgs)
 
 	b.WriteString("## Next iteration\n\n")
-	b.WriteString("After editing tests or code, re-run only these mutants (the iterative loop validated in arXiv:2506.02954). `--fail-fast` stops each mutant at its first failing test, which is all a verdict needs:\n\n")
+	b.WriteString("After editing tests or code, re-run only these mutants (the iterative loop validated in arXiv:2506.02954):\n\n")
 	b.WriteString("```\n")
 	for _, pkg := range pkgs {
 		refs := refsByPkg[pkg]
 		sort.Strings(refs)
-		fmt.Fprintf(b, "kanly --fail-fast --mutant=%s %s\n", strings.Join(refs, ","), pkg)
+		fmt.Fprintf(b, "kanly --mutant=%s %s\n", strings.Join(refs, ","), pkg)
 	}
 	b.WriteString("```\n\n")
 	b.WriteString("Mutants are named by fingerprint (`fp`), which survives edits elsewhere in the package. Editing a mutant's own line gives it a new fingerprint, and the re-run reports the old one as not found: re-run the package or `<pkg>:<Func>` to judge that line again.\n\n")
@@ -977,6 +978,12 @@ func WriteText(w io.Writer, r Report) error {
 
 	if len(r.UnmatchedMutants) > 0 {
 		if _, err := fmt.Fprintf(w, "\n--mutant fingerprints matching no mutant (line changed or accepted): %s\n", strings.Join(r.UnmatchedMutants, ", ")); err != nil {
+			return err
+		}
+	}
+
+	if r.FailFast {
+		if _, err := fmt.Fprintln(w, "\nTest-level analysis skipped: each mutant stopped at its first failing test. Run with --kill-matrix for it."); err != nil {
 			return err
 		}
 	}
