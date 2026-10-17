@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/devenjarvis/kanly/internal/mutation"
 	"github.com/devenjarvis/kanly/internal/schema"
@@ -492,8 +493,8 @@ func parseCoverProfile(data []byte) ([]coverBlock, error) {
 // bounded by `timeout`. Tests run with -test.parallel=1 to avoid
 // interleaved coverage attribution when tests share state.
 //
-// `jobs` controls how many per-test coverage runs execute concurrently;
-// callers should pass >= 1 (1 reproduces the previous serial behavior).
+// Each per-test run holds one of `slots`, the worker slots it shares with
+// whatever else the caller runs; a semaphore of size 1 runs them serially.
 // Each goroutine writes its own cov-<i>.out file in `tmpDir` and parses
 // it into a local map; the final merge walks inventory in order so the
 // returned map is deterministic regardless of completion order.
@@ -511,10 +512,7 @@ func parseCoverProfile(data []byte) ([]coverBlock, error) {
 // A test that fails when run on its own is not an error: it contributes no
 // coverage and is returned in the second map, test name → failure output.
 // testArgs are extra test binary flags such as -test.short.
-func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir, srcDir string, inventory []string, timeout time.Duration, jobs int, testArgs ...string) (map[FileLine][]TestHit, map[string]string, error) {
-	if jobs < 1 {
-		jobs = 1
-	}
+func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir, srcDir string, inventory []string, timeout time.Duration, slots *semaphore.Weighted, testArgs ...string) (map[FileLine][]TestHit, map[string]string, error) {
 
 	tmpDir, err := os.MkdirTemp("", "kanly-cov-*")
 	if err != nil {
@@ -525,10 +523,14 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir, srcDir stri
 	failures := make([]string, len(inventory))
 	localBlocks := make([][]coverBlock, len(inventory))
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(jobs)
+	var acquireErr error
 	for i, name := range inventory {
 		i, name := i, name
+		if acquireErr = slots.Acquire(gctx, 1); acquireErr != nil {
+			break
+		}
 		g.Go(func() error {
+			defer slots.Release(1)
 			profPath := filepath.Join(tmpDir, fmt.Sprintf("cov-%d.out", i))
 			tctx, cancel := context.WithTimeout(gctx, timeout)
 			defer cancel()
@@ -574,6 +576,9 @@ func CollectPerTestCoverage(ctx context.Context, binaryPath, pkgDir, srcDir stri
 	}
 	if err := g.Wait(); err != nil {
 		return nil, nil, err
+	}
+	if acquireErr != nil {
+		return nil, nil, acquireErr
 	}
 
 	failed := make(map[string]string)

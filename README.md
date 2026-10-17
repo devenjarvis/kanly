@@ -32,7 +32,7 @@ kanly [flags] <pattern>[:<func-list>]...
 | `--exclude` | (none) | Comma-separated file globs not to mutate, matched against the path relative to the working directory, the file name, or a directory prefix (`internal/gen`, `*_mock.go`) |
 | `--tags` | (none) | Build tags, as for `go build -tags`; tagged files are mutated and tagged tests run |
 | `--short` | off | Run tests with `-test.short` |
-| `--jobs` | `NumCPU` | Parallel worker processes for per-test coverage and the mutant loop (`1` = sequential) |
+| `--jobs` | `NumCPU` | Worker slots shared by every compile and test process of the run, across packages; also the number of packages in progress at once (`1` = sequential) |
 | `--verify-kills` | off | Re-run every killed mutant alone and count kills that do not reproduce as survived (roughly doubles the run time) |
 | `--kill-matrix` | off | Run every covering test against each killed mutant instead of stopping at the first failure, so the report gets the per-test views (`tests`, `zero_kill_tests`, `redundant_test_groups`). Verdicts are the same either way; this makes killed mutants several times slower. Without it, each kill names one test and those views are left out |
 | `--fail-fast` | on | Stop testing each mutant at its first failing test. This is the default; the flag is kept for existing scripts and conflicts with `--kill-matrix` |
@@ -99,7 +99,7 @@ Package: github.com/devenjarvis/kanly/internal/runner/testdata/sample | Total: 2
 Total: 6 | Killed: 5 | Survived: 1 | Timeout: 0 | Not covered: 0 | Score: 83.3% (83.3% incl. not covered)
 ```
 
-Each package's pipeline (rewrite → compile → baseline → mutant loop) runs independently. Packages with no test files or no mutations are skipped with a one-line stderr notice (unless `--quiet`) and the run continues. Within a package the per-test coverage pass and the mutant loop both run concurrently under a worker pool sized by `--jobs` (default `runtime.NumCPU()`; pass `--jobs=1` for serial execution). Cross-package parallelism is still sequential and is a planned future addition.
+Each package's pipeline (rewrite → compile → baseline → mutant loop) runs independently. Packages with no test files or no mutations are skipped with a one-line stderr notice (unless `--quiet`) and the run continues. Up to `--jobs` packages are in progress at once, and their compiles, baselines, per-test coverage runs and mutant runs share one pool of `--jobs` worker slots (default `runtime.NumCPU()`; pass `--jobs=1` for serial execution), so one package's tests keep the machine busy while another compiles. Within a package, the mutants whose covering tests took longest in the baseline start first, so the slowest ones do not hold up the end of the run. Timeout confirmations and `--verify-kills` re-runs take every slot, so they still run alone. With `--cross-package`, a package waits for any other whose dependents' tests run in its directory. The report is the same whatever the order packages finish in.
 
 ### Focused mutation
 
@@ -248,7 +248,7 @@ largest remaining gap in Kanly's coverage:
 - **Some assertions are structurally unkillable.** A few test patterns can't be expressed as MSG mutants no matter how many operators are added — most notably tests that assert on struct field tags (e.g., JSON tag names read via reflection), because Go syntax requires struct tags to be uninterpreted string literals that cannot be rewritten to runtime-conditional expressions. Such tests will always appear in `zero_kill_tests`; treat them as "structurally unkillable" rather than weak.
 - **"Identical kill-sets" is not the same as "redundant tests."** Two tests can land in the same `redundant_test_groups` entry because they coincidentally trip the same mutated lines while asserting on entirely different concerns. Treat the grouping as a "look here" prompt, not a "delete one" recommendation.
 - **Only a package's own tests can kill its mutants by default.** Code tested through another package (handler tests, end-to-end suites) shows up as not covered unless `--cross-package` is set; even then, tests outside the module, and tests that exercise the code through a separately built binary, do not count.
-- **Sequential multi-package only.** `./...` and multiple positional args are supported; packages run sequentially. Within a package the per-test coverage pass and the mutant loop are already parallel (`--jobs N`, default `runtime.NumCPU()`); cross-package parallelism is tracked for a future release.
+- **Packages share the machine.** Packages run concurrently, so tests that reach outside their package directory (a shared fixture in a parent directory, a fixed port, a database) can collide with another package's tests as they can with their own under `--jobs`. Use `--jobs=1` for such suites.
 
 ## Development
 

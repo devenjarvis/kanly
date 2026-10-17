@@ -3,6 +3,7 @@ package runner_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,8 @@ import (
 	"github.com/devenjarvis/kanly/internal/runner"
 	"github.com/devenjarvis/kanly/internal/schema"
 	"github.com/devenjarvis/kanly/internal/source"
+
+	"golang.org/x/sync/semaphore"
 )
 
 func relDir(t *testing.T, sub string) string {
@@ -376,7 +379,7 @@ func TestCollectPerTestCoverageAttributesTests(t *testing.T) {
 	defer cleanCovBin()
 
 	inventory := []string{"TestAdd", "TestSub"}
-	covMap, _, err := runner.CollectPerTestCoverage(ctx, covBin, sampleDir, sampleDir, inventory, 30*time.Second, 1)
+	covMap, _, err := runner.CollectPerTestCoverage(ctx, covBin, sampleDir, sampleDir, inventory, 30*time.Second, semaphore.NewWeighted(1))
 	if err != nil {
 		t.Fatalf("CollectPerTestCoverage: %v", err)
 	}
@@ -547,7 +550,7 @@ func TestDependentBinaries(t *testing.T) {
 		t.Fatalf("CompileDependentCoverageBinary: %v", err)
 	}
 	defer cleanCov()
-	covMap, failed, err := runner.CollectPerTestCoverage(ctx, covBin, appDir, libDir, []string{"TestArea", "TestReport"}, time.Minute, 2)
+	covMap, failed, err := runner.CollectPerTestCoverage(ctx, covBin, appDir, libDir, []string{"TestArea", "TestReport"}, time.Minute, semaphore.NewWeighted(2))
 	if err != nil || len(failed) > 0 {
 		t.Fatalf("CollectPerTestCoverage: %v %v", err, failed)
 	}
@@ -590,5 +593,20 @@ func TestDependentBinaries(t *testing.T) {
 		if err != nil || status != mutation.StatusKilled || len(killers) != 1 || killers[0] != "TestArea" {
 			t.Errorf("Scale mutant %d: %s %v %v, want killed by TestArea", m.ID, status, killers, err)
 		}
+	}
+}
+
+// A run cancelled while it waits for a worker slot returns the context's
+// error instead of coverage from the tests that never ran.
+func TestCollectPerTestCoverageCancelledWhileWaiting(t *testing.T) {
+	slots := semaphore.NewWeighted(1)
+	if err := slots.Acquire(context.Background(), 1); err != nil { // all taken
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	covMap, failed, err := runner.CollectPerTestCoverage(ctx, "/nonexistent", t.TempDir(), t.TempDir(), []string{"TestA"}, time.Minute, slots)
+	if !errors.Is(err, context.Canceled) || covMap != nil || failed != nil {
+		t.Errorf("CollectPerTestCoverage = %v, %v, %v; want only context.Canceled", covMap, failed, err)
 	}
 }
