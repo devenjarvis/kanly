@@ -48,6 +48,11 @@ func TestLoadAllExpandsDotDotDot(t *testing.T) {
 	for path := range want {
 		t.Errorf("missing expected package %q", path)
 	}
+	for _, pkg := range pkgs {
+		if pkg.ModuleDir != relDir(t, "testdata/multipkg") {
+			t.Errorf("%s: ModuleDir = %q, want the module root", pkg.ImportPath, pkg.ModuleDir)
+		}
+	}
 }
 
 func TestLoadAllSingleDirPath(t *testing.T) {

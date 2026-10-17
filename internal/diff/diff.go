@@ -176,7 +176,9 @@ func (d *Diff) Files() []string {
 
 // Patterns returns deduped `./relative/dir` patterns suitable for
 // `source.LoadAll(workDir, ...)`. Only directories containing at least one
-// changed non-test .go file are included.
+// changed non-test .go file are included, and, as for `go build ./...`,
+// none under a testdata directory or one whose name starts with "." or "_":
+// those hold fixtures, often modules of their own.
 func (d *Diff) Patterns(workDir string) []string {
 	absWork, err := filepath.Abs(workDir)
 	if err != nil {
@@ -190,6 +192,9 @@ func (d *Diff) Patterns(workDir string) []string {
 		dir := filepath.Dir(f)
 		rel, err := filepath.Rel(absWork, dir)
 		if err != nil {
+			continue
+		}
+		if ignoredByGoTool(rel) {
 			continue
 		}
 		var pat string
@@ -206,4 +211,18 @@ func (d *Diff) Patterns(workDir string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ignoredByGoTool reports whether the go command's ./... skips the relative
+// directory rel.
+func ignoredByGoTool(rel string) bool {
+	if rel == "." {
+		return false
+	}
+	for _, elem := range strings.Split(filepath.ToSlash(rel), "/") {
+		if elem == "testdata" || strings.HasPrefix(elem, ".") || strings.HasPrefix(elem, "_") {
+			return true
+		}
+	}
+	return false
 }

@@ -77,7 +77,7 @@ func ReadIgnoreFile(dir string) (map[string]string, error) {
 		}
 		reason := strings.TrimSpace(line[len(fp):])
 		switch {
-		case !isFingerprint(fp):
+		case !IsFingerprint(fp):
 			return nil, fmt.Errorf("%s:%d: %q is not a mutant fingerprint (%d hex digits, printed with each mutant)", path, n, fp, fingerprintLen)
 		case reason == "":
 			return nil, fmt.Errorf("%s:%d: fingerprint %s needs a reason after it", path, n, fp)
@@ -92,7 +92,8 @@ func ReadIgnoreFile(dir string) (map[string]string, error) {
 	return accepted, nil
 }
 
-func isFingerprint(s string) bool {
+// IsFingerprint reports whether s has the form of a mutant fingerprint.
+func IsFingerprint(s string) bool {
 	if len(s) != fingerprintLen {
 		return false
 	}

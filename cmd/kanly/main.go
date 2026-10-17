@@ -52,6 +52,10 @@ func dispatch(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return runInit(args[1:], stdout, stderr)
 		case "hook":
 			return runHook(args[1:], stdin, stdout, stderr)
+		case "show":
+			return runShow(args[1:], stdout, stderr)
+		case "test":
+			return runTest(args[1:], stdout, stderr)
 		}
 	}
 	return run(args, stdout, stderr)
@@ -70,17 +74,20 @@ func resolveVersion() string {
 // runConfig collects the per-package knobs threaded from CLI flags into runPackage.
 type runConfig struct {
 	filter        func(file string, line int, funcName string) bool
-	timeout       time.Duration   // fixed per-mutant timeout; 0 derives it from the baseline
-	timeoutFactor float64         // multiplier on baseline test time for derived timeouts
-	testsRegex    string          // if non-empty, narrows baseline + per-test coverage
-	mutantIDs     map[int]bool    // if non-nil, only these schema-assigned IDs run
-	operators     map[string]bool // if non-nil, only these operators' mutants run
-	buildFlags    []string        // extra `go test -c` flags (-tags)
-	testArgs      []string        // extra test binary flags (-test.short)
-	progress      *progress       // informational output
-	jobs          int             // worker pool size for per-test coverage and the mutant loop; >= 1
-	verifyKills   bool            // re-run every killed mutant alone to confirm the kill
-	failFast      bool            // stop each mutant run at its first failing test
+	timeout       time.Duration      // fixed per-mutant timeout; 0 derives it from the baseline
+	timeoutFactor float64            // multiplier on baseline test time for derived timeouts
+	testsRegex    string             // if non-empty, narrows baseline + per-test coverage
+	mutants       *mutantSet         // if non-nil, only these mutants run
+	operators     map[string]bool    // if non-nil, only these operators' mutants run
+	buildFlags    []string           // extra `go test -c` flags (-tags)
+	testArgs      []string           // extra test binary flags (-test.short)
+	progress      *progress          // informational output
+	jobs          int                // worker pool size for per-test coverage and the mutant loop; >= 1
+	verifyKills   bool               // re-run every killed mutant alone to confirm the kill
+	failFast      bool               // stop each mutant run at its first failing test
+	dependents    []runner.Dependent // other packages whose tests also run against the mutants (--cross-package)
+	cache         *setupCache        // dependents' setups across runs; nil disables it
+	moduleStamp   string             // the module's non-code files, part of the cache key
 }
 
 // mutantArgs returns the test binary flags for a run against a mutant.
@@ -104,6 +111,9 @@ const (
 	// execute unmutated code, so they should finish; the limit only stops a
 	// hung test suite from stalling the run forever.
 	minSetupTimeout = 10 * time.Minute
+	// defaultLLMLimit keeps the llm brief to a size an agent can work
+	// through in one pass; the rest follows on the next run.
+	defaultLLMLimit = 30
 )
 
 // mutantTimeout is the timeout for running tests against one mutant.
@@ -245,11 +255,12 @@ const confirmTimeoutScale = 2.0
 // every kill is re-run too, and a kill that does not reproduce is reported
 // as survived: tests that collide over shared ports, files or databases
 // when run concurrently fail without detecting anything.
-func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(r mutation.Result, timeoutScale float64) (mutation.Result, error)) error {
+// rerun is given each result's index in results.
+func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(i int, r mutation.Result, timeoutScale float64) (mutation.Result, error)) error {
 	for i, r := range results {
 		switch {
 		case r.Status == mutation.StatusTimeout:
-			again, err := rerun(r, confirmTimeoutScale)
+			again, err := rerun(i, r, confirmTimeoutScale)
 			if err != nil {
 				return err
 			}
@@ -258,7 +269,7 @@ func confirmVerdicts(results []mutation.Result, verifyKills bool, rerun func(r m
 			}
 			results[i] = again
 		case r.Status == mutation.StatusKilled && verifyKills:
-			again, err := rerun(r, 1)
+			again, err := rerun(i, r, 1)
 			if err != nil {
 				return err
 			}
@@ -287,6 +298,172 @@ func (p *progress) printf(format string, args ...any) {
 	fmt.Fprintf(p.w, "kanly: "+format+"\n", args...)
 }
 
+// guardDir snapshots dir before tests run in it and returns a function
+// that moves what they left behind out of it (not delete: a file created
+// during the run may be the user's), warning about what cannot be undone.
+func guardDir(dir, label string, stderr io.Writer) func() {
+	snap, err := runner.SnapshotDir(dir)
+	if err != nil {
+		return func() {}
+	}
+	return func() {
+		res, err := snap.Restore()
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: %s: checking for files changed by tests: %v\n", label, err)
+		}
+		if len(res.Moved) > 0 {
+			fmt.Fprintf(stderr, "%s: moved %d file(s) created during the run to %s: %s\n", label, len(res.Moved), res.Quarantine, strings.Join(displayPaths(res.Moved), ", "))
+		}
+		if len(res.Unmoved) > 0 {
+			fmt.Fprintf(stderr, "warning: %s: %d file(s) were created during the run and could not be moved; remove them if unwanted: %s\n", label, len(res.Unmoved), strings.Join(displayPaths(res.Unmoved), ", "))
+		}
+		if len(res.Changed) > 0 {
+			fmt.Fprintf(stderr, "warning: %s: tests modified or deleted %d file(s); check them before committing: %s\n", label, len(res.Changed), strings.Join(displayPaths(res.Changed), ", "))
+		}
+	}
+}
+
+// suite is one test binary run against a package's mutants: the package's
+// own tests or, with --cross-package, a dependent package's.
+type suite struct {
+	pkg      string // import path of the package the tests belong to
+	dir      string // directory the tests run in
+	bin      string // test binary compiled with the mutant schema
+	baseline runner.Baseline
+	covMap   map[runner.FileLine][]runner.TestHit
+	own      bool // the mutated package's own tests
+}
+
+// resultName is how one of the suite's tests is named in results: plain for
+// the package's own tests, qualified by import path for a dependent's.
+func (s suite) resultName(test string) string {
+	if s.own {
+		return test
+	}
+	return s.pkg + "." + test
+}
+
+// coveringTests returns the suite's tests that run mut's line. A mutation in
+// a case expression also takes the tests of its switch or select line: a
+// case expression runs whenever its statement is reached and no earlier
+// case matched, not only when its case is taken. Line 0 (no CoverLine) has
+// no coverage.
+func (s suite) coveringTests(mut mutation.Mutation) []string {
+	hits := unionHits(s.covMap[runner.FileLine{File: mut.File, Line: mut.Line}], s.covMap[runner.FileLine{File: mut.File, Line: mut.CoverLine}])
+	names := make([]string, len(hits))
+	for i, h := range hits {
+		names[i] = h.Name
+	}
+	return names
+}
+
+// runMutantSuites runs each suite's covering tests (tests[i] for suites[i])
+// against mutant id. The mutant is killed if any suite's tests fail, and
+// timed out if none fail but one times out. timeoutScale multiplies each
+// suite's derived timeout.
+func runMutantSuites(ctx context.Context, suites []suite, id int, tests [][]string, timeoutScale float64, cfg runConfig) (mutation.Status, []string, time.Duration, error) {
+	status := mutation.StatusSurvived
+	var killers []string
+	var total time.Duration
+	for i, s := range suites {
+		if len(tests[i]) == 0 {
+			continue
+		}
+		timeout := time.Duration(timeoutScale * float64(cfg.mutantTimeout(s.baseline, tests[i])))
+		st, killed, dur, err := runner.RunMutant(ctx, s.bin, id, s.dir, tests[i], timeout, cfg.mutantArgs()...)
+		if err != nil {
+			return "", nil, 0, err
+		}
+		total += dur
+		switch st {
+		case mutation.StatusKilled:
+			status = mutation.StatusKilled
+			for _, name := range killed {
+				killers = append(killers, s.resultName(name))
+			}
+			if cfg.failFast {
+				return status, killers, total, nil
+			}
+		case mutation.StatusTimeout:
+			if status != mutation.StatusKilled {
+				status = mutation.StatusTimeout
+			}
+		}
+	}
+	return status, killers, total, nil
+}
+
+// dependentSuites compiles each of cfg.dependents' tests against pkg's
+// mutant schema, runs them unmutated and collects their coverage of pkg. A
+// dependent that cannot be set up is skipped with a warning: its tests only
+// add kills, and their failure says nothing about pkg. The returned cleanup
+// removes the binaries and restores the dependents' directories.
+func dependentSuites(ctx context.Context, pkg *source.Package, overlayPath string, cfg runConfig, stderr io.Writer) ([]suite, []report.ExcludedTest, func()) {
+	// The cleanups are independent: binaries removed, directories restored.
+	var cleanups []func()
+	cleanup := func() {
+		for _, c := range cleanups {
+			c()
+		}
+	}
+	var suites []suite
+	var excluded []report.ExcludedTest
+	for _, dep := range cfg.dependents {
+		cfg.progress.printf("%s: running the tests of dependent %s unmutated", pkg.ImportPath, dep.ImportPath)
+		s, ex, err := func() (suite, []report.ExcludedTest, error) {
+			bin, cleanBin, err := runner.CompileDependentTestBinary(ctx, dep.ImportPath, pkg.ImportPath, overlayPath, pkg.GoVersion, cfg.buildFlags...)
+			if err != nil {
+				return suite{}, nil, err
+			}
+			cleanups = append(cleanups, cleanBin)
+			covBin, cleanCov, err := runner.CompileDependentCoverageBinary(ctx, dep.ImportPath, pkg.ImportPath, cfg.buildFlags...)
+			if err != nil {
+				return suite{}, nil, err
+			}
+			cleanups = append(cleanups, cleanCov, guardDir(dep.Dir, dep.ImportPath, stderr))
+			cache := cfg.cache
+			if cfg.moduleStamp == "" {
+				cache = nil
+			}
+			key, _ := cache.key([]string{bin, covBin}, cfg.moduleStamp, dep.Dir, pkg.Dir, cfg.testsRegex, fmt.Sprint(cfg.testArgs))
+			if cached, ok := cache.load(key); ok {
+				cfg.progress.printf("%s: reusing the setup of dependent %s from the cache", pkg.ImportPath, dep.ImportPath)
+				return suite{pkg: dep.ImportPath, dir: dep.Dir, bin: bin, baseline: cached.Baseline, covMap: cached.covMap()}, nil, nil
+			}
+			baseline, ex, err := establishBaseline(ctx, bin, covBin, dep.Dir, cfg)
+			if err != nil {
+				return suite{}, nil, err
+			}
+			covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBin, dep.Dir, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs, cfg.testArgs...)
+			if err != nil {
+				return suite{}, nil, err
+			}
+			for _, name := range baseline.Tests {
+				if msg, failed := covFailed[name]; failed {
+					ex = append(ex, report.ExcludedTest{Test: name, Reason: "fails when run on its own (it depends on another test, is flaky, or hangs): " + failureMessage(msg)})
+				}
+			}
+			// A failure may be transient (a loaded machine), so only a
+			// clean setup is reused.
+			if len(ex) == 0 {
+				cache.store(key, newDependentSetup(baseline, covMap))
+			}
+			for i := range ex {
+				ex[i].Package = dep.ImportPath
+			}
+			return suite{pkg: dep.ImportPath, dir: dep.Dir, bin: bin, baseline: baseline, covMap: covMap}, ex, nil
+		}()
+		if err != nil {
+			first, _, _ := strings.Cut(err.Error(), "\n")
+			fmt.Fprintf(stderr, "warning: %s: not counting the tests of dependent %s: %s\n", pkg.ImportPath, dep.ImportPath, first)
+			continue
+		}
+		suites = append(suites, s)
+		excluded = append(excluded, ex...)
+	}
+	return suites, excluded, cleanup
+}
+
 // pkgResult is what one package's pipeline contributes to the report.
 type pkgResult struct {
 	results    []mutation.Result
@@ -295,6 +472,7 @@ type pkgResult struct {
 	excluded   []report.ExcludedTest         // tests left out because they fail unmutated
 	funcRanges map[string]mutation.FuncRange // canonical func name → source range
 	stale      []report.StaleIgnore          // .kanlyignore entries matching no mutant
+	matched    []string                      // --mutant fingerprints found in the package
 }
 
 func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operator, cfg runConfig, stderr io.Writer) (pkgResult, error) {
@@ -327,11 +505,15 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// Narrow by --mutant IDs after schema assignment. The dispatcher keeps all
 	// cases; un-listed IDs simply never get activated.
 	mutations := rew.Mutations
-	if cfg.mutantIDs != nil {
+	var matched []string
+	if cfg.mutants != nil {
 		filtered := mutations[:0:0]
 		for _, m := range mutations {
-			if cfg.mutantIDs[m.ID] {
+			if cfg.mutants.has(m) {
 				filtered = append(filtered, m)
+			}
+			if cfg.mutants.fps[m.Fingerprint] {
+				matched = append(matched, m.Fingerprint)
 			}
 		}
 		mutations = filtered
@@ -361,26 +543,8 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanCovBin()
 
-	// Mutants run in the real checkout. Move what they leave behind in the
-	// package directory out of it (not delete: a file created during the
-	// run may be the user's), and warn about what cannot be undone.
-	if snap, err := runner.SnapshotDir(pkg.Dir); err == nil {
-		defer func() {
-			res, err := snap.Restore()
-			if err != nil {
-				fmt.Fprintf(stderr, "warning: %s: checking for files changed by tests: %v\n", pkg.ImportPath, err)
-			}
-			if len(res.Moved) > 0 {
-				fmt.Fprintf(stderr, "%s: moved %d file(s) created during the run to %s: %s\n", pkg.ImportPath, len(res.Moved), res.Quarantine, strings.Join(displayPaths(res.Moved), ", "))
-			}
-			if len(res.Unmoved) > 0 {
-				fmt.Fprintf(stderr, "warning: %s: %d file(s) were created during the run and could not be moved; remove them if unwanted: %s\n", pkg.ImportPath, len(res.Unmoved), strings.Join(displayPaths(res.Unmoved), ", "))
-			}
-			if len(res.Changed) > 0 {
-				fmt.Fprintf(stderr, "warning: %s: tests modified or deleted %d file(s); check them before committing: %s\n", pkg.ImportPath, len(res.Changed), strings.Join(displayPaths(res.Changed), ", "))
-			}
-		}()
-	}
+	// Mutants run in the real checkout.
+	defer guardDir(pkg.Dir, pkg.ImportPath, stderr)()
 
 	cfg.progress.printf("%s: running the tests unmutated", pkg.ImportPath)
 	baseline, excluded, err := establishBaseline(ctx, binaryPath, covBinaryPath, pkg.Dir, cfg)
@@ -390,7 +554,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 
 	// Collect per-test coverage once; pays off across all mutants. A test
 	// that fails on its own cannot be trusted to judge a mutant either.
-	covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs, cfg.testArgs...)
+	covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs, cfg.testArgs...)
 	if err != nil {
 		return pkgResult{}, &stageError{"coverage", err}
 	}
@@ -412,38 +576,49 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		return pkgResult{}, &stageError{"coverage", errors.New("no test passes when run on its own")}
 	}
 
+	suites := []suite{{dir: pkg.Dir, bin: binaryPath, baseline: baseline, covMap: covMap, own: true}}
+	deps, depExcluded, cleanDeps := dependentSuites(ctx, pkg, overlayPath, cfg, stderr)
+	defer cleanDeps()
+	suites = append(suites, deps...)
+	excluded = append(excluded, depExcluded...)
+
 	// Per-mutant covering tests are read out up front so the parallel loop
-	// below does not touch covMap concurrently and so the `relevant` set
-	// (used to narrow the reported inventory) is complete before any
-	// goroutine starts. Indexed slices preserve schema-ID order across the
-	// parallel phase, keeping JSON output byte-identical to --jobs=1.
+	// below does not touch the coverage maps concurrently and so the
+	// `relevant` set (used to narrow the reported inventory) is complete
+	// before any goroutine starts. Indexed slices preserve schema-ID order
+	// across the parallel phase, keeping JSON output byte-identical to
+	// --jobs=1.
 	//
 	// Every covering test runs against the mutant, in scoped runs too:
 	// dropping a test by its hit count changes the verdict, since the one
 	// test that asserts on a line may well execute it only once.
-	perMut := make([][]string, len(mutations))
+	perMut := make([][][]string, len(mutations)) // mutation → suite → tests
+	covering := make([][]string, len(mutations)) // mutation → result names
 	relevant := make(map[string]bool)
 	for i, mut := range mutations {
-		hits := covMap[runner.FileLine{File: mut.File, Line: mut.Line}]
-		// A case expression runs whenever its statement is reached and no
-		// earlier case matched, not only when its case is taken. Line 0 (no
-		// CoverLine) has no coverage.
-		hits = unionHits(hits, covMap[runner.FileLine{File: mut.File, Line: mut.CoverLine}])
-		if mut.PackageInit && len(hits) == 0 {
-			// Package-level var initializers run in every test process
-			// but sit outside every cover block, so any test may kill them.
-			for _, name := range inventory {
-				hits = append(hits, runner.TestHit{Name: name})
+		perMut[i] = make([][]string, len(suites))
+		for j, s := range suites {
+			tests := s.coveringTests(mut)
+			if s.own && mut.PackageInit && len(tests) == 0 {
+				// Package-level var initializers run in every test
+				// process but sit outside every cover block, so any test
+				// may kill them.
+				tests = append(tests, inventory...)
 			}
-		}
-		for _, th := range hits {
-			perMut[i] = append(perMut[i], th.Name)
-			relevant[th.Name] = true
+			if s.own {
+				for _, name := range tests {
+					relevant[name] = true
+				}
+			}
+			perMut[i][j] = tests
+			for _, name := range tests {
+				covering[i] = append(covering[i], s.resultName(name))
+			}
 		}
 	}
 
 	covered := 0
-	for _, tests := range perMut {
+	for _, tests := range covering {
 		if len(tests) > 0 {
 			covered++
 		}
@@ -459,8 +634,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	g.SetLimit(cfg.jobs)
 	for i, mut := range mutations {
 		i, mut := i, mut
-		tests := perMut[i]
-		if len(tests) == 0 {
+		if len(covering[i]) == 0 {
 			// No test covers this line — the mutant cannot be killed,
 			// so skip the run and mark it not-covered.
 			results[i] = mutation.Result{
@@ -470,7 +644,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 			continue
 		}
 		g.Go(func() error {
-			status, killingTests, dur, err := runner.RunMutant(gctx, binaryPath, mut.ID, pkg.Dir, tests, cfg.mutantTimeout(baseline, tests), cfg.mutantArgs()...)
+			status, killingTests, dur, err := runMutantSuites(gctx, suites, mut.ID, perMut[i], 1, cfg)
 			if err != nil {
 				return fmt.Errorf("run mutant %d: %w", mut.ID, err)
 			}
@@ -478,7 +652,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 				Mutation:      mut,
 				Status:        status,
 				KillingTests:  killingTests,
-				CoveringTests: tests,
+				CoveringTests: covering[i],
 				Duration:      dur,
 			}
 			n := int(done.Add(1))
@@ -497,9 +671,8 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 
 	// Re-run uncertain verdicts one at a time, away from the contention of
 	// the parallel loop.
-	rerun := func(r mutation.Result, timeoutScale float64) (mutation.Result, error) {
-		timeout := time.Duration(timeoutScale * float64(cfg.mutantTimeout(baseline, r.CoveringTests)))
-		status, killingTests, dur, err := runner.RunMutant(ctx, binaryPath, r.Mutation.ID, pkg.Dir, r.CoveringTests, timeout, cfg.mutantArgs()...)
+	rerun := func(i int, r mutation.Result, timeoutScale float64) (mutation.Result, error) {
+		status, killingTests, dur, err := runMutantSuites(ctx, suites, r.Mutation.ID, perMut[i], timeoutScale, cfg)
 		if err != nil {
 			return r, fmt.Errorf("re-run mutant %d: %w", r.Mutation.ID, err)
 		}
@@ -515,7 +688,7 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	// inventory that don't cover any kept mutation. This keeps "zero_kill_tests"
 	// and the redundant-group analysis focused on tests an LLM could actually
 	// expect to kill the targeted mutants.
-	if cfg.filter != nil || cfg.mutantIDs != nil {
+	if cfg.filter != nil || cfg.mutants != nil {
 		narrowed := inventory[:0:0]
 		for _, name := range inventory {
 			if relevant[name] {
@@ -525,11 +698,11 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		inventory = narrowed
 	}
 
-	return pkgResult{results: results, inventory: inventory, excluded: excluded, funcRanges: funcRanges, ignored: rew.Ignored, stale: stale}, nil
+	return pkgResult{results: results, inventory: inventory, excluded: excluded, funcRanges: funcRanges, ignored: rew.Ignored, stale: stale, matched: matched}, nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	const usage = "usage: kanly guide | kanly init --agent=claude | kanly hook stop\n       kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-list>] [--jobs=N] [--verify-kills] [--fail-fast] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
+	const usage = "usage: kanly guide | kanly init --agent=claude | kanly hook stop | kanly show <pkg> <mutant>... | kanly test [--in=<pkg>] <pkg> <mutant> [go test flags]\n       kanly [--version] [--format=text|json|llm|sarif] [--timeout=<dur>] [--timeout-factor=3] [--diff [--diff-base=<ref>]] [--tests=<regex>] [--mutant=<id-or-fp-list>] [--jobs=N] [--verify-kills] [--fail-fast] [--cross-package [--no-cache]] [--llm-limit=30] [--min-score=N] [--quiet] [--tags=a,b] [--short] [--operators=...] [--skip-operators=...] [--exclude=...] <pattern>[:<func-list>]...\n"
 
 	fs := flag.NewFlagSet("kanly", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -547,10 +720,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	tagsFlag := fs.String("tags", "", "comma-separated build tags, as for go build -tags")
 	shortFlag := fs.Bool("short", false, "run tests with -test.short")
 	excludeFlag := fs.String("exclude", "", "comma-separated file globs not to mutate, matched against the path relative to the working directory, the file name, or a directory prefix")
-	mutantFlag := fs.String("mutant", "", "comma-separated schema-assigned mutant IDs to re-run; others are skipped")
+	mutantFlag := fs.String("mutant", "", "comma-separated mutant IDs or fingerprints to re-run; others are skipped")
 	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
 	verifyKillsFlag := fs.Bool("verify-kills", false, "re-run every killed mutant alone and count kills that do not reproduce as survived")
 	failFastFlag := fs.Bool("fail-fast", false, "stop testing each mutant at its first failing test; verdicts are unchanged, but per-test kill analysis is skipped")
+	llmLimitFlag := fs.Int("llm-limit", defaultLLMLimit, "most mutants the llm brief lists, those in the functions with the most first; 0 lists all")
+	crossPackageFlag := fs.Bool("cross-package", false, "also run the tests of the module's other packages that import the mutated package")
+	noCacheFlag := fs.Bool("no-cache", false, "with --cross-package, set up every dependent's tests afresh instead of reusing an unchanged setup")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(stderr, usage)
@@ -586,6 +762,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	if *llmLimitFlag < 0 {
+		fmt.Fprintf(stderr, "--llm-limit: must be >= 0, got %d\n", *llmLimitFlag)
+		return 2
+	}
+
 	if *jobsFlag < 1 {
 		fmt.Fprintf(stderr, "--jobs: must be >= 1, got %d\n", *jobsFlag)
 		return 2
@@ -597,7 +778,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	mutantIDs, err := parseMutantIDs(*mutantFlag)
+	mutants, err := parseMutants(*mutantFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "--mutant: %v\n", err)
 		return 2
@@ -676,7 +857,39 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var pkgErrors []report.PackageError
 	var excludedTests []report.ExcludedTest
 	var staleIgnores []report.StaleIgnore
+	matchedFPs := make(map[string]bool)
 	ignored := 0
+	var cache *setupCache
+	if *crossPackageFlag && !*noCacheFlag {
+		cache = openSetupCache()
+	}
+	// Dependents are listed, and the module stamped for the cache, once
+	// per module on first use: before any test runs, so files tests leave
+	// behind do not change the stamp.
+	dependentsByModule := make(map[string]map[string][]runner.Dependent)
+	stamps := make(map[string]string)
+	dependentsOf := func(pkg *source.Package) []runner.Dependent {
+		if !*crossPackageFlag || pkg.ModuleDir == "" {
+			return nil
+		}
+		deps, ok := dependentsByModule[pkg.ModuleDir]
+		if !ok {
+			if cache != nil {
+				stamp, err := moduleStamp(pkg.ModuleDir)
+				if err != nil {
+					fmt.Fprintf(stderr, "warning: --cross-package: not caching dependents' setups: %v\n", err)
+				}
+				stamps[pkg.ModuleDir] = stamp
+			}
+			var err error
+			deps, err = runner.TestDependents(ctx, pkg.ModuleDir, buildFlags...)
+			if err != nil {
+				fmt.Fprintf(stderr, "warning: --cross-package: listing the packages of %s: %v\n", pkg.ModuleDir, err)
+			}
+			dependentsByModule[pkg.ModuleDir] = deps
+		}
+		return deps[pkg.ImportPath]
+	}
 	recordFailure := func(pkg, stage string, err error) {
 		msg := err.Error()
 		first, rest, multiline := strings.Cut(msg, "\n")
@@ -719,12 +932,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 				}
 			}
 
+			deps := dependentsOf(pkg)
 			cfg := runConfig{
 				filter:        composeFilter(diffPred, excludePred, spec.Funcs),
 				timeout:       *timeoutFlag,
 				timeoutFactor: *timeoutFactorFlag,
 				testsRegex:    *testsFlag,
-				mutantIDs:     mutantIDs,
+				mutants:       mutants,
 				operators:     operatorSet,
 				buildFlags:    buildFlags,
 				testArgs:      testArgs,
@@ -732,6 +946,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 				jobs:          *jobsFlag,
 				verifyKills:   *verifyKillsFlag,
 				failFast:      *failFastFlag,
+				dependents:    deps,
+				cache:         cache,
+				moduleStamp:   stamps[pkg.ModuleDir],
 			}
 
 			res, err := runPackage(ctx, pkg, ops, cfg, stderr)
@@ -745,6 +962,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 				continue
 			}
 			staleIgnores = append(staleIgnores, res.stale...)
+			for _, fp := range res.matched {
+				matchedFPs[fp] = true
+			}
 			if len(res.results) == 0 {
 				prog.printf("skip %s: no mutations", pkg.ImportPath)
 				continue
@@ -769,6 +989,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *shortFlag {
 		rep.Scope = strings.TrimSpace(rep.Scope + " --short")
 	}
+	if *crossPackageFlag {
+		rep.Scope = strings.TrimSpace(rep.Scope + " --cross-package")
+		rep.CrossPackage = true
+	}
 	if *failFastFlag {
 		rep.Scope = strings.TrimSpace(rep.Scope + " --fail-fast")
 		// Each kill set holds only the first failing test, so the
@@ -778,9 +1002,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	rep.Summary.Ignored = ignored
 	rep.Errors = pkgErrors
-	rep.ExcludedTests = excludedTests
+	rep.ExcludedTests = dedupeExcluded(excludedTests)
 	rep.StaleIgnores = staleIgnores
-	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg}
+	if mutants != nil {
+		for fp := range mutants.fps {
+			if !matchedFPs[fp] {
+				rep.UnmatchedMutants = append(rep.UnmatchedMutants, fp)
+			}
+		}
+		sort.Strings(rep.UnmatchedMutants)
+		if len(rep.UnmatchedMutants) > 0 {
+			fmt.Fprintf(stderr, "kanly: --mutant: no mutant in scope has fingerprint %s; its line changed or it is accepted in %s\n", strings.Join(rep.UnmatchedMutants, ", "), schema.IgnoreFileName)
+		}
+	}
+	llmSrc := report.LLMSource{FuncRanges: funcRangesByPkg, Limit: *llmLimitFlag}
 	if code := writeReport(stdout, stderr, *formatFlag, rep, llmSrc); code != 0 {
 		return code
 	}
@@ -796,10 +1031,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// composeFilter combines an optional diff (file, line) predicate, an
-// optional file-exclusion predicate and an optional function-name selector
-// list. Returns nil when none is active so the rewriter takes the fast
-// no-filter path.
+// dedupeExcluded drops repeats of an excluded test: with --cross-package
+// a dependent's failing test is found once per package it imports.
+func dedupeExcluded(tests []report.ExcludedTest) []report.ExcludedTest {
+	seen := make(map[report.ExcludedTest]bool)
+	out := tests[:0:0]
+	for _, t := range tests {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // unionHits returns the tests in a or b, each once.
 func unionHits(a, b []runner.TestHit) []runner.TestHit {
 	seen := make(map[string]bool)
@@ -813,6 +1058,10 @@ func unionHits(a, b []runner.TestHit) []runner.TestHit {
 	return out
 }
 
+// composeFilter combines an optional diff (file, line) predicate, an
+// optional file-exclusion predicate and an optional function-name selector
+// list. Returns nil when none is active so the rewriter takes the fast
+// no-filter path.
 func composeFilter(diffPred func(file string, line int) bool, exclude func(file string) bool, funcs []string) func(string, int, string) bool {
 	if diffPred == nil && exclude == nil && len(funcs) == 0 {
 		return nil
@@ -1016,26 +1265,41 @@ func min3(a, b, c int) int {
 	return m
 }
 
-// parseMutantIDs parses "7,12,15" into a set. Empty string returns nil
-// (the "no filter" sentinel). Invalid entries error out.
-func parseMutantIDs(s string) (map[int]bool, error) {
+// mutantSet is the --mutant selection: schema IDs and fingerprints.
+type mutantSet struct {
+	ids map[int]bool
+	fps map[string]bool
+}
+
+func (s *mutantSet) has(m mutation.Mutation) bool {
+	return s.ids[m.ID] || m.Fingerprint != "" && s.fps[m.Fingerprint]
+}
+
+// parseMutants parses a --mutant list such as "7,12,5e0d8f5590d5": each
+// entry is a fingerprint (12 hex digits) or else a schema ID. An empty
+// string returns nil (the "no filter" sentinel). Invalid entries error out.
+func parseMutants(s string) (*mutantSet, error) {
 	if strings.TrimSpace(s) == "" {
 		return nil, nil
 	}
-	out := make(map[int]bool)
+	out := &mutantSet{ids: make(map[int]bool), fps: make(map[string]bool)}
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			return nil, fmt.Errorf("empty id in list %q", s)
 		}
+		if schema.IsFingerprint(part) {
+			out.fps[part] = true
+			continue
+		}
 		id, err := strconv.Atoi(part)
 		if err != nil {
-			return nil, fmt.Errorf("invalid id %q: %w", part, err)
+			return nil, fmt.Errorf("invalid id %q: want a mutant ID or a 12-hex-digit fingerprint", part)
 		}
 		if id < 1 {
 			return nil, fmt.Errorf("invalid id %d: must be >= 1", id)
 		}
-		out[id] = true
+		out.ids[id] = true
 	}
 	return out, nil
 }

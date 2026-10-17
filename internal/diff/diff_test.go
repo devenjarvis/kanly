@@ -225,6 +225,31 @@ diff --git a/other/b.go b/other/b.go
 @@ -1 +1 @@
 -x
 +y
+diff --git a/c.go b/c.go
+--- a/c.go
++++ b/c.go
+@@ -1 +1 @@
++y
+diff --git a/pkg/testdata/fix/f.go b/pkg/testdata/fix/f.go
+--- a/pkg/testdata/fix/f.go
++++ b/pkg/testdata/fix/f.go
+@@ -1 +1 @@
++y
+diff --git a/.hidden/h.go b/.hidden/h.go
+--- a/.hidden/h.go
++++ b/.hidden/h.go
+@@ -1 +1 @@
++y
+diff --git a/pkg/_scratch/s.go b/pkg/_scratch/s.go
+--- a/pkg/_scratch/s.go
++++ b/pkg/_scratch/s.go
+@@ -1 +1 @@
++y
+diff --git a/pkg/testdatax/t.go b/pkg/testdatax/t.go
+--- a/pkg/testdatax/t.go
++++ b/pkg/testdatax/t.go
+@@ -1 +1 @@
++y
 `
 	tmp := t.TempDir()
 	d, err := diff.ParseDiff(tmp, strings.NewReader(input))
@@ -232,8 +257,9 @@ diff --git a/other/b.go b/other/b.go
 		t.Fatal(err)
 	}
 
+	// Like ./..., skip testdata and "." or "_" directories.
 	got := d.Patterns(tmp)
-	want := []string{"./other", "./pkg"}
+	want := []string{".", "./other", "./pkg", "./pkg/testdatax"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Patterns() = %v, want %v", got, want)
 	}
