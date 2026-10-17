@@ -39,3 +39,10 @@ d99ab72b6348 with both caches off the stamp is computed but never read; only the
 0aa4ecc3ef02 progress cadence: dividing by -10 instead of 10 only changes how often progress lines print on large runs
 c38c89a04142 progress cadence: dividing by 11 instead of 10 only changes how often progress lines print on large runs
 c1b14253964f progress cadence: dividing by 9 instead of 10 only changes how often progress lines print on large runs
+# concurrent packages
+3f9b829db193 longestFirst only orders the mutant runs, which by design never changes the report; TestLongestFirst tests the order
+1183bbf989de run's context is never cancelled, so acquiring a worker slot cannot fail
+dbee9d11faaa run's context is never cancelled, so acquiring a worker slot cannot fail
+d79d95a40e70 run's context is never cancelled, so acquiring a worker slot cannot fail
+8816eddaefc0 run's context is never cancelled, so acquiring a worker slot cannot fail
+722f253082b8 run's context is never cancelled, so acquiring a worker slot cannot fail

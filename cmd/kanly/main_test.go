@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -766,6 +767,13 @@ func TestRunReportsHealthyPackagesWhenOthersFail(t *testing.T) {
 	for pkg, stage := range want {
 		if stages[pkg] != stage {
 			t.Errorf("errors[%s].stage: want %q, got %q (all errors: %+v)", pkg, stage, stages[pkg], result.Errors)
+		}
+	}
+	// Each failure is also announced on stderr, with its first line.
+	for _, e := range result.Errors {
+		first, _, _ := strings.Cut(e.Error, "\n")
+		if want := fmt.Sprintf("error in %s (%s): %s", e.Package, e.Stage, first); !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
 		}
 	}
 	if len(result.Errors) != len(want) {

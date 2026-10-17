@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/devenjarvis/kanly/internal/diff"
 	"github.com/devenjarvis/kanly/internal/mutation"
@@ -74,21 +76,34 @@ func resolveVersion() string {
 // runConfig collects the per-package knobs threaded from CLI flags into runPackage.
 type runConfig struct {
 	filter        func(file string, line int, funcName string) bool
-	timeout       time.Duration      // fixed per-mutant timeout; 0 derives it from the baseline
-	timeoutFactor float64            // multiplier on baseline test time for derived timeouts
-	testsRegex    string             // if non-empty, narrows baseline + per-test coverage
-	mutants       *mutantSet         // if non-nil, only these mutants run
-	operators     map[string]bool    // if non-nil, only these operators' mutants run
-	buildFlags    []string           // extra `go test -c` flags (-tags)
-	testArgs      []string           // extra test binary flags (-test.short)
-	progress      *progress          // informational output
-	jobs          int                // worker pool size for per-test coverage and the mutant loop; >= 1
-	verifyKills   bool               // re-run every killed mutant alone to confirm the kill
-	failFast      bool               // stop each mutant run at its first failing test
-	dependents    []runner.Dependent // other packages whose tests also run against the mutants (--cross-package)
-	cache         *setupCache        // dependents' setups across runs; nil disables it
-	kills         *killCache         // kills across runs; nil disables it
-	moduleStamp   string             // the module's non-code files, part of the cache keys
+	timeout       time.Duration       // fixed per-mutant timeout; 0 derives it from the baseline
+	timeoutFactor float64             // multiplier on baseline test time for derived timeouts
+	testsRegex    string              // if non-empty, narrows baseline + per-test coverage
+	mutants       *mutantSet          // if non-nil, only these mutants run
+	operators     map[string]bool     // if non-nil, only these operators' mutants run
+	buildFlags    []string            // extra `go test -c` flags (-tags)
+	testArgs      []string            // extra test binary flags (-test.short)
+	progress      *progress           // informational output
+	jobs          int                 // number of worker slots; >= 1
+	slots         *semaphore.Weighted // jobs worker slots, shared by every package's test processes and compiles
+	verifyKills   bool                // re-run every killed mutant alone to confirm the kill
+	failFast      bool                // stop each mutant run at its first failing test
+	dependents    []runner.Dependent  // other packages whose tests also run against the mutants (--cross-package)
+	cache         *setupCache         // dependents' setups across runs; nil disables it
+	kills         *killCache          // kills across runs; nil disables it
+	moduleStamp   string              // the module's non-code files, part of the cache keys
+}
+
+// slotted returns f's results, calling it while holding one of cfg's shared
+// worker slots.
+func slotted[T, U any](ctx context.Context, cfg runConfig, f func() (T, U, error)) (T, U, error) {
+	if err := cfg.slots.Acquire(ctx, 1); err != nil {
+		var t T
+		var u U
+		return t, u, err
+	}
+	defer cfg.slots.Release(1)
+	return f()
 }
 
 // mutantArgs returns the test binary flags for a run against a mutant.
@@ -139,6 +154,62 @@ type stageError struct {
 
 func (e *stageError) Error() string { return e.stage + ": " + e.err.Error() }
 func (e *stageError) Unwrap() error { return e.err }
+
+// failureStage splits a package's failure into the stage it failed at and
+// its cause; an error without a stage failed in the mutant loop.
+func failureStage(err error) (string, error) {
+	var se *stageError
+	if errors.As(err, &se) {
+		return se.stage, se.err
+	}
+	return "mutants", err
+}
+
+// syncWriter serializes writes to w, so concurrent writers' lines do not
+// interleave; each fmt.Fprintf is a single Write.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// dirLocks hands out one lock per directory.
+type dirLocks struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+func newDirLocks() *dirLocks { return &dirLocks{locks: make(map[string]*sync.Mutex)} }
+
+// lock takes the locks of dirs, in sorted order so that two callers
+// wanting overlapping sets cannot deadlock, and returns their release.
+func (l *dirLocks) lock(dirs []string) (unlock func()) {
+	dirs = append([]string(nil), dirs...)
+	sort.Strings(dirs)
+	dirs = slices.Compact(dirs)
+	held := make([]*sync.Mutex, len(dirs))
+	for i, d := range dirs {
+		l.mu.Lock()
+		m, ok := l.locks[d]
+		if !ok {
+			m = new(sync.Mutex)
+			l.locks[d] = m
+		}
+		l.mu.Unlock()
+		m.Lock()
+		held[i] = m
+	}
+	return func() {
+		for _, m := range held {
+			m.Unlock()
+		}
+	}
+}
 
 // maxBaselineRounds bounds how many times the baseline is re-run with newly
 // failing tests skipped. A test that panics stops the binary, hiding the
@@ -358,6 +429,25 @@ func (s suite) coveringTests(mut mutation.Mutation) []string {
 	return names
 }
 
+// longestFirst sorts idx, indices into cost, by descending cost, keeping
+// the order of equal costs.
+func longestFirst(idx []int, cost []time.Duration) {
+	sort.SliceStable(idx, func(a, b int) bool { return cost[idx[a]] > cost[idx[b]] })
+}
+
+// expectedCost estimates how long a mutant takes to test when it survives:
+// for each suite with tests to run (tests[i] for suites[i]), their baseline
+// time plus the suite's per-process overhead.
+func expectedCost(suites []suite, tests [][]string) time.Duration {
+	var total time.Duration
+	for i, s := range suites {
+		if len(tests[i]) > 0 {
+			total += s.baseline.MutantTimeout(tests[i], 1, 0)
+		}
+	}
+	return total
+}
+
 // runMutantSuites runs each suite's covering tests (tests[i] for suites[i])
 // against mutant id. The mutant is killed if any suite's tests fail, and
 // timed out if none fail but one times out. timeoutScale multiplies each
@@ -454,12 +544,16 @@ func dependentSuites(ctx context.Context, pkg *source.Package, overlayPath strin
 	for _, dep := range cfg.dependents {
 		cfg.progress.printf("%s: running the tests of dependent %s unmutated", pkg.ImportPath, dep.ImportPath)
 		s, ex, err := func() (suite, []report.ExcludedTest, error) {
-			bin, cleanBin, err := runner.CompileDependentTestBinary(ctx, dep.ImportPath, pkg.ImportPath, overlayPath, pkg.GoVersion, cfg.buildFlags...)
+			bin, cleanBin, err := slotted(ctx, cfg, func() (string, func(), error) {
+				return runner.CompileDependentTestBinary(ctx, dep.ImportPath, pkg.ImportPath, overlayPath, pkg.GoVersion, cfg.buildFlags...)
+			})
 			if err != nil {
 				return suite{}, nil, err
 			}
 			cleanups = append(cleanups, cleanBin)
-			covBin, cleanCov, err := runner.CompileDependentCoverageBinary(ctx, dep.ImportPath, pkg.ImportPath, cfg.buildFlags...)
+			covBin, cleanCov, err := slotted(ctx, cfg, func() (string, func(), error) {
+				return runner.CompileDependentCoverageBinary(ctx, dep.ImportPath, pkg.ImportPath, cfg.buildFlags...)
+			})
 			if err != nil {
 				return suite{}, nil, err
 			}
@@ -473,11 +567,13 @@ func dependentSuites(ctx context.Context, pkg *source.Package, overlayPath strin
 				cfg.progress.printf("%s: reusing the setup of dependent %s from the cache", pkg.ImportPath, dep.ImportPath)
 				return suite{pkg: dep.ImportPath, dir: dep.Dir, bin: bin, baseline: cached.Baseline, covMap: cached.covMap()}, nil, nil
 			}
-			baseline, ex, err := establishBaseline(ctx, bin, covBin, dep.Dir, cfg)
+			baseline, ex, err := slotted(ctx, cfg, func() (runner.Baseline, []report.ExcludedTest, error) {
+				return establishBaseline(ctx, bin, covBin, dep.Dir, cfg)
+			})
 			if err != nil {
 				return suite{}, nil, err
 			}
-			covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBin, dep.Dir, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs, cfg.testArgs...)
+			covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBin, dep.Dir, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.slots, cfg.testArgs...)
 			if err != nil {
 				return suite{}, nil, err
 			}
@@ -572,7 +668,9 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	}
 	defer cleanOverlay()
 
-	binaryPath, cleanBin, err := runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion, cfg.buildFlags...)
+	binaryPath, cleanBin, err := slotted(ctx, cfg, func() (string, func(), error) {
+		return runner.CompileTestBinary(ctx, pkg.ImportPath, overlayPath, pkg.GoVersion, cfg.buildFlags...)
+	})
 	if err != nil {
 		return pkgResult{}, &stageError{"compile", err}
 	}
@@ -580,7 +678,9 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 
 	// Separate cover-instrumented binary built without overlay; used only
 	// for per-test coverage collection. See CompileCoverageBinary for why.
-	covBinaryPath, cleanCovBin, err := runner.CompileCoverageBinary(ctx, pkg.ImportPath, cfg.buildFlags...)
+	covBinaryPath, cleanCovBin, err := slotted(ctx, cfg, func() (string, func(), error) {
+		return runner.CompileCoverageBinary(ctx, pkg.ImportPath, cfg.buildFlags...)
+	})
 	if err != nil {
 		return pkgResult{}, &stageError{"compile", fmt.Errorf("coverage binary: %w", err)}
 	}
@@ -590,14 +690,16 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	defer guardDir(pkg.Dir, pkg.ImportPath, stderr)()
 
 	cfg.progress.printf("%s: running the tests unmutated", pkg.ImportPath)
-	baseline, excluded, err := establishBaseline(ctx, binaryPath, covBinaryPath, pkg.Dir, cfg)
+	baseline, excluded, err := slotted(ctx, cfg, func() (runner.Baseline, []report.ExcludedTest, error) {
+		return establishBaseline(ctx, binaryPath, covBinaryPath, pkg.Dir, cfg)
+	})
 	if err != nil {
 		return pkgResult{}, &stageError{"baseline", err}
 	}
 
 	// Collect per-test coverage once; pays off across all mutants. A test
 	// that fails on its own cannot be trusted to judge a mutant either.
-	covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.jobs, cfg.testArgs...)
+	covMap, covFailed, err := runner.CollectPerTestCoverage(ctx, covBinaryPath, pkg.Dir, pkg.Dir, baseline.Tests, cfg.setupTimeout(), cfg.slots, cfg.testArgs...)
 	if err != nil {
 		return pkgResult{}, &stageError{"coverage", err}
 	}
@@ -708,10 +810,11 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	lastReport := time.Now()
 	var reportMu sync.Mutex
 
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(cfg.jobs)
+	// The mutants with the longest expected run start first, so the last
+	// worker slots to free up are not held by the slowest mutants.
+	var order []int
+	cost := make([]time.Duration, len(mutations))
 	for i, mut := range mutations {
-		i, mut := i, mut
 		if len(covering[i]) == 0 {
 			// No test covers this line — the mutant cannot be killed,
 			// so skip the run and mark it not-covered.
@@ -724,7 +827,20 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 		if results[i].Cached {
 			continue
 		}
+		order = append(order, i)
+		cost[i] = expectedCost(suites, perMut[i])
+	}
+	longestFirst(order, cost)
+
+	g, gctx := errgroup.WithContext(ctx)
+	var acquireErr error
+	for _, i := range order {
+		i, mut := i, mutations[i]
+		if acquireErr = cfg.slots.Acquire(gctx, 1); acquireErr != nil {
+			break
+		}
 		g.Go(func() error {
+			defer cfg.slots.Release(1)
 			status, killingTests, dur, err := runMutantSuites(gctx, suites, mut.ID, perMut[i], 1, cfg)
 			if err != nil {
 				return fmt.Errorf("run mutant %d: %w", mut.ID, err)
@@ -749,11 +865,19 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	if err := g.Wait(); err != nil {
 		return pkgResult{}, &stageError{"mutants", err}
 	}
+	if acquireErr != nil {
+		return pkgResult{}, &stageError{"mutants", acquireErr}
+	}
 
 	// Re-run uncertain verdicts one at a time, away from the contention of
-	// the parallel loop.
+	// the parallel loop: each holds every worker slot, so nothing else, in
+	// this package or another, runs beside it.
 	rerun := func(i int, r mutation.Result, timeoutScale float64) (mutation.Result, error) {
+		if err := cfg.slots.Acquire(ctx, int64(cfg.jobs)); err != nil {
+			return r, err
+		}
 		status, killingTests, dur, err := runMutantSuites(ctx, suites, r.Mutation.ID, perMut[i], timeoutScale, cfg)
+		cfg.slots.Release(int64(cfg.jobs))
 		if err != nil {
 			return r, fmt.Errorf("re-run mutant %d: %w", r.Mutation.ID, err)
 		}
@@ -803,7 +927,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	shortFlag := fs.Bool("short", false, "run tests with -test.short")
 	excludeFlag := fs.String("exclude", "", "comma-separated file globs not to mutate, matched against the path relative to the working directory, the file name, or a directory prefix")
 	mutantFlag := fs.String("mutant", "", "comma-separated mutant IDs or fingerprints to re-run; others are skipped")
-	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "parallel worker processes for per-test coverage and the mutant loop (1 = sequential)")
+	jobsFlag := fs.Int("jobs", runtime.NumCPU(), "worker slots shared by every compile and test process across packages, and the most packages in progress at once (1 = sequential)")
 	verifyKillsFlag := fs.Bool("verify-kills", false, "re-run every killed mutant alone and count kills that do not reproduce as survived")
 	killMatrixFlag := fs.Bool("kill-matrix", false, "run every covering test against each killed mutant, for the per-test views (tests, zero_kill_tests, redundant_test_groups); slower")
 	// Stopping at the first failing test is the default; the flag is kept
@@ -833,6 +957,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "--min-score: must be between 0 and 100, got %v\n", *minScoreFlag)
 		return 2
 	}
+	// Packages run concurrently, so every write to stderr goes through one
+	// lock and lines from different packages never interleave.
+	stderr = &syncWriter{w: stderr}
 	prog := &progress{w: stderr}
 	if *quietFlag {
 		prog.w = nil
@@ -992,16 +1119,33 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return deps[pkg.ImportPath]
 	}
-	recordFailure := func(pkg, stage string, err error) {
-		msg := err.Error()
-		first, rest, multiline := strings.Cut(msg, "\n")
+	// A failure is reported on stderr as it happens and recorded for the
+	// report once every package is done.
+	announceFailure := func(pkg string, err error) {
+		stage, msg := failureStage(err)
+		first, rest, multiline := strings.Cut(msg.Error(), "\n")
 		if multiline && strings.TrimSpace(rest) != "" {
 			first += " … (details in the report)"
 		}
 		fmt.Fprintf(stderr, "error in %s (%s): %s\n", pkg, stage, first)
-		pkgErrors = append(pkgErrors, report.PackageError{Package: pkg, Stage: stage, Error: msg})
+	}
+	recordFailure := func(pkg string, err error) {
+		stage, msg := failureStage(err)
+		pkgErrors = append(pkgErrors, report.PackageError{Package: pkg, Stage: stage, Error: msg.Error()})
 	}
 
+	// Packages are loaded, checked and configured in order; then their
+	// pipelines run concurrently, sharing the worker slots, and their results
+	// are put together in that same order, so the report does not depend on
+	// which package finished first.
+	type job struct {
+		pkg *source.Package
+		cfg runConfig
+		res pkgResult
+		err error // set before the run for a package that failed to load
+	}
+	var jobs []*job
+	slots := semaphore.NewWeighted(int64(*jobsFlag))
 	for _, spec := range specs {
 		pkgs, loadErrs, err := source.LoadAllTags("", *tagsFlag, spec.Pattern)
 		if err != nil {
@@ -1017,7 +1161,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		for _, le := range loadErrs {
-			recordFailure(le.ImportPath, "load", le.Err)
+			err := &stageError{"load", le.Err}
+			announceFailure(le.ImportPath, err)
+			jobs = append(jobs, &job{pkg: &source.Package{ImportPath: le.ImportPath}, err: err})
 		}
 
 		for _, pkg := range pkgs {
@@ -1036,7 +1182,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 			stamp := stampOf(pkg)
 			deps := dependentsOf(pkg)
-			cfg := runConfig{
+			jobs = append(jobs, &job{pkg: pkg, cfg: runConfig{
 				filter:        composeFilter(diffPred, excludePred, spec.Funcs),
 				timeout:       *timeoutFlag,
 				timeoutFactor: *timeoutFactorFlag,
@@ -1047,38 +1193,72 @@ func run(args []string, stdout, stderr io.Writer) int {
 				testArgs:      testArgs,
 				progress:      prog,
 				jobs:          *jobsFlag,
+				slots:         slots,
 				verifyKills:   *verifyKillsFlag,
 				failFast:      !*killMatrixFlag,
 				dependents:    deps,
 				cache:         cache,
 				kills:         kills,
 				moduleStamp:   stamp,
-			}
-
-			res, err := runPackage(ctx, pkg, ops, cfg, stderr)
-			if err != nil {
-				var se *stageError
-				if errors.As(err, &se) {
-					recordFailure(pkg.ImportPath, se.stage, se.err)
-				} else {
-					recordFailure(pkg.ImportPath, "mutants", err)
-				}
-				continue
-			}
-			staleIgnores = append(staleIgnores, res.stale...)
-			for _, fp := range res.matched {
-				matchedFPs[fp] = true
-			}
-			if len(res.results) == 0 {
-				prog.printf("skip %s: no mutations", pkg.ImportPath)
-				continue
-			}
-			excludedTests = append(excludedTests, res.excluded...)
-			ignored += res.ignored
-			allResults = append(allResults, res.results...)
-			testInventory[pkg.ImportPath] = res.inventory
-			funcRangesByPkg[pkg.ImportPath] = res.funcRanges
+			}})
 		}
+	}
+
+	// At most --jobs pipelines are in flight, started in order: each keeps
+	// its test binaries on disk until it is done, and that many already
+	// keep every worker slot busy while one of them compiles or waits.
+	// A package's tests run in its own directory and, with --cross-package,
+	// in its dependents'. Two pipelines never run tests in, or guard, the
+	// same directory at once: each holds a lock on every directory it uses.
+	pipelines := semaphore.NewWeighted(int64(*jobsFlag))
+	locks := newDirLocks()
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		if j.err != nil {
+			continue
+		}
+		dirs := []string{j.pkg.Dir}
+		for _, dep := range j.cfg.dependents {
+			dirs = append(dirs, dep.Dir)
+		}
+		if err := pipelines.Acquire(ctx, 1); err != nil {
+			j.err = err
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer pipelines.Release(1)
+			unlock := locks.lock(dirs)
+			defer unlock()
+			j.res, j.err = runPackage(ctx, j.pkg, ops, j.cfg, stderr)
+			if j.err != nil {
+				announceFailure(j.pkg.ImportPath, j.err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	for _, j := range jobs {
+		pkg := j.pkg
+		res, err := j.res, j.err
+		if err != nil {
+			recordFailure(pkg.ImportPath, err)
+			continue
+		}
+		staleIgnores = append(staleIgnores, res.stale...)
+		for _, fp := range res.matched {
+			matchedFPs[fp] = true
+		}
+		if len(res.results) == 0 {
+			prog.printf("skip %s: no mutations", pkg.ImportPath)
+			continue
+		}
+		excludedTests = append(excludedTests, res.excluded...)
+		ignored += res.ignored
+		allResults = append(allResults, res.results...)
+		testInventory[pkg.ImportPath] = res.inventory
+		funcRangesByPkg[pkg.ImportPath] = res.funcRanges
 	}
 
 	rep := report.Build(allResults, testInventory)
