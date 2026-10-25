@@ -20,12 +20,11 @@ import (
 // `return true` statements inside `Find` helpers; flipping the literal
 // toggles the skip decision, surfacing tests that exercise those paths.
 //
-// Strict-identity type policy: the literal's contextual type must be exactly
-// `types.Typ[types.Bool]` — named bool wrappers (`type MyBool bool`) and
-// untyped-only positions (e.g. `var x = true` where x infers to bool but
-// the literal itself is untyped) are excluded. This mirrors `IntLiteral`
-// and keeps the rewrite type-safe: the dispatcher helper returns plain
-// `bool` and cannot satisfy a named-bool context without a conversion.
+// Type policy: the literal's contextual type must be plain `bool` or a named
+// bool (`type MyBool bool`); untyped-only positions (e.g. `if true`, where
+// the literal keeps its untyped type) are excluded. The dispatcher returns
+// plain `bool`, so in a named-bool context the call is compared with `true`:
+// a comparison is an untyped bool, which takes the type its context gives it.
 //
 // Skipped positions (would not compile if wrapped):
 //   - Const declarations — initializers must be constant expressions.
@@ -36,14 +35,19 @@ type BoolLiteral struct{}
 func (BoolLiteral) Name() string          { return "bool_literal" }
 func (BoolLiteral) DispatcherKey() string { return "bool_literal" }
 
-// Rewrite wraps the bool keyword in __cMutBoolLit(<orig>, mutIDs...).
+// Rewrite wraps the bool keyword in __cMutBoolLit(<orig>, mutIDs...), or in
+// a named-bool context (__cMutBoolLit(<orig>, mutIDs...) == true).
 func (BoolLiteral) Rewrite(c mutation.Candidate, mutIDs []int) ast.Node {
 	expr := c.Node.(ast.Expr)
 	args := []ast.Expr{expr}
 	for _, id := range mutIDs {
 		args = append(args, &ast.BasicLit{Kind: token.INT, Value: fmt.Sprintf("%d", id)})
 	}
-	return &ast.CallExpr{Fun: &ast.Ident{Name: "__cMutBoolLit"}, Args: args}
+	call := &ast.CallExpr{Fun: &ast.Ident{Name: "__cMutBoolLit"}, Args: args}
+	if c.Type == types.Typ[types.Bool] {
+		return call
+	}
+	return &ast.ParenExpr{X: &ast.BinaryExpr{X: call, Op: token.EQL, Y: ast.NewIdent("true")}}
 }
 
 func (BoolLiteral) Find(file *ast.File, info *types.Info) []mutation.Candidate {
@@ -60,7 +64,7 @@ func (BoolLiteral) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 		}
 		if ident, ok := n.(*ast.Ident); ok && (ident.Name == "true" || ident.Name == "false") {
 			obj := info.ObjectOf(ident)
-			if (obj == trueObj || obj == falseObj) && litMutable(stack) && boolLitOperand(info, ident) {
+			if t := boolLitType(info, ident); (obj == trueObj || obj == falseObj) && t != nil && litMutable(stack) {
 				mutant := "true"
 				if ident.Name == "true" {
 					mutant = "false"
@@ -70,6 +74,7 @@ func (BoolLiteral) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 					Pos:      ident.Pos(),
 					Original: ident.Name,
 					Mutant:   mutant,
+					Type:     t,
 				})
 			}
 		}
@@ -79,15 +84,12 @@ func (BoolLiteral) Find(file *ast.File, info *types.Info) []mutation.Candidate {
 	return candidates
 }
 
-// boolLitOperand reports whether the predeclared true/false identifier's
-// contextual type has been resolved to exactly types.Bool. Untyped contexts
-// (where the literal would default to plain bool but isn't yet typed) and
-// named bool types (MyBool) both return false — the rewrite cannot safely
-// produce a function call returning bool in those positions.
-func boolLitOperand(info *types.Info, ident *ast.Ident) bool {
-	tv, ok := info.Types[ident]
-	if !ok {
-		return false
+// boolLitType returns the predeclared true/false identifier's contextual
+// type when it is plain bool or a named bool, or nil when it stays untyped.
+func boolLitType(info *types.Info, ident *ast.Ident) types.Type {
+	tv := info.Types[ident]
+	if !isBoolType(tv.Type) || tv.Type == types.Typ[types.UntypedBool] {
+		return nil
 	}
-	return tv.Type == types.Typ[types.Bool]
+	return tv.Type
 }

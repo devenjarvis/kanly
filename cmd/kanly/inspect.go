@@ -105,8 +105,12 @@ func describeMutant(w io.Writer, m mutation.Mutation) {
 // mutatedLine returns line with the mutant applied when the mutation's
 // original text is the source text at col. That holds for operator and
 // literal mutations; others (a deleted call, a zeroed return) describe the
-// change symbolically instead.
+// change symbolically instead. Some symbolic originals are source text too:
+// a dropped or swapped switch clause and a removed receive.
 func mutatedLine(line string, col int, m mutation.Mutation) (string, bool) {
+	if m.OperatorName == "switch_case" || m.OperatorName == "chan_op" {
+		return "", false
+	}
 	if m.Original == "" || !strings.HasPrefix(line[col:], m.Original) {
 		return "", false
 	}

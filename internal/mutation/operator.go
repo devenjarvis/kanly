@@ -11,6 +11,9 @@ type Candidate struct {
 	Pos      token.Pos // raw position; resolve with the package FileSet
 	Original string
 	Mutant   string
+	// Type is the contextual type of Node, set by operators whose rewrite
+	// depends on it (int_literal outside plain int); nil otherwise.
+	Type types.Type
 }
 
 type Operator interface {
@@ -34,6 +37,17 @@ type Operator interface {
 type Wrapper interface {
 	Operator
 	WrapsExpr()
+}
+
+// GroupRewriter is implemented by operators whose call site needs every
+// candidate placed on it, not just the first: their mutants differ in more
+// than the ID the dispatcher switches on (int_literal's sized form spells each
+// mutant value at the call site; switch_case's mutants each name a clause).
+// The rewriter calls RewriteGroup instead of Rewrite; cands[i] has ID
+// mutIDs[i], and every cands[i].Node is the node being replaced.
+type GroupRewriter interface {
+	Operator
+	RewriteGroup(cands []Candidate, mutIDs []int) ast.Node
 }
 
 var registry []Operator

@@ -2,6 +2,7 @@ package operators
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 )
 
@@ -27,7 +28,30 @@ func intOperands(info *types.Info, x, y ast.Expr) bool {
 	if !isIntegerType(lv.Type) || !isIntegerType(rv.Type) {
 		return false
 	}
-	return types.Identical(lv.Type, rv.Type)
+	return types.Identical(lv.Type, rv.Type) && operandsInferable(info, x, y, lv.Type, types.Typ[types.Int])
+}
+
+// operandsInferable reports whether a generic dispatcher called with x and y
+// infers t, their type. An operand that carries its own type fixes it; when
+// neither does (`1<<n - 1`, or a literal int_literal rewrites into a
+// non-constant sum), inference falls back to def, the default type of the
+// untyped operands, which fits only a context of that type.
+func operandsInferable(info *types.Info, x, y ast.Expr, t, def types.Type) bool {
+	return hasOwnType(info, x) || hasOwnType(info, y) || types.Identical(t, def)
+}
+
+// floatOperands is intOperands for floating-point operands: float32,
+// float64 and named wrappers around them. Complex numbers are excluded.
+//
+// Unlike intOperands it needs no inference check: Go has no untyped
+// non-constant float expression (a float cannot be shifted), so one operand
+// of a non-constant float operation always carries its own type.
+func floatOperands(info *types.Info, x, y ast.Expr) bool {
+	lv, rv := info.Types[x], info.Types[y]
+	if lv.Value != nil && rv.Value != nil {
+		return false
+	}
+	return isFloatType(lv.Type) && types.Identical(lv.Type, rv.Type)
 }
 
 // boolOperands reports whether x and y are both boolean-typed and at least
@@ -88,6 +112,18 @@ func isIntegerType(t types.Type) bool {
 		return false
 	}
 	return b.Info()&types.IsInteger != 0
+}
+
+// isFloatType reports whether t's underlying type is float32 or float64.
+func isFloatType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	b, ok := t.Underlying().(*types.Basic)
+	if !ok {
+		return false
+	}
+	return b.Info()&types.IsFloat != 0
 }
 
 // isBoolType reports whether t's underlying type is the boolean basic.
@@ -199,6 +235,18 @@ func hasOwnType(info *types.Info, e ast.Expr) bool {
 		return objHasOwnType(info.ObjectOf(x.Sel))
 	case *ast.CallExpr, *ast.IndexExpr, *ast.IndexListExpr, *ast.StarExpr, *ast.TypeAssertExpr:
 		return true
+	case *ast.UnaryExpr:
+		// An address has the pointer's type even of a composite literal; a
+		// receive's operand, a channel, always has its own type.
+		return x.Op == token.AND || hasOwnType(info, x.X)
+	case *ast.BinaryExpr:
+		switch x.Op {
+		case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+			return false // a comparison is an untyped bool
+		case token.SHL, token.SHR:
+			return hasOwnType(info, x.X)
+		}
+		return hasOwnType(info, x.X) || hasOwnType(info, x.Y)
 	}
 	return false
 }
