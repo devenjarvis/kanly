@@ -503,3 +503,48 @@ func TestIntCmpExprReturnsLessEqual(t *testing.T) {
 		t.Errorf("expected 'case 199: return a <= b', got:\n%s", src)
 	}
 }
+
+func TestRenderDispatcherEmitsNewOperatorFuncs(t *testing.T) {
+	for _, tc := range []struct {
+		mut  mutation.Mutation
+		want []string
+	}{
+		{mutation.Mutation{ID: 1, OperatorName: "float_arith", Original: "*", Mutant: "/"},
+			[]string{"func __cMutFloat[T __cFloat](a, b T, op int, mutIDs ...int) T", "case 1: return a / b"}},
+		{mutation.Mutation{ID: 2, OperatorName: "float_cmp_boundary", Original: "<", Mutant: "<="},
+			[]string{"func __cMutFloatCmp[T __cFloat](a, b T, op int, mutIDs ...int) bool", "case 2: return a <= b"}},
+		{mutation.Mutation{ID: 3, OperatorName: "float_cmp_negate", Original: "==", Mutant: "!="},
+			[]string{"case 3: return a != b"}},
+		{mutation.Mutation{ID: 4, OperatorName: "chan_op", Original: "<-ch", Mutant: "zero"},
+			[]string{"func __cMutRecv[T any](ch <-chan T, mutIDs ...int) T", "func __cMutCallSkip("}},
+		{mutation.Mutation{ID: 5, OperatorName: "switch_case", Original: "case 1", Mutant: ""},
+			[]string{"func __cMutKeep(mutIDs ...int) bool", "func __cMutSwap(idx, a, b int, mutIDs ...int) int"}},
+		{mutation.Mutation{ID: 6, OperatorName: "int_literal", Original: "7", Mutant: "8"},
+			[]string{"func __cMutLitOff(mutIDs ...int) uint", "func __cMutLitOn(id int) uint"}},
+	} {
+		t.Run(tc.mut.OperatorName, func(t *testing.T) {
+			src, err := schema.RenderDispatcher("p", []mutation.Mutation{tc.mut})
+			if err != nil {
+				t.Fatalf("RenderDispatcher: %v", err)
+			}
+			if _, err := parser.ParseFile(token.NewFileSet(), "kanly_schema.go", src, 0); err != nil {
+				t.Fatalf("generated source does not parse: %v\n%s", err, src)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(src, w) {
+					t.Errorf("dispatcher lacks %q:\n%s", w, src)
+				}
+			}
+		})
+	}
+	// Each section is emitted only for its own operators.
+	src, err := schema.RenderDispatcher("p", []mutation.Mutation{{ID: 1, OperatorName: "int_arith", Original: "+", Mutant: "-"}})
+	if err != nil {
+		t.Fatalf("RenderDispatcher: %v", err)
+	}
+	for _, fn := range []string{"__cMutFloat", "__cMutRecv", "__cMutKeep", "__cMutLitOn"} {
+		if strings.Contains(src, "func "+fn) {
+			t.Errorf("int_arith-only dispatcher emits %s", fn)
+		}
+	}
+}

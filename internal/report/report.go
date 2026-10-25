@@ -562,6 +562,11 @@ var operatorHints = map[string]string{
 	"inc_dec":             "Assert the post-loop counter / iteration count so `++↔--` diverges visibly.",
 	"int_compound_assign": "Pick operands where the compound op's direction matters and assert the exact accumulator value.",
 	"struct_field_zero":   "Assert the field's effect through the API, not just that the struct is non-nil. If nothing reads the field, delete it.",
+	"float_arith":         "Use inputs where `+ - * /` give different results (avoid 0 and 1) and assert the value within a tight tolerance.",
+	"float_cmp_boundary":  "Test exactly at the threshold so `<` vs `<=` flips the result.",
+	"float_cmp_negate":    "Assert on inputs on both sides of the comparison so a negated one can't pass both.",
+	"chan_op":             "Assert the value received, or that the message arrives (a `select` with a timeout), so a removed send or receive fails rather than hangs.",
+	"switch_case":         "Test an input for each case and assert its distinct result, so dropping a case or swapping two bodies changes the outcome.",
 }
 
 // writeLLMUnkilledGroups renders one offense section (live or uncovered),

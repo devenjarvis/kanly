@@ -25,6 +25,8 @@ func TestMutatedLine(t *testing.T) {
 		{"deletion", "if !ok {", 3, mutation.Mutation{Original: "!", Mutant: ""}, "if ok {", true},
 		{"symbolic original", "\tadd(line, set)", 1, mutation.Mutation{Original: "add(...)", Mutant: ""}, "", false},
 		{"empty original", "return x", 7, mutation.Mutation{Original: "", Mutant: "0"}, "", false},
+		{"dropped case", "\tcase n > 1:", 1, mutation.Mutation{OperatorName: "switch_case", Original: "case n > 1", Mutant: ""}, "", false},
+		{"removed receive", "\treturn <-ch", 8, mutation.Mutation{OperatorName: "chan_op", Original: "<-ch", Mutant: "zero"}, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

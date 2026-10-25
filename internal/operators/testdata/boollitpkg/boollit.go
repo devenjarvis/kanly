@@ -39,8 +39,8 @@ const ConstBool = true
 
 // IfCondLiteral — the `if` condition position does not impose a typed-bool
 // boundary on the predeclared `true` identifier; the type-checker keeps it
-// untyped, and strict-identity excludes untyped-bool positions to keep the
-// wrap call's return type predictable. Expected: 0.
+// untyped, and untyped-bool positions are excluded to keep the wrap call's
+// return type predictable. Expected: 0.
 func IfCondLiteral() int {
 	if true {
 		return 1
@@ -49,8 +49,8 @@ func IfCondLiteral() int {
 }
 
 // MyBool — assignment to a named-bool type fixes the literal's contextual
-// type to MyBool (not types.Bool); the wrap helper returns plain `bool` and
-// could not satisfy a MyBool context, so this is skipped. Expected: 0.
+// type to MyBool (not types.Bool); the wrap helper returns plain `bool`, so
+// the rewrite compares it with true. Expected: 1.
 type MyBool bool
 
 func NamedAssignment() MyBool {

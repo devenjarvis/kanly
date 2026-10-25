@@ -20,4 +20,9 @@ func init() {
 	mutation.Register(ReturnZero{})
 	mutation.Register(BoolLiteral{})
 	mutation.Register(StructFieldZero{})
+	mutation.Register(FloatArith{})
+	mutation.Register(FloatCmpBoundary{})
+	mutation.Register(FloatCmpNegate{})
+	mutation.Register(ChanOp{})
+	mutation.Register(SwitchCase{})
 }

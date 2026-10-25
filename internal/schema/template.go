@@ -37,6 +37,12 @@ type __cInteger interface {
 		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr
 }
 
+// __cFloat constrains the float-operand dispatchers to float32, float64 or a
+// defined type whose underlying type is one of them.
+type __cFloat interface {
+	~float32 | ~float64
+}
+
 // __cBoolean constrains the bool-operand dispatchers to plain bool or any
 // defined type whose underlying type is bool.
 type __cBoolean interface {
@@ -83,7 +89,61 @@ func __cMutInt[T __cInteger](a, b T, op int, mutIDs ...int) T {
 	}
 	panic("__cMutInt: unknown op")
 }
-{{if .IntCmpMuts}}
+{{if .FloatArithMuts}}
+// __cMutFloat executes either the mutant or the original float binary operation.
+// op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
+func __cMutFloat[T __cFloat](a, b T, op int, mutIDs ...int) T {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			switch id {
+{{- range .FloatArithMuts}}
+			case {{.ID}}: return {{mutantExpr .}}
+{{- end}}
+			}
+		}
+	}
+	switch op {
+	case __cAdd:
+		return a + b
+	case __cSub:
+		return a - b
+	case __cMul:
+		return a * b
+	case __cQuo:
+		return a / b
+	}
+	panic("__cMutFloat: unknown op")
+}
+{{end}}{{if .FloatCmpMuts}}
+// __cMutFloatCmp executes either the mutant or the original float comparison.
+// op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
+func __cMutFloatCmp[T __cFloat](a, b T, op int, mutIDs ...int) bool {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			switch id {
+{{- range .FloatCmpMuts}}
+			case {{.ID}}: return {{intCmpExpr .}}
+{{- end}}
+			}
+		}
+	}
+	switch op {
+	case __cLT:
+		return a < b
+	case __cLE:
+		return a <= b
+	case __cGT:
+		return a > b
+	case __cGE:
+		return a >= b
+	case __cEQ:
+		return a == b
+	case __cNE:
+		return a != b
+	}
+	panic("__cMutFloatCmp: unknown op")
+}
+{{end}}{{if .IntCmpMuts}}
 // __cMutIntCmp executes either the mutant or the original integer comparison.
 // op encodes the original operation; mutIDs lists all mutation IDs active at this call site.
 func __cMutIntCmp[T __cInteger](a, b T, op int, mutIDs ...int) bool {
@@ -175,6 +235,46 @@ func __cMutCallSkip(fn func(), mutIDs ...int) {
 	}
 	fn()
 }
+{{end}}{{if .ChanOpMuts}}
+// __cMutRecv receives from ch, or returns the zero value of its element type
+// without touching ch when one of mutIDs is the active mutant. A
+// bidirectional or named channel type unifies with <-chan T.
+func __cMutRecv[T any](ch <-chan T, mutIDs ...int) T {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			var zero T
+			return zero
+		}
+	}
+	return <-ch
+}
+{{end}}{{if .SwitchCaseMuts}}
+// __cMutKeep reports false when one of mutIDs is the active mutant: the
+// switch clause it guards is dropped.
+func __cMutKeep(mutIDs ...int) bool {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			return false
+		}
+	}
+	return true
+}
+
+// __cMutSwap exchanges the clause indices a and b of a rewritten switch when
+// one of mutIDs is the active mutant, so each clause runs the other's body.
+func __cMutSwap(idx, a, b int, mutIDs ...int) int {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			switch idx {
+			case a:
+				return b
+			case b:
+				return a
+			}
+		}
+	}
+	return idx
+}
 {{end}}{{if .StringLitMuts}}
 // __cMutString returns "" for an active mutant, or orig otherwise.
 func __cMutString(orig string, mutIDs ...int) string {
@@ -256,6 +356,29 @@ func __cMutIntLit(orig int, mutIDs ...int) int {
 		}
 	}
 	return orig
+}
+
+// __cMutLitOff returns 1 when one of mutIDs is the active mutant, 0 otherwise.
+// A sized or named integer literal n becomes n*(1>>__cMutLitOff(ids...)) plus
+// one v*(1>>__cMutLitOn(id)) per mutant value v: an untyped constant shifted
+// by a non-constant amount takes its type from the context, so no type name
+// is needed at the call site.
+func __cMutLitOff(mutIDs ...int) uint {
+	for _, id := range mutIDs {
+		if id == __kanlyActiveMutant {
+			return 1
+		}
+	}
+	return 0
+}
+
+// __cMutLitOn returns 0 when id is the active mutant, 1 otherwise; see
+// __cMutLitOff.
+func __cMutLitOn(id int) uint {
+	if id == __kanlyActiveMutant {
+		return 0
+	}
+	return 1
 }
 {{end}}{{if .RetZeroMuts}}
 // __cMutRetZero returns the zero value of T for an active mutant, or orig

@@ -1,2 +1,4 @@
 9dd5b51ab614 equivalent: package flag has no variadic functions, so an argument index is always below the parameter count; the guard only stops a panic if one is added
 647e4a267b3f unreachable: a string literal whose parent is a call expression is one of its arguments, so the loop always returns
+5ca882a0f8e6 equivalent: isFloatType gets nil only for an operand the type checker recorded no type for, which a loaded package never has; the guard only stops a panic on t.Underlying()
+b12f1a983751 equivalent: info.TypeOf(ch) is nil only for an expression the type checker skipped, which a loaded package never has; the guard only stops a panic on t.Underlying()

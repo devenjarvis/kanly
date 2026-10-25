@@ -364,7 +364,7 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 		type rewriteGroup struct {
 			mutIDs []int
 			op     mutation.Operator
-			cand   mutation.Candidate
+			cands  []mutation.Candidate
 		}
 		groups := make(map[groupKey]*rewriteGroup)
 		// nodeGroups lists every group on a node in first-seen order, which
@@ -374,11 +374,12 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 			key := groupKey{node: e.node, dispatcherKey: e.op.DispatcherKey()}
 			g, ok := groups[key]
 			if !ok {
-				g = &rewriteGroup{op: e.op, cand: e.cand}
+				g = &rewriteGroup{op: e.op}
 				groups[key] = g
 				nodeGroups[e.node] = append(nodeGroups[e.node], g)
 			}
 			g.mutIDs = append(g.mutIDs, e.id)
+			g.cands = append(g.cands, e.cand)
 		}
 
 		// When several dispatchers target one node, the shape-specific
@@ -409,9 +410,16 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 			}
 			cur := cursor.Node()
 			for _, g := range gs {
-				c := g.cand
-				c.Node = cur
-				cur = g.op.Rewrite(c, g.mutIDs)
+				cands := make([]mutation.Candidate, len(g.cands))
+				for i, c := range g.cands {
+					c.Node = cur
+					cands[i] = c
+				}
+				if gr, ok := g.op.(mutation.GroupRewriter); ok {
+					cur = gr.RewriteGroup(cands, g.mutIDs)
+				} else {
+					cur = g.op.Rewrite(cands[0], g.mutIDs)
+				}
 			}
 			cursor.Replace(cur)
 			return true

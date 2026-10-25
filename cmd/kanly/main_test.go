@@ -722,6 +722,51 @@ func TestRunCoversCaseExpressions(t *testing.T) {
 	}
 }
 
+// TestRunNewOperatorsChangeBehavior guards against a dispatcher that compiles
+// but does not apply its mutant: newopsample's tests pin every value its
+// float, channel, switch and sized/named literal mutants change, so each one
+// must be killed, and the select case and comma-ok receive left alone.
+func TestRunNewOperatorsChangeBehavior(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/newopsample")
+	var stdout, stderr bytes.Buffer
+	ops := "--operators=float_arith,float_cmp_boundary,float_cmp_negate,chan_op,switch_case,int_literal,bool_literal"
+	if code := run([]string{"--format=json", "--kill-matrix", ops, dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Mutants []struct {
+			Mutation struct {
+				Line     int    `json:"line"`
+				Operator string `json:"operator"`
+				Original string `json:"original"`
+				Mutant   string `json:"mutant"`
+			} `json:"mutation"`
+			Status string `json:"status"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON output: %v\n%s", err, stdout.String())
+	}
+	got := map[string]int{}
+	for _, m := range result.Mutants {
+		got[m.Mutation.Operator]++
+		if m.Status != "killed" {
+			t.Errorf("line %d %s %q→%q: status %s, want killed",
+				m.Mutation.Line, m.Mutation.Operator, m.Mutation.Original, m.Mutation.Mutant, m.Status)
+		}
+	}
+	want := map[string]int{
+		"float_arith": 4, "float_cmp_boundary": 2, "float_cmp_negate": 2,
+		"chan_op": 2, "switch_case": 11, "int_literal": 57, "bool_literal": 2,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mutants by operator: want %v, got %v", want, got)
+	}
+}
+
 // TestRunReportsHealthyPackagesWhenOthersFail guards against one bad package
 // discarding the whole run: the healthy package's results must be reported,
 // each failure listed with the stage it failed in, and the exit code must

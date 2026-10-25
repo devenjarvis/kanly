@@ -26,9 +26,9 @@ func TestBoolLiteralFindsTypedBoolLiterals(t *testing.T) {
 	//   AssignTypedBool:   true (typed var) → 1
 	//   ShortDeclTrue:     true (:= )       → 1
 	//   CallArgTypedBool:  false (arg)      → 1
-	// Skipped: ConstBool (const-decl), IfCondLiteral (untyped if-cond),
-	// NamedAssignment (MyBool context).
-	want := 5
+	//   NamedAssignment:   true (MyBool)    → 1
+	// Skipped: ConstBool (const-decl), IfCondLiteral (untyped if-cond).
+	want := 6
 	if len(candidates) != want {
 		t.Fatalf("expected %d candidates, got %d:\n%+v", want, len(candidates), candidates)
 	}
@@ -50,8 +50,8 @@ func TestBoolLiteralFindsTypedBoolLiterals(t *testing.T) {
 			t.Errorf("unexpected Original %q", c.Original)
 		}
 	}
-	if trues != 3 {
-		t.Errorf("expected 3 true→false candidates, got %d", trues)
+	if trues != 4 {
+		t.Errorf("expected 4 true→false candidates, got %d", trues)
 	}
 	if falses != 2 {
 		t.Errorf("expected 2 false→true candidates, got %d", falses)
@@ -72,10 +72,14 @@ func TestBoolLiteralSkipsForbiddenContexts(t *testing.T) {
 		if !strings.Contains(src, "const ConstBool = true") {
 			t.Errorf("%s: const initializer must survive rewrite:\n%s", path, src)
 		}
-		// Named-bool assignment must not be wrapped — the helper returns plain
-		// bool and would not type-check in MyBool context.
-		if !strings.Contains(src, "var v MyBool = true") {
-			t.Errorf("%s: named-bool initializer must survive rewrite:\n%s", path, src)
+		// The helper returns plain bool; a named-bool context takes the
+		// untyped result of comparing it with true.
+		if !strings.Contains(src, "var v MyBool = (__cMutBoolLit(true, 6) == true)") {
+			t.Errorf("%s: named-bool initializer must be compared with true:\n%s", path, src)
+		}
+		// A plain bool needs no comparison.
+		if !strings.Contains(src, "func ReturnTrue() bool { return __cMutBoolLit(true, 1) }") {
+			t.Errorf("%s: plain bool literal not wrapped in a bare call:\n%s", path, src)
 		}
 		// `if true` keeps the literal untyped; strict-identity excludes it.
 		if !strings.Contains(src, "if true {") {
@@ -95,8 +99,8 @@ func TestBoolLiteralRewriteEmitsMutBoolLit(t *testing.T) {
 	}
 	for path, src := range rew.Files {
 		count := strings.Count(src, "__cMutBoolLit(")
-		if count != 5 {
-			t.Errorf("%s: expected 5 __cMutBoolLit call sites, got %d:\n%s", path, count, src)
+		if count != 6 {
+			t.Errorf("%s: expected 6 __cMutBoolLit call sites, got %d:\n%s", path, count, src)
 		}
 	}
 	if !strings.Contains(rew.Dispatcher, "func __cMutBoolLit(") {
