@@ -28,6 +28,10 @@ type Mutation struct {
 	// changes when the mutated line does. It is the key of a .kanlyignore
 	// entry.
 	Fingerprint string `json:"fingerprint"`
+	// LikelyEquivalent, when set, says why the mutant probably changes no
+	// behaviour a caller sees, such as a zero value returned beside a
+	// non-nil error. Such mutants still count in the score.
+	LikelyEquivalent string `json:"likely_equivalent,omitempty"`
 	// PackageInit marks a mutation in a package-level variable initializer
 	// (outside any function body). It runs once per test process, but Go's
 	// coverage instrumentation never attributes it to a test.

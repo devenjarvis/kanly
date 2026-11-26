@@ -123,6 +123,11 @@ func WriteSARIF(w io.Writer, r Report, toolVersion string) error {
 		if m.Note != "" {
 			text += " " + m.Note + "."
 		}
+		level := "warning"
+		if mut.LikelyEquivalent != "" {
+			text += " Likely equivalent: " + mut.LikelyEquivalent + "."
+			level = "note"
+		}
 		if hint := operatorHints[mut.OperatorName]; hint != "" {
 			text += " " + hint
 		}
@@ -132,7 +137,7 @@ func WriteSARIF(w io.Writer, r Report, toolVersion string) error {
 		occurrences[key]++
 		run.Results = append(run.Results, sarifResult{
 			RuleID:  mut.OperatorName,
-			Level:   "warning",
+			Level:   level,
 			Message: sarifMessage{Text: text},
 			Locations: []sarifLocation{{PhysicalLocation: sarifPhysicalLocation{
 				ArtifactLocation: sarifArtifactLocation{URI: filepath.ToSlash(relPath(mut.File)), URIBaseID: "%SRCROOT%"},

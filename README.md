@@ -185,6 +185,12 @@ de8f2a72b1e7 the larger scanner buffer only matters for diff lines over 64KB; a 
 
 Every mutant carries a fingerprint (`fp` in text and `--format=llm` output, `fingerprint` in JSON). It is derived from the enclosing function, the operator, the change and the text of the mutated line, not from the mutant's ID or line number. Edits elsewhere in the package leave it alone. Editing the mutated line changes it, because the judgement that the mutant is harmless has to be made again. An entry that matches no mutant any more is reported as stale (`Stale .kanlyignore entries` in text and llm output, `stale_ignores` in JSON) so it can be deleted. A malformed line or a missing reason is an error, and so is a mutant ID written where the fingerprint belongs. Accepted mutants count as `Ignored`.
 
+#### Likely equivalent mutants
+
+Some mutants are probably equivalent, and Kanly can tell from the code alone. It marks them instead of dropping them, because the guess can be wrong. Today one kind is marked: a zero-value literal (`0`, `0.0`, `false`, `""`, `nil`) in a `return` statement whose `error` result is anything but the literal `nil`, as in `return 0, fmt.Errorf("empty input")`. Callers almost always ignore the other results when `err != nil`, so `0 → 1` changes nothing they see. Some callers do read them: `io.Reader.Read` returns `n > 0` together with an error. A non-zero value beside an error, such as `return -1, err`, is not marked.
+
+Marked mutants still count in both scores. The text output appends `— likely equivalent: <reason>` to their lines, JSON sets `mutation.likely_equivalent` to the reason, SARIF reports them at level `note`, and `--format=llm` lists them after every other mutant, with the `.kanlyignore` lines that would accept them. Accept one only after checking that no caller uses the value with the error.
+
 ### Using Kanly in CI
 
 ```
@@ -298,7 +304,7 @@ A score gate gives an agent a cheap way out: accepting every survivor in `.kanly
 
 Not every survivor deserves a test, and a model told only to raise the score will write contorted tests for mutants that cannot or should not be killed. The artifact therefore offers three outcomes per mutant: **test it**, **simplify the code** (a survivor often reveals dead code, such as a field that is never read), or **accept it** in [`.kanlyignore`](#accepting-mutants) with a reason. It also asks for tests that check behaviour through the package's API rather than change-detector tests that pin error strings or internal details. Tests that killed nothing are listed, with a warning that this alone is no reason to delete them. The ones that ran a live mutant are marked, since only those point at a weak assertion.
 
-To keep large runs affordable, each mutant takes one line: position within the function snippet, change, fingerprint, and at most five covering tests by short name. Functions with the most mutants come first, since one sharper test there settles the most, and the brief lists at most `--llm-limit` mutants (30 by default), naming the functions it leaves out. The artifact closes with a `kanly --mutant=<fingerprints>` command per package that re-runs only the listed mutants, which is the iterative verify-after-edit loop validated in the same paper, and points at `kanly test` for trying one test against one mutant.
+To keep large runs affordable, each mutant takes one line: position within the function snippet, change, fingerprint, and at most five covering tests by short name. Functions with the most mutants come first, since one sharper test there settles the most, and the brief lists at most `--llm-limit` mutants (30 by default), naming the functions it leaves out. [Likely equivalent mutants](#likely-equivalent-mutants) come after all the others, so the limit drops them first. The artifact closes with a `kanly --mutant=<fingerprints>` command per package that re-runs only the listed mutants, which is the iterative verify-after-edit loop validated in the same paper, and points at `kanly test` for trying one test against one mutant.
 
 ## References
 

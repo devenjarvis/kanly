@@ -16,7 +16,7 @@ Write tests a maintainer would keep: assert on behaviour callers can observe thr
 
 | Total | Killed | Survived | Timeout | NotCovered | NotViable | Score | Score incl. not covered |
 |-------|--------|----------|---------|------------|-----------|-------|-------------------------|
-| 3 | 1 | 1 | 0 | 1 | 0 | 50.0% | 33.3% |
+| 4 | 1 | 2 | 0 | 1 | 0 | 33.3% | 25.0% |
 
 ## Live mutants (covered but not killed)
 
@@ -50,6 +50,20 @@ _No test in the package runs these lines. Add a test that drives the path; almos
 
 - **#3** L3:15 `int_arith` `*` → `/` · fp `7d793037a076`
   - _Hint (`int_arith`): Use inputs where +/-/*/% differ; avoid zero/identity values that mask the operator._
+
+## Likely equivalent mutants
+
+_These mutants probably change nothing a caller can see. They still count in the score. Most are zero values returned beside a non-nil error: callers ignore the other results when `err != nil`, so no reasonable test kills them. If every caller does, accept the mutant with its line below. If a caller uses the value together with the error (as callers of `io.Reader.Read` do), test it like any other mutant._
+
+### example.com/pkg/bar — Parse  (1)
+
+- **#4** bar.go:7:10 `int_literal` `0` → `1` · fp `e4da3b7fbbce` · survived · zero value returned beside a non-nil error
+
+To accept them, add to `.kanlyignore`:
+
+```
+e4da3b7fbbce equivalent: zero value returned beside a non-nil error
+```
 
 ## Tests with identical kill sets
 
