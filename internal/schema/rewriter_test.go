@@ -496,6 +496,8 @@ func TestRewriteMarksZeroValuesBesideError(t *testing.T) {
 		{39, "false"}: "",
 		{45, "0"}:     "",     // a literal with an error result comes before it
 		{49, "0"}:     reason, // package-level function literal
+		{55, "0"}:     reason, // int32 and a named integer type
+		{59, "0"}:     reason, // generic function
 	}
 	for s, w := range want {
 		g, ok := got[s]

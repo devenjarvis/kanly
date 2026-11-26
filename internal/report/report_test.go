@@ -1257,6 +1257,14 @@ func TestLikelyEquivalentMutants(t *testing.T) {
 	if a < 0 || p < 0 || a > p || !strings.Contains(body[p:], "\n000000000002 equivalent: "+reason+"\n") {
 		t.Errorf("want ready .kanlyignore lines per directory, sorted:\n%s", body)
 	}
+	var only bytes.Buffer
+	if err := report.WriteLLM(&only, report.Build(results[1:], nil), report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(only.String(), "_None outside the sections below._") != 2 || strings.Contains(only.String(), "every covered mutant was killed") {
+		t.Errorf("with only likely equivalent mutants left, the live and uncovered sections must not claim none survive:\n%s", only.String())
+	}
+
 	var plain bytes.Buffer
 	if err := report.WriteLLM(&plain, report.Build(results[:1], nil), report.LLMSource{}); err != nil {
 		t.Fatal(err)

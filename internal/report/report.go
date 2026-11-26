@@ -638,7 +638,11 @@ func writeLLMLiveSection(b *strings.Builder, r Report, groups []mutation.Functio
 	b.WriteString("## Live mutants (covered but not killed)\n\n")
 	b.WriteString("_Tests run these lines, but none failed when the mutant was applied. Sharpen an assertion, simplify the code, or accept the mutant._\n\n")
 	if len(groups) == 0 {
-		b.WriteString("_None — every covered mutant was killed._\n\n")
+		if r.Summary.Survived > 0 {
+			b.WriteString("_None outside the sections below._\n\n")
+		} else {
+			b.WriteString("_None — every covered mutant was killed._\n\n")
+		}
 		return
 	}
 	byID := resultsByKey(r.Mutants)
@@ -653,7 +657,11 @@ func writeLLMUncoveredSection(b *strings.Builder, r Report, groups []mutation.Fu
 		b.WriteString("_No test in the package runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation. Code exercised only by another package's tests shows up here too: re-run with `--cross-package` to count those tests before writing new ones._\n\n")
 	}
 	if len(groups) == 0 {
-		b.WriteString("_None — every mutation site is reached by at least one test._\n\n")
+		if r.Summary.NotCovered > 0 {
+			b.WriteString("_None outside the sections below._\n\n")
+		} else {
+			b.WriteString("_None — every mutation site is reached by at least one test._\n\n")
+		}
 		return
 	}
 	byID := resultsByKey(r.Mutants)

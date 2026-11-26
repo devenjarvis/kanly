@@ -48,3 +48,13 @@ func AfterLiteral() (int, bool) {
 var Lit = func() (int, error) {
 	return 0, errBad
 }
+
+type UserID int64
+
+func Sized() (int32, UserID, error) {
+	return 0, 0, errBad
+}
+
+func Generic[T any](v T) (int, T, error) {
+	return 0, v, errBad
+}
