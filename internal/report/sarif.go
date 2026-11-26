@@ -128,6 +128,10 @@ func WriteSARIF(w io.Writer, r Report, toolVersion string) error {
 			text += " Likely equivalent: " + mut.LikelyEquivalent + "."
 			level = "note"
 		}
+		if mut.ErrorMessage {
+			text += " It changes only an error message."
+			level = "note"
+		}
 		if hint := operatorHints[mut.OperatorName]; hint != "" {
 			text += " " + hint
 		}

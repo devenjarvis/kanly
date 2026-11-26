@@ -147,3 +147,37 @@ func TestWriteSARIFLikelyEquivalent(t *testing.T) {
 		t.Errorf("ordinary result: level %q, text %q", res[1].Level, res[1].Message.Text)
 	}
 }
+
+func TestWriteSARIFErrorMessage(t *testing.T) {
+	r := report.Build([]mutation.Result{
+		{Mutation: mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 3, OperatorName: "string_literal", Original: `"bad"`, Mutant: `""`, ErrorMessage: true}, Status: mutation.StatusSurvived},
+		{Mutation: mutation.Mutation{ID: 2, Package: "p", File: "p.go", Line: 4, OperatorName: "string_literal", Original: `"key"`, Mutant: `""`}, Status: mutation.StatusSurvived},
+	}, nil)
+	var buf bytes.Buffer
+	if err := report.WriteSARIF(&buf, r, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	var log struct {
+		Runs []struct {
+			Results []struct {
+				Level   string `json:"level"`
+				Message struct {
+					Text string `json:"text"`
+				} `json:"message"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &log); err != nil {
+		t.Fatal(err)
+	}
+	res := log.Runs[0].Results
+	if len(res) != 2 {
+		t.Fatalf("want 2 results, got %d", len(res))
+	}
+	if res[0].Level != "note" || !strings.Contains(res[0].Message.Text, " It changes only an error message.") {
+		t.Errorf("error-message result: level %q, text %q", res[0].Level, res[0].Message.Text)
+	}
+	if res[1].Level != "warning" || strings.Contains(res[1].Message.Text, "error message.") {
+		t.Errorf("ordinary result: level %q, text %q", res[1].Level, res[1].Message.Text)
+	}
+}

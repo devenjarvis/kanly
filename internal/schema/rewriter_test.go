@@ -510,3 +510,43 @@ func TestRewriteMarksZeroValuesBesideError(t *testing.T) {
 		}
 	}
 }
+
+func TestRewriteMarksErrorMessages(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "testdata/errmsg"))
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.StringLiteral{}}, nil)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	got := map[string]bool{}
+	for _, m := range rew.Mutations {
+		got[m.Original] = m.ErrorMessage
+	}
+	want := map[string]bool{
+		`"not an error constructor"`: false, // a method named Errorf
+		`"plain message"`:            true,
+		`"bad count %d"`:             true,
+		`"wrap: %w"`:                 false, // emptying it drops the wrap
+		`"%s: %w"`:                   false,
+		`"op name"`:                  true,
+		`"nested %d"`:                false, // a Sprintf argument
+		"`raw %d`":                   true,
+		`"local helper"`:             false, // not errors.New itself
+		`"field func"`:               false,
+		`"outer %v"`:                 true,
+		`"inner"`:                    true, // nested inside another constructor
+		`"dot import"`:               true,
+		`"aliased %d"`:               true,
+		`"indexed %[1]w"`:            false,
+		`"flagged %+w"`:              false,
+		`"100%%w done"`:              true,  // %% is a percent sign, not a verb
+		`"con"`:                      false, // part of a larger expression
+		`"cat"`:                      false,
+		`"func literal"`:             false, // called function is not a name
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ErrorMessage by literal:\n got %v\nwant %v", got, want)
+	}
+}

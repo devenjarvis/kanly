@@ -16,7 +16,7 @@ Write tests a maintainer would keep: assert on behaviour callers can observe thr
 
 | Total | Killed | Survived | Timeout | NotCovered | NotViable | Score | Score incl. not covered |
 |-------|--------|----------|---------|------------|-----------|-------|-------------------------|
-| 4 | 1 | 2 | 0 | 1 | 0 | 33.3% | 25.0% |
+| 5 | 1 | 3 | 0 | 1 | 0 | 25.0% | 20.0% |
 
 ## Live mutants (covered but not killed)
 
@@ -50,6 +50,12 @@ _No test in the package runs these lines. Add a test that drives the path; almos
 
 - **#3** L3:15 `int_arith` `*` → `/` · fp `7d793037a076`
   - _Hint (`int_arith`): Use inputs where +/-/*/% differ; avoid zero/identity values that mask the operator._
+
+## Error-message mutants
+
+_Each of these mutants empties a string passed to `errors.New` or `fmt.Errorf`, changing only an error's text. They still count in the score. Do not pin a full message to kill one: check the error with `errors.Is` or `errors.As`, or assert the key part a caller depends on. A message that is only read by people is usually not worth a test; accept it._
+
+- `example.com/pkg/bar`: 1 error-message mutant(s) not killed, and no test in this package checks an error message (fp `1679091c5a88`).
 
 ## Likely equivalent mutants
 

@@ -379,16 +379,21 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 
 	writeLLMPreamble(&b)
 	writeLLMSummary(&b, r.Summary)
-	logic, equivalent := splitLikelyEquivalent(r.Mutants)
+	rest, equivalent := splitLikelyEquivalent(r.Mutants)
+	logic, messages := splitErrorMessages(rest)
+	collapsed, listed := collapseErrorMessages(messages)
 	survivors, uncovered := splitUnkilled(logic)
 	budget := &llmBudget{left: src.Limit, limit: src.Limit > 0}
 	survivors, omittedLive := budget.take(survivors)
 	uncovered, omittedUncovered := budget.take(uncovered)
+	listedGroups, omittedMessages := budget.take(groupUnkilled(listed))
 	equivalentGroups, omittedEquivalent := budget.take(groupUnkilled(equivalent))
 	writeLLMLiveSection(&b, r, survivors, src.FuncRanges, readFile)
 	writeLLMOmitted(&b, "live", omittedLive, src.Limit)
 	writeLLMUncoveredSection(&b, r, uncovered, src.FuncRanges, readFile)
 	writeLLMOmitted(&b, "uncovered", omittedUncovered, src.Limit)
+	writeLLMErrorMessages(&b, r, collapsed, listedGroups)
+	writeLLMOmitted(&b, "error-message", omittedMessages, src.Limit)
 	writeLLMLikelyEquivalent(&b, r, equivalentGroups)
 	writeLLMOmitted(&b, "likely equivalent", omittedEquivalent, src.Limit)
 	if r.FailFast {
@@ -402,7 +407,7 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMExcluded(&b, r.ExcludedTests)
 	writeLLMStale(&b, r.StaleIgnores)
 	writeLLMUnmatched(&b, r.UnmatchedMutants)
-	writeLLMNextIteration(&b, survivors, uncovered)
+	writeLLMNextIteration(&b, survivors, uncovered, listedGroups)
 
 	out := b.String()
 	if _, err := io.WriteString(w, out); err != nil {
@@ -668,6 +673,88 @@ func writeLLMUncoveredSection(b *strings.Builder, r Report, groups []mutation.Fu
 	writeLLMUnkilledGroups(b, groups, byID, funcRanges, readFile)
 }
 
+// splitErrorMessages separates the mutants marked ErrorMessage from the
+// rest, so the brief can list them after the logic mutants.
+func splitErrorMessages(results []mutation.Result) (rest, messages []mutation.Result) {
+	for _, r := range results {
+		if r.Mutation.ErrorMessage {
+			messages = append(messages, r)
+		} else {
+			rest = append(rest, r)
+		}
+	}
+	return rest, messages
+}
+
+// collapsedMessages is a package none of whose error-message mutants was
+// killed, with the fingerprints of those not killed.
+type collapsedMessages struct {
+	pkg string
+	fps []string
+}
+
+// collapseErrorMessages splits error-message mutants by package: where
+// none was killed, no test checks a message and one item stands for them
+// all; elsewhere the unkilled ones are listed one by one.
+func collapseErrorMessages(messages []mutation.Result) (collapsed []collapsedMessages, listed []mutation.Result) {
+	asserted := make(map[string]bool)
+	for _, r := range messages {
+		if r.Status == mutation.StatusKilled || r.Status == mutation.StatusTimeout {
+			asserted[r.Mutation.Package] = true
+		}
+	}
+	byPkg := make(map[string][]string)
+	for _, r := range messages {
+		if r.Status != mutation.StatusSurvived && r.Status != mutation.StatusNotCovered {
+			continue
+		}
+		if asserted[r.Mutation.Package] {
+			listed = append(listed, r)
+			continue
+		}
+		ref := r.Mutation.Fingerprint
+		if ref == "" {
+			ref = strconv.Itoa(r.Mutation.ID)
+		}
+		byPkg[r.Mutation.Package] = append(byPkg[r.Mutation.Package], ref)
+	}
+	for pkg, fps := range byPkg {
+		sort.Strings(fps)
+		collapsed = append(collapsed, collapsedMessages{pkg: pkg, fps: fps})
+	}
+	sort.Slice(collapsed, func(i, j int) bool { return collapsed[i].pkg < collapsed[j].pkg })
+	return collapsed, listed
+}
+
+// writeLLMErrorMessages renders the error-message mutants: one item per
+// package whose tests check no message, then one line per mutant elsewhere.
+func writeLLMErrorMessages(b *strings.Builder, r Report, collapsed []collapsedMessages, groups []mutation.FunctionSurvivors) {
+	if len(collapsed) == 0 && len(groups) == 0 {
+		return
+	}
+	b.WriteString("## Error-message mutants\n\n")
+	b.WriteString("_Each of these mutants empties a string passed to `errors.New` or `fmt.Errorf`, changing only an error's text. They still count in the score. Do not pin a full message to kill one: check the error with `errors.Is` or `errors.As`, or assert the key part a caller depends on. A message that is only read by people is usually not worth a test; accept it._\n\n")
+	for _, c := range collapsed {
+		fmt.Fprintf(b, "- `%s`: %d error-message mutant(s) not killed, and no test in this package checks an error message (fp `%s`).\n", c.pkg, len(c.fps), strings.Join(c.fps, "`, `"))
+	}
+	if len(collapsed) > 0 {
+		b.WriteString("\n")
+	}
+	byID := resultsByKey(r.Mutants)
+	for _, g := range groups {
+		fmt.Fprintf(b, "### %s — %s  (%d)\n\n", g.Package, g.Function, len(g.Mutations))
+		for _, m := range g.Mutations {
+			res := byID[mutantKey{m.Package, m.ID}]
+			fmt.Fprintf(b, "- **#%d** %s:%d:%d `%s` `%s` → `%s`", m.ID, filepath.ToSlash(relPath(m.File)), m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
+			if m.Fingerprint != "" {
+				fmt.Fprintf(b, " · fp `%s`", m.Fingerprint)
+			}
+			fmt.Fprintf(b, " · %s\n", strings.ReplaceAll(string(res.Status), "_", " "))
+		}
+		b.WriteString("\n")
+	}
+}
+
 // writeLLMLikelyEquivalent lists the unkilled mutants marked
 // LikelyEquivalent, one line each without a snippet, with the .kanlyignore
 // lines that would accept them.
@@ -720,11 +807,11 @@ func resultsByKey(results []mutation.Result) map[mutantKey]mutation.Result {
 // writeLLMNextIteration renders the closing instruction pointing at the
 // `--mutant=<ids>` re-verification loop. Skipped when there's nothing to
 // iterate on, so a clean-suite artifact ends on the inventory.
-func writeLLMNextIteration(b *strings.Builder, survived, notCovered []mutation.FunctionSurvivors) {
+func writeLLMNextIteration(b *strings.Builder, lists ...[]mutation.FunctionSurvivors) {
 	// Fingerprints survive edits elsewhere in the package, which renumber
 	// its mutants; an ID is used only for a mutant without one.
 	refsByPkg := make(map[string][]string)
-	for _, groups := range [][]mutation.FunctionSurvivors{survived, notCovered} {
+	for _, groups := range lists {
 		for _, g := range groups {
 			for _, m := range g.Mutations {
 				ref := m.Fingerprint
@@ -864,7 +951,7 @@ func writeLLMZeroKill(b *strings.Builder, r Report) {
 	b.WriteString("**Do not delete these tests on this basis.** Most exercise code with no mutable operators (constructors, wiring, struct tags) or check behaviour Kanly's operators don't change. A test that ran a live mutant above may have a weak assertion; those are marked.\n\n")
 	ranLive := make(map[string]bool)
 	for _, res := range r.Mutants {
-		if res.Status != mutation.StatusSurvived || res.Mutation.LikelyEquivalent != "" {
+		if res.Status != mutation.StatusSurvived || res.Mutation.LikelyEquivalent != "" || res.Mutation.ErrorMessage {
 			continue
 		}
 		for _, t := range res.CoveringTests {
@@ -995,6 +1082,9 @@ func WriteText(w io.Writer, r Report) error {
 			}
 			if m.Mutation.LikelyEquivalent != "" {
 				line += " — likely equivalent: " + m.Mutation.LikelyEquivalent
+			}
+			if m.Mutation.ErrorMessage {
+				line += " — error message"
 			}
 			if _, err := fmt.Fprintln(w, line); err != nil {
 				return err
