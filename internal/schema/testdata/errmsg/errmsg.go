@@ -2,7 +2,9 @@ package errmsg
 
 import (
 	"errors"
+	. "errors"
 	"fmt"
+	f "fmt"
 )
 
 type logger struct{}
@@ -26,5 +28,11 @@ func F(n int, err error) []error {
 		newErr("local helper"),
 		hook{}.fn("field func"),
 		fmt.Errorf("outer %v", errors.New("inner")),
+		New("dot import"),
+		f.Errorf("aliased %d", n),
+		fmt.Errorf("indexed %[1]w", err),
+		fmt.Errorf("flagged %+w", err),
+		fmt.Errorf("100%%w done"),
+		errors.New("con" + "cat"),
 	}
 }

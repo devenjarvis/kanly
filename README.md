@@ -234,7 +234,7 @@ Kanly implements the Mutant Schema Generation (MSG) technique: instead of recomp
 | `chan_op` | `<-ch→zero(T)` (no receive), `ch <- x→⌀` | SDL (Statement Deletion), channel-operation variant |
 | `switch_case` | drop a case clause (its values fall to later clauses or `default`), swap the bodies of adjacent clauses | SDL (Statement Deletion, clause-level); cf. PIT REMOVE\_SWITCH and EXPERIMENTAL\_SWITCH |
 
-A `string_literal` mutant of a literal passed straight to `errors.New` or `fmt.Errorf` is marked as an error message (`— error message` in text output, `mutation.error_message` in JSON, level `note` in SARIF). It changes only an error's text, and a test that pins the text breaks on every rewording. Marked mutants still count in both scores; `--format=llm` lists them after the logic mutants (see [LLM-driven test repair](#llm-driven-test-repair)). A literal that holds `%w` is not marked, because emptying it drops the wrapped error, which `errors.Is` can see.
+A `string_literal` mutant of a literal passed straight to `errors.New` or `fmt.Errorf` is marked as an error message (`— error message` in text output, `mutation.error_message` in JSON, level `note` in SARIF). It changes only an error's text, and a test that pins the text breaks on every rewording. Marked mutants still count in both scores; `--format=llm` lists them after the logic mutants (see [LLM-driven test repair](#llm-driven-test-repair)). A literal that holds a `%w` verb is not marked, because emptying it drops the wrapped error, which `errors.Is` can see.
 
 `string_literal` also skips the help text passed as the `usage` argument to package `flag` (`fs.String("out", "-", "where to write")`): only a test pinning `--help` output could kill it.
 

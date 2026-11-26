@@ -23,7 +23,7 @@ func errorMessageLits(file *ast.File, info *types.Info) map[ast.Node]bool {
 			if !ok || lit.Kind != token.STRING {
 				continue
 			}
-			if !strings.Contains(constant.StringVal(info.Types[lit].Value), "%w") {
+			if !wrapsError(constant.StringVal(info.Types[lit].Value)) {
 				out[lit] = true
 			}
 		}
@@ -33,10 +33,38 @@ func errorMessageLits(file *ast.File, info *types.Info) map[ast.Node]bool {
 }
 
 func isErrorConstructor(info *types.Info, call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
+	var id *ast.Ident
+	switch fun := ast.Unparen(call.Fun).(type) {
+	case *ast.SelectorExpr:
+		id = fun.Sel
+	case *ast.Ident:
+		id = fun
+	default:
 		return false
 	}
-	fn, ok := info.Uses[sel.Sel].(*types.Func)
+	fn, ok := info.Uses[id].(*types.Func)
 	return ok && (fn.FullName() == "errors.New" || fn.FullName() == "fmt.Errorf")
+}
+
+// wrapsError reports whether format holds a %w verb, with any flags,
+// width, precision or argument index between % and w. %% is a literal
+// percent sign.
+func wrapsError(format string) bool {
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			continue
+		}
+		j := i + 1
+		for j < len(format) && strings.IndexByte("+-# 0123456789.*[]", format[j]) >= 0 {
+			j++
+		}
+		if j < len(format) && format[j] == 'w' {
+			return true
+		}
+		if j < len(format) && format[j] == '%' && j == i+1 {
+			j++
+		}
+		i = j - 1
+	}
+	return false
 }

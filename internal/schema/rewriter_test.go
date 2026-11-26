@@ -537,6 +537,13 @@ func TestRewriteMarksErrorMessages(t *testing.T) {
 		`"field func"`:               false,
 		`"outer %v"`:                 true,
 		`"inner"`:                    true, // nested inside another constructor
+		`"dot import"`:               true,
+		`"aliased %d"`:               true,
+		`"indexed %[1]w"`:            false,
+		`"flagged %+w"`:              false,
+		`"100%%w done"`:              true,  // %% is a percent sign, not a verb
+		`"con"`:                      false, // part of a larger expression
+		`"cat"`:                      false,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ErrorMessage by literal:\n got %v\nwant %v", got, want)
