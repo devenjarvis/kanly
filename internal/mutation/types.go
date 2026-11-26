@@ -59,6 +59,10 @@ type Result struct {
 	// Cached is set on a kill reused from an earlier run instead of
 	// re-running the mutant: its code and killing test are unchanged.
 	Cached bool `json:"cached,omitempty"`
+	// ConcurrentKill is set on a kill whose every killing test starts
+	// goroutines or runs parallel subtests: the kill may depend on
+	// goroutine timing and not happen on every run.
+	ConcurrentKill bool `json:"concurrent_kill,omitempty"`
 }
 
 // FuncRange identifies a top-level function's source range, used by the LLM

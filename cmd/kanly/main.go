@@ -887,6 +887,13 @@ func runPackage(ctx context.Context, pkg *source.Package, ops []mutation.Operato
 	if err := confirmVerdicts(results, cfg.verifyKills, rerun); err != nil {
 		return pkgResult{}, &stageError{"mutants", err}
 	}
+	concurrent := make(map[string]bool)
+	for _, s := range suites {
+		for name := range concurrentTests(s.dir) {
+			concurrent[s.resultName(name)] = true
+		}
+	}
+	markConcurrentKills(results, concurrent)
 	cfg.progress.printf("%s: done in %s", pkg.ImportPath, time.Since(start).Round(100*time.Millisecond))
 	kills.update(pkg.ImportPath, killUpdates(results, keys, testHash))
 

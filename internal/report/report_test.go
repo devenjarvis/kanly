@@ -297,15 +297,16 @@ func TestWriteJSONStableFieldNames(t *testing.T) {
 
 func makeLLMResults() []mutation.Result {
 	// A killed mutant, a survivor with one covering-but-not-killing test, a
-	// not-covered mutant, a likely equivalent survivor and an error-message
-	// survivor — exercises every
+	// not-covered mutant, a likely equivalent survivor, an error-message survivor
+	// and a kill by a concurrent test — exercises every
 	// branch of the LLM renderer.
 	return []mutation.Result{
 		{
-			Mutation:      mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, Function: "Add", OperatorName: "int_arith", Original: "+", Mutant: "-"},
-			Status:        mutation.StatusKilled,
-			KillingTests:  []string{"TestAdd"},
-			CoveringTests: []string{"TestAdd", "TestAddSmoke"},
+			Mutation:       mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, Function: "Add", OperatorName: "int_arith", Original: "+", Mutant: "-"},
+			Status:         mutation.StatusKilled,
+			KillingTests:   []string{"TestAdd"},
+			CoveringTests:  []string{"TestAdd", "TestAddSmoke"},
+			ConcurrentKill: true,
 		},
 		{
 			Mutation:      mutation.Mutation{ID: 2, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 14, Function: "Add", OperatorName: "int_literal", Original: "1", Mutant: "0", Fingerprint: "5d41402abc4b"},
@@ -1416,5 +1417,62 @@ func TestErrorMessageMutants(t *testing.T) {
 	}
 	if !strings.Contains(text.String(), "(id 2, fp 000000000002) — error message\n") || strings.Contains(text.String(), "(id 1, fp 000000000001) —") {
 		t.Errorf("text output labels:\n%s", text.String())
+	}
+}
+
+func TestConcurrentKills(t *testing.T) {
+	mut := func(id int, concurrent bool, killers ...string) mutation.Result {
+		return mutation.Result{
+			Mutation:       mutation.Mutation{ID: id, Package: "m/p", Function: "F", File: "/src/p/p.go", Line: id, Column: 3, OperatorName: "int_arith", Original: "+", Mutant: "-", Fingerprint: fmt.Sprintf("%012d", id)},
+			Status:         mutation.StatusKilled,
+			KillingTests:   killers,
+			ConcurrentKill: concurrent,
+		}
+	}
+	r := report.Build([]mutation.Result{
+		mut(1, true, "TestAsync"),
+		mut(2, false, "TestPlain"),
+		mut(3, true, "TestAsync", "other/q.TestRace"),
+	}, nil)
+
+	var text bytes.Buffer
+	if err := report.WriteText(&text, r); err != nil {
+		t.Fatal(err)
+	}
+	want := "\nKilled only by tests that start goroutines or run parallel subtests; the kill may depend on timing (re-check with --verify-kills):\n" +
+		"  /src/p/p.go:1:3 [int_arith] +→- (id 1, fp 000000000001) by TestAsync\n" +
+		"  /src/p/p.go:3:3 [int_arith] +→- (id 3, fp 000000000003) by TestAsync, other/q.TestRace\n"
+	if !strings.Contains(text.String(), want) {
+		t.Errorf("text output lacks the concurrent kills:\n%s\nwant:\n%s", text.String(), want)
+	}
+
+	var llm bytes.Buffer
+	if err := report.WriteLLM(&llm, r, report.LLMSource{ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}); err != nil {
+		t.Fatal(err)
+	}
+	sec := strings.Index(llm.String(), "## Kills that may depend on timing")
+	if sec < 0 {
+		t.Fatalf("llm output lacks the section:\n%s", llm.String())
+	}
+	body := llm.String()[sec:]
+	if next := strings.Index(body[1:], "\n## "); next >= 0 {
+		body = body[:next+1]
+	}
+	if !strings.Contains(body, "- **#1** /src/p/p.go:1:3 `int_arith` `+` → `-` · fp `000000000001` · killed by `TestAsync`\n") ||
+		!strings.Contains(body, "killed by `TestAsync`, `q.TestRace`\n") || strings.Contains(body, "**#2**") {
+		t.Errorf("concurrent kills section:\n%s", body)
+	}
+
+	none := report.Build([]mutation.Result{mut(2, false, "TestPlain")}, nil)
+	text.Reset()
+	llm.Reset()
+	if err := report.WriteText(&text, none); err != nil {
+		t.Fatal(err)
+	}
+	if err := report.WriteLLM(&llm, none, report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text.String(), "Killed only by") || strings.Contains(llm.String(), "depend on timing") {
+		t.Errorf("section rendered without concurrent kills:\n%s\n%s", text.String(), llm.String())
 	}
 }

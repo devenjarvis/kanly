@@ -396,6 +396,7 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMOmitted(&b, "error-message", omittedMessages, src.Limit)
 	writeLLMLikelyEquivalent(&b, r, equivalentGroups)
 	writeLLMOmitted(&b, "likely equivalent", omittedEquivalent, src.Limit)
+	writeLLMConcurrentKills(&b, r)
 	if r.FailFast {
 		b.WriteString("_Test-level analysis skipped: each mutant stopped at its first failing test, so kill sets are incomplete. Run with `--kill-matrix` for it._\n\n")
 	} else {
@@ -790,6 +791,50 @@ func writeLLMLikelyEquivalent(b *strings.Builder, r Report, groups []mutation.Fu
 	}
 }
 
+// concurrentKills returns the kills marked ConcurrentKill, by location.
+func concurrentKills(r Report) []mutation.Result {
+	var out []mutation.Result
+	for _, m := range sortedByLocation(r.Mutants, mutation.StatusKilled) {
+		if m.ConcurrentKill {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// mutantRef is a mutant's ID, followed by its fingerprint when it has one.
+func mutantRef(m mutation.Mutation) string {
+	ref := strconv.Itoa(m.ID)
+	if m.Fingerprint != "" {
+		ref += ", fp " + m.Fingerprint
+	}
+	return ref
+}
+
+// writeLLMConcurrentKills lists the kills that only tests starting
+// goroutines made, which may not repeat on every run.
+func writeLLMConcurrentKills(b *strings.Builder, r Report) {
+	kills := concurrentKills(r)
+	if len(kills) == 0 {
+		return
+	}
+	b.WriteString("## Kills that may depend on timing\n\n")
+	b.WriteString("_Every test that killed these mutants starts goroutines or runs parallel subtests, so the kill may depend on how the goroutines were scheduled and may not happen on every run. Re-check them with `--verify-kills`. If a kill does not hold, make the test wait for the goroutine's result before asserting, instead of writing another test._\n\n")
+	for _, res := range kills {
+		m := res.Mutation
+		fmt.Fprintf(b, "- **#%d** %s:%d:%d `%s` `%s` → `%s`", m.ID, filepath.ToSlash(relPath(m.File)), m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
+		if m.Fingerprint != "" {
+			fmt.Fprintf(b, " · fp `%s`", m.Fingerprint)
+		}
+		names := make([]string, len(res.KillingTests))
+		for i, n := range res.KillingTests {
+			names[i] = shortTestName(n)
+		}
+		fmt.Fprintf(b, " · killed by %s\n", strings.Join(backtickAll(names), ", "))
+	}
+	b.WriteString("\n")
+}
+
 // mutantKey identifies a mutant in a report: IDs are unique per package only.
 type mutantKey struct {
 	pkg string
@@ -1070,13 +1115,9 @@ func WriteText(w io.Writer, r Report) error {
 			return err
 		}
 		for _, m := range muts {
-			id := strconv.Itoa(m.Mutation.ID)
-			if m.Mutation.Fingerprint != "" {
-				id += ", fp " + m.Mutation.Fingerprint
-			}
 			line := fmt.Sprintf("  %s:%d:%d [%s] %s→%s (id %s)",
 				relPath(m.Mutation.File), m.Mutation.Line, m.Mutation.Column,
-				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant, id)
+				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant, mutantRef(m.Mutation))
 			if m.Note != "" {
 				line += " — " + m.Note
 			}
@@ -1144,6 +1185,19 @@ func WriteText(w io.Writer, r Report) error {
 	if len(r.UnmatchedMutants) > 0 {
 		if _, err := fmt.Fprintf(w, "\n--mutant fingerprints matching no mutant (line changed or accepted): %s\n", strings.Join(r.UnmatchedMutants, ", ")); err != nil {
 			return err
+		}
+	}
+
+	if kills := concurrentKills(r); len(kills) > 0 {
+		if _, err := fmt.Fprintln(w, "\nKilled only by tests that start goroutines or run parallel subtests; the kill may depend on timing (re-check with --verify-kills):"); err != nil {
+			return err
+		}
+		for _, m := range kills {
+			if _, err := fmt.Fprintf(w, "  %s:%d:%d [%s] %s→%s (id %s) by %s\n",
+				relPath(m.Mutation.File), m.Mutation.Line, m.Mutation.Column,
+				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant, mutantRef(m.Mutation), strings.Join(m.KillingTests, ", ")); err != nil {
+				return err
+			}
 		}
 	}
 
