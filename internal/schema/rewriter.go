@@ -296,6 +296,7 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 		funcSpans := collectFuncSpans(file)
 		litSpans := collectFileScopeFuncLits(file)
 		caseSpans := collectCaseSpans(pkg.Fset, file)
+		besideErr := zeroBesideError(file, pkg.TypesInfo)
 
 		for _, op := range ops {
 			for _, c := range op.Find(file, pkg.TypesInfo) {
@@ -334,19 +335,24 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 					ignored++
 					continue
 				}
+				var equivalent string
+				if besideErr[c.Node] {
+					equivalent = reasonZeroBesideError
+				}
 				mutations = append(mutations, mutation.Mutation{
-					ID:           mutID,
-					Package:      pkg.ImportPath,
-					File:         filePath,
-					Line:         pos.Line,
-					Column:       pos.Column,
-					Function:     funcName,
-					OperatorName: op.Name(),
-					Original:     c.Original,
-					Mutant:       c.Mutant,
-					Fingerprint:  fp,
-					PackageInit:  funcName == "" && !inSpans(litSpans, c.Pos),
-					CoverLine:    caseStmtLine(caseSpans, c.Pos),
+					ID:               mutID,
+					Package:          pkg.ImportPath,
+					File:             filePath,
+					Line:             pos.Line,
+					Column:           pos.Column,
+					Function:         funcName,
+					OperatorName:     op.Name(),
+					Original:         c.Original,
+					Mutant:           c.Mutant,
+					Fingerprint:      fp,
+					PackageInit:      funcName == "" && !inSpans(litSpans, c.Pos),
+					CoverLine:        caseStmtLine(caseSpans, c.Pos),
+					LikelyEquivalent: equivalent,
 				})
 				entries = append(entries, entry{node: c.Node, cand: c, id: mutID, op: op})
 			}

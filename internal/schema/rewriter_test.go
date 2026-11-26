@@ -459,3 +459,54 @@ func TestRewriteIDsAreStable(t *testing.T) {
 		}
 	}
 }
+
+func TestRewriteMarksZeroValuesBesideError(t *testing.T) {
+	pkg, err := source.Load(relDir(t, "testdata/zeroerr"))
+	if err != nil {
+		t.Fatalf("source.Load: %v", err)
+	}
+	rew, err := schema.Rewrite(pkg, []mutation.Operator{operators.IntLiteral{}, operators.BoolLiteral{}}, nil)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	type site struct {
+		line int
+		orig string
+	}
+	got := map[site]string{}
+	for _, m := range rew.Mutations {
+		s := site{m.Line, m.Original}
+		if prev, ok := got[s]; ok && prev != m.LikelyEquivalent {
+			t.Errorf("line %d %s: mutants disagree: %q vs %q", m.Line, m.Original, prev, m.LikelyEquivalent)
+		}
+		got[s] = m.LikelyEquivalent
+	}
+	const reason = "zero value returned beside a non-nil error"
+	want := map[site]string{
+		{12, "0"}:     reason, // return 0, fmt.Errorf(...)
+		{18, "7"}:     "",     // not a zero value
+		{20, "0"}:     "",     // beside nil
+		{25, "false"}: reason,
+		{25, "0"}:     reason,
+		{27, "true"}:  "",
+		{27, "1"}:     "",
+		{32, "0"}:     reason, // function literal
+		{35, "0"}:     reason, // named results, err may be nil but is not the nil literal
+		{39, "0"}:     "",     // no error result
+		{39, "false"}: "",
+		{45, "0"}:     "",     // a literal with an error result comes before it
+		{49, "0"}:     reason, // package-level function literal
+		{55, "0"}:     reason, // int32 and a named integer type
+		{59, "0"}:     reason, // generic function
+	}
+	for s, w := range want {
+		g, ok := got[s]
+		if !ok {
+			t.Errorf("line %d %s: no mutant", s.line, s.orig)
+			continue
+		}
+		if g != w {
+			t.Errorf("line %d %s: LikelyEquivalent = %q, want %q", s.line, s.orig, g, w)
+		}
+	}
+}

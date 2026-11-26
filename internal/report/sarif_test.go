@@ -112,3 +112,38 @@ func TestWriteSARIF(t *testing.T) {
 		t.Errorf("invocation = %+v", inv)
 	}
 }
+
+func TestWriteSARIFLikelyEquivalent(t *testing.T) {
+	const reason = "zero value returned beside a non-nil error"
+	r := report.Build([]mutation.Result{
+		{Mutation: mutation.Mutation{ID: 1, Package: "p", File: "p.go", Line: 3, OperatorName: "int_literal", Original: "0", Mutant: "1", LikelyEquivalent: reason}, Status: mutation.StatusSurvived},
+		{Mutation: mutation.Mutation{ID: 2, Package: "p", File: "p.go", Line: 4, OperatorName: "int_literal", Original: "2", Mutant: "1"}, Status: mutation.StatusSurvived},
+	}, nil)
+	var buf bytes.Buffer
+	if err := report.WriteSARIF(&buf, r, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	var log struct {
+		Runs []struct {
+			Results []struct {
+				Level   string `json:"level"`
+				Message struct {
+					Text string `json:"text"`
+				} `json:"message"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &log); err != nil {
+		t.Fatal(err)
+	}
+	res := log.Runs[0].Results
+	if len(res) != 2 {
+		t.Fatalf("want 2 results, got %d", len(res))
+	}
+	if res[0].Level != "note" || !strings.Contains(res[0].Message.Text, " Likely equivalent: "+reason+".") {
+		t.Errorf("likely equivalent result: level %q, text %q", res[0].Level, res[0].Message.Text)
+	}
+	if res[1].Level != "warning" || strings.Contains(res[1].Message.Text, "Likely equivalent") {
+		t.Errorf("ordinary result: level %q, text %q", res[1].Level, res[1].Message.Text)
+	}
+}

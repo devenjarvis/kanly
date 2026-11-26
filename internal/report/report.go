@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -378,14 +379,18 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 
 	writeLLMPreamble(&b)
 	writeLLMSummary(&b, r.Summary)
-	survivors, uncovered := splitUnkilled(r.Mutants)
+	logic, equivalent := splitLikelyEquivalent(r.Mutants)
+	survivors, uncovered := splitUnkilled(logic)
 	budget := &llmBudget{left: src.Limit, limit: src.Limit > 0}
 	survivors, omittedLive := budget.take(survivors)
 	uncovered, omittedUncovered := budget.take(uncovered)
+	equivalentGroups, omittedEquivalent := budget.take(groupUnkilled(equivalent))
 	writeLLMLiveSection(&b, r, survivors, src.FuncRanges, readFile)
 	writeLLMOmitted(&b, "live", omittedLive, src.Limit)
 	writeLLMUncoveredSection(&b, r, uncovered, src.FuncRanges, readFile)
 	writeLLMOmitted(&b, "uncovered", omittedUncovered, src.Limit)
+	writeLLMLikelyEquivalent(&b, r, equivalentGroups)
+	writeLLMOmitted(&b, "likely equivalent", omittedEquivalent, src.Limit)
 	if r.FailFast {
 		b.WriteString("_Test-level analysis skipped: each mutant stopped at its first failing test, so kill sets are incomplete. Run with `--kill-matrix` for it._\n\n")
 	} else {
@@ -470,14 +475,33 @@ func splitUnkilled(results []mutation.Result) (survived, notCovered []mutation.F
 		groupByFunction(results, mutation.StatusNotCovered)
 }
 
-// groupByFunction buckets results matching `want` by (package, function) and
+// splitLikelyEquivalent separates the mutants marked LikelyEquivalent from
+// the rest, so the brief can list them after every other mutant.
+func splitLikelyEquivalent(results []mutation.Result) (rest, equivalent []mutation.Result) {
+	for _, r := range results {
+		if r.Mutation.LikelyEquivalent != "" {
+			equivalent = append(equivalent, r)
+		} else {
+			rest = append(rest, r)
+		}
+	}
+	return rest, equivalent
+}
+
+// groupUnkilled groups survived and not-covered results together by
+// function.
+func groupUnkilled(results []mutation.Result) []mutation.FunctionSurvivors {
+	return groupByFunction(results, mutation.StatusSurvived, mutation.StatusNotCovered)
+}
+
+// groupByFunction buckets results with a status in `want` by (package, function) and
 // returns the groups in package-then-function order, each with mutations
 // sorted by line and column.
-func groupByFunction(results []mutation.Result, want mutation.Status) []mutation.FunctionSurvivors {
+func groupByFunction(results []mutation.Result, want ...mutation.Status) []mutation.FunctionSurvivors {
 	type key struct{ pkg, fn string }
 	groups := make(map[key]*mutation.FunctionSurvivors)
 	for _, r := range results {
-		if r.Status != want {
+		if !slices.Contains(want, r.Status) {
 			continue
 		}
 		fn := r.Mutation.Function
@@ -614,7 +638,11 @@ func writeLLMLiveSection(b *strings.Builder, r Report, groups []mutation.Functio
 	b.WriteString("## Live mutants (covered but not killed)\n\n")
 	b.WriteString("_Tests run these lines, but none failed when the mutant was applied. Sharpen an assertion, simplify the code, or accept the mutant._\n\n")
 	if len(groups) == 0 {
-		b.WriteString("_None — every covered mutant was killed._\n\n")
+		if r.Summary.Survived > 0 {
+			b.WriteString("_None outside the sections below._\n\n")
+		} else {
+			b.WriteString("_None — every covered mutant was killed._\n\n")
+		}
 		return
 	}
 	byID := resultsByKey(r.Mutants)
@@ -629,11 +657,50 @@ func writeLLMUncoveredSection(b *strings.Builder, r Report, groups []mutation.Fu
 		b.WriteString("_No test in the package runs these lines. Add a test that drives the path; almost any meaningful assertion on the result will catch the mutation. Code exercised only by another package's tests shows up here too: re-run with `--cross-package` to count those tests before writing new ones._\n\n")
 	}
 	if len(groups) == 0 {
-		b.WriteString("_None — every mutation site is reached by at least one test._\n\n")
+		if r.Summary.NotCovered > 0 {
+			b.WriteString("_None outside the sections below._\n\n")
+		} else {
+			b.WriteString("_None — every mutation site is reached by at least one test._\n\n")
+		}
 		return
 	}
 	byID := resultsByKey(r.Mutants)
 	writeLLMUnkilledGroups(b, groups, byID, funcRanges, readFile)
+}
+
+// writeLLMLikelyEquivalent lists the unkilled mutants marked
+// LikelyEquivalent, one line each without a snippet, with the .kanlyignore
+// lines that would accept them.
+func writeLLMLikelyEquivalent(b *strings.Builder, r Report, groups []mutation.FunctionSurvivors) {
+	if len(groups) == 0 {
+		return
+	}
+	b.WriteString("## Likely equivalent mutants\n\n")
+	b.WriteString("_These mutants probably change nothing a caller can see. They still count in the score. Most are zero values returned beside a non-nil error: callers ignore the other results when `err != nil`, so no reasonable test kills them. If every caller does, accept the mutant with its line below. If a caller uses the value together with the error (as callers of `io.Reader.Read` do), test it like any other mutant._\n\n")
+	byID := resultsByKey(r.Mutants)
+	accept := make(map[string][]string)
+	for _, g := range groups {
+		fmt.Fprintf(b, "### %s — %s  (%d)\n\n", g.Package, g.Function, len(g.Mutations))
+		for _, m := range g.Mutations {
+			res := byID[mutantKey{m.Package, m.ID}]
+			fmt.Fprintf(b, "- **#%d** %s:%d:%d `%s` `%s` → `%s`", m.ID, filepath.ToSlash(relPath(m.File)), m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
+			if m.Fingerprint != "" {
+				fmt.Fprintf(b, " · fp `%s`", m.Fingerprint)
+				file := filepath.ToSlash(filepath.Join(relPath(filepath.Dir(m.File)), ignoreFileName))
+				accept[file] = append(accept[file], m.Fingerprint+" equivalent: "+m.LikelyEquivalent)
+			}
+			fmt.Fprintf(b, " · %s · %s\n", strings.ReplaceAll(string(res.Status), "_", " "), m.LikelyEquivalent)
+		}
+		b.WriteString("\n")
+	}
+	files := make([]string, 0, len(accept))
+	for f := range accept {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		fmt.Fprintf(b, "To accept them, add to `%s`:\n\n```\n%s\n```\n\n", f, strings.Join(accept[f], "\n"))
+	}
 }
 
 // mutantKey identifies a mutant in a report: IDs are unique per package only.
@@ -797,7 +864,7 @@ func writeLLMZeroKill(b *strings.Builder, r Report) {
 	b.WriteString("**Do not delete these tests on this basis.** Most exercise code with no mutable operators (constructors, wiring, struct tags) or check behaviour Kanly's operators don't change. A test that ran a live mutant above may have a weak assertion; those are marked.\n\n")
 	ranLive := make(map[string]bool)
 	for _, res := range r.Mutants {
-		if res.Status != mutation.StatusSurvived {
+		if res.Status != mutation.StatusSurvived || res.Mutation.LikelyEquivalent != "" {
 			continue
 		}
 		for _, t := range res.CoveringTests {
@@ -925,6 +992,9 @@ func WriteText(w io.Writer, r Report) error {
 				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant, id)
 			if m.Note != "" {
 				line += " — " + m.Note
+			}
+			if m.Mutation.LikelyEquivalent != "" {
+				line += " — likely equivalent: " + m.Mutation.LikelyEquivalent
 			}
 			if _, err := fmt.Fprintln(w, line); err != nil {
 				return err

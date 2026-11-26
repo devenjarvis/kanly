@@ -296,8 +296,9 @@ func TestWriteJSONStableFieldNames(t *testing.T) {
 }
 
 func makeLLMResults() []mutation.Result {
-	// A killed mutant, a survivor with one covering-but-not-killing test, and
-	// a not-covered mutant — exercises every branch of the LLM renderer.
+	// A killed mutant, a survivor with one covering-but-not-killing test, a
+	// not-covered mutant and a likely equivalent survivor — exercises every
+	// branch of the LLM renderer.
 	return []mutation.Result{
 		{
 			Mutation:      mutation.Mutation{ID: 1, Package: "example.com/pkg/foo", File: "foo.go", Line: 5, Column: 10, Function: "Add", OperatorName: "int_arith", Original: "+", Mutant: "-"},
@@ -313,6 +314,11 @@ func makeLLMResults() []mutation.Result {
 		{
 			Mutation: mutation.Mutation{ID: 3, Package: "example.com/pkg/bar", File: "bar.go", Line: 3, Column: 15, Function: "Mul", OperatorName: "int_arith", Original: "*", Mutant: "/", Fingerprint: "7d793037a076"},
 			Status:   mutation.StatusNotCovered,
+		},
+		{
+			Mutation:      mutation.Mutation{ID: 4, Package: "example.com/pkg/bar", File: "bar.go", Line: 7, Column: 10, Function: "Parse", OperatorName: "int_literal", Original: "0", Mutant: "1", Fingerprint: "e4da3b7fbbce", LikelyEquivalent: "zero value returned beside a non-nil error"},
+			Status:        mutation.StatusSurvived,
+			CoveringTests: []string{"TestMul"},
 		},
 	}
 }
@@ -1186,5 +1192,110 @@ func TestLLMLimitEdgeCases(t *testing.T) {
 	if !strings.Contains(out, "_12 more live mutant(s) are not listed (`--llm-limit=1`): `m/p:F02` (1), `m/p:F03` (1), ") ||
 		!strings.Contains(out, "`m/p:F11` (1) and 2 more.") || strings.Contains(out, "`m/p:F12`") {
 		t.Errorf("omitted note should name F02 to F11 and count two more:\n%s", out)
+	}
+}
+
+func TestLikelyEquivalentMutants(t *testing.T) {
+	const reason = "zero value returned beside a non-nil error"
+	mut := func(id int, fn string, status mutation.Status, equivalent string) mutation.Result {
+		return mutation.Result{
+			Mutation: mutation.Mutation{ID: id, Package: "m/p", Function: fn, File: "/src/p/p.go", Line: id, Column: 9, OperatorName: "int_literal", Original: "0", Mutant: "1", Fingerprint: fmt.Sprintf("%012d", id), LikelyEquivalent: equivalent},
+			Status:   status,
+		}
+	}
+	results := []mutation.Result{
+		mut(1, "Parse", mutation.StatusSurvived, ""),
+		mut(2, "Parse", mutation.StatusSurvived, reason),
+		mut(3, "Parse", mutation.StatusNotCovered, reason),
+		mut(4, "Parse", mutation.StatusKilled, reason),
+		mut(5, "Other", mutation.StatusSurvived, reason),
+		mut(6, "Other", mutation.StatusSurvived, reason),
+	}
+	results[5].Mutation.File = "/src/a/a.go"
+	r := report.Build(results, nil)
+	if r.Summary.Total != 6 || r.Summary.Survived != 4 || r.Summary.Killed != 1 {
+		t.Errorf("likely equivalent mutants must still count: %+v", r.Summary)
+	}
+	render := func(limit int) string {
+		t.Helper()
+		var buf bytes.Buffer
+		src := report.LLMSource{Limit: limit, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}
+		if err := report.WriteLLM(&buf, r, src); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+
+	all := render(0)
+	sec := strings.Index(all, "## Likely equivalent mutants")
+	if sec < 0 {
+		t.Fatalf("no likely-equivalent section:\n%s", all)
+	}
+	if unc := strings.Index(all, "## Uncovered mutants"); unc < 0 || unc > sec {
+		t.Errorf("likely-equivalent section should follow the uncovered one:\n%s", all)
+	}
+	body := all[sec:]
+	if next := strings.Index(body[1:], "\n## "); next >= 0 {
+		body = body[:next+1]
+	}
+	for _, id := range []string{"**#2**", "**#3**", "**#5**"} {
+		if !strings.Contains(body, id) {
+			t.Errorf("likely-equivalent section lacks %s:\n%s", id, body)
+		}
+		if strings.Contains(all[:sec], id) {
+			t.Errorf("%s is listed before the likely-equivalent section:\n%s", id, all)
+		}
+	}
+	if strings.Contains(body, "**#4**") || strings.Contains(body, "**#1**") {
+		t.Errorf("killed or ordinary mutants in the likely-equivalent section:\n%s", body)
+	}
+	if !strings.Contains(body, "· fp `000000000003` · not covered · "+reason+"\n") {
+		t.Errorf("status missing from the mutant line:\n%s", body)
+	}
+	a := strings.Index(body, "add to `/src/a/.kanlyignore`:\n\n```\n000000000006 equivalent: "+reason+"\n```")
+	p := strings.Index(body, "add to `/src/p/.kanlyignore`:\n\n```\n")
+	if a < 0 || p < 0 || a > p || !strings.Contains(body[p:], "\n000000000002 equivalent: "+reason+"\n") {
+		t.Errorf("want ready .kanlyignore lines per directory, sorted:\n%s", body)
+	}
+	var only bytes.Buffer
+	if err := report.WriteLLM(&only, report.Build(results[1:], nil), report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(only.String(), "_None outside the sections below._") != 2 || strings.Contains(only.String(), "every covered mutant was killed") {
+		t.Errorf("with only likely equivalent mutants left, the live and uncovered sections must not claim none survive:\n%s", only.String())
+	}
+	var single bytes.Buffer
+	if err := report.WriteLLM(&single, report.Build(results[1:2], nil), report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(single.String(), "## Live mutants (covered but not killed)\n\n_Tests run these lines, but none failed when the mutant was applied. Sharpen an assertion, simplify the code, or accept the mutant._\n\n_None outside the sections below._\n") {
+		t.Errorf("one likely equivalent survivor: the live section must not claim none survive:\n%s", single.String())
+	}
+
+	var plain bytes.Buffer
+	if err := report.WriteLLM(&plain, report.Build(results[:1], nil), report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.String(), "Likely equivalent") {
+		t.Errorf("section rendered with no likely equivalent mutants:\n%s", plain.String())
+	}
+	if !strings.Contains(all, "--mutant=000000000001 m/p\n") {
+		t.Errorf("re-run command should list only the ordinary survivor:\n%s", all)
+	}
+
+	limited := render(1)
+	if strings.Contains(limited, "**#2**") || !strings.Contains(limited, "more likely equivalent mutant(s) are not listed") {
+		t.Errorf("limit should reach likely-equivalent mutants last:\n%s", limited)
+	}
+
+	var text bytes.Buffer
+	if err := report.WriteText(&text, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "(id 2, fp 000000000002) — likely equivalent: "+reason+"\n") {
+		t.Errorf("text output lacks the label:\n%s", text.String())
+	}
+	if strings.Contains(text.String(), "(id 1, fp 000000000001) —") {
+		t.Errorf("ordinary mutant labelled:\n%s", text.String())
 	}
 }
