@@ -1264,6 +1264,13 @@ func TestLikelyEquivalentMutants(t *testing.T) {
 	if strings.Count(only.String(), "_None outside the sections below._") != 2 || strings.Contains(only.String(), "every covered mutant was killed") {
 		t.Errorf("with only likely equivalent mutants left, the live and uncovered sections must not claim none survive:\n%s", only.String())
 	}
+	var single bytes.Buffer
+	if err := report.WriteLLM(&single, report.Build(results[1:2], nil), report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(single.String(), "## Live mutants (covered but not killed)\n\n_Tests run these lines, but none failed when the mutant was applied. Sharpen an assertion, simplify the code, or accept the mutant._\n\n_None outside the sections below._\n") {
+		t.Errorf("one likely equivalent survivor: the live section must not claim none survive:\n%s", single.String())
+	}
 
 	var plain bytes.Buffer
 	if err := report.WriteLLM(&plain, report.Build(results[:1], nil), report.LLMSource{}); err != nil {
