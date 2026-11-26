@@ -71,6 +71,12 @@ To accept them, add to `.kanlyignore`:
 e4da3b7fbbce equivalent: zero value returned beside a non-nil error
 ```
 
+## Kills that may depend on timing
+
+_Every test that killed these mutants starts goroutines or runs parallel subtests, so the kill may depend on how the goroutines were scheduled and may not happen on every run. To check one, run its killing test many times against the mutant, `kanly test <pkg> <fp> -run '^TestName$' -count=50`: every run should fail. If some pass, make the test wait for the goroutine's result before asserting, instead of writing another test._
+
+- **#1** foo.go:5:10 `int_arith` `+` → `-` · killed by `TestAdd`
+
 ## Tests with identical kill sets
 
 _None — no two tests share an identical kill set._

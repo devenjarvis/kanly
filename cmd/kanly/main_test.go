@@ -1629,3 +1629,37 @@ func TestRunCrossPackage(t *testing.T) {
 		t.Errorf("excluded_tests = %+v, want orderdep's TestSecond once", both.ExcludedTests)
 	}
 }
+
+// A kill made only by tests that start goroutines is flagged in the report.
+func TestRunFlagsConcurrentKills(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	dir := relDir(t, "../../internal/runner/testdata/concurrentkill")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--format=json", "--operators=int_arith", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run returned %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Mutants []struct {
+			Mutation struct {
+				Function string `json:"function"`
+			} `json:"mutation"`
+			Status         string `json:"status"`
+			ConcurrentKill bool   `json:"concurrent_kill"`
+		} `json:"mutants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	}
+	got := map[string]bool{}
+	for _, m := range result.Mutants {
+		if m.Status != "killed" {
+			t.Errorf("%s: status %s, want killed", m.Mutation.Function, m.Status)
+		}
+		got[m.Mutation.Function] = m.ConcurrentKill
+	}
+	if want := map[string]bool{"Double": true, "Triple": false}; !reflect.DeepEqual(got, want) {
+		t.Errorf("concurrent_kill by function = %v, want %v", got, want)
+	}
+}
