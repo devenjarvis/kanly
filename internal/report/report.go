@@ -824,11 +824,11 @@ func writeLLMConcurrentKills(b *strings.Builder, r Report, limit int) {
 	if r.FailFast {
 		b.WriteString("_Each mutant stopped at its first failing test, so a test without goroutines may kill it too: run with `--kill-matrix` to see every killer._\n\n")
 	}
-	omitted := 0
-	if limit > 0 && len(kills) > limit {
-		kills, omitted = kills[:limit], len(kills)-limit
+	shown := kills
+	if limit > 0 {
+		shown = kills[:min(limit, len(kills))]
 	}
-	for _, res := range kills {
+	for _, res := range shown {
 		m := res.Mutation
 		fmt.Fprintf(b, "- **#%d** %s:%d:%d `%s` `%s` → `%s`", m.ID, filepath.ToSlash(relPath(m.File)), m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
 		if m.Fingerprint != "" {
@@ -841,8 +841,8 @@ func writeLLMConcurrentKills(b *strings.Builder, r Report, limit int) {
 		fmt.Fprintf(b, " · killed by %s\n", strings.Join(backtickAll(names), ", "))
 	}
 	b.WriteString("\n")
-	if omitted > 0 {
-		fmt.Fprintf(b, "_%d more kill(s) like these are not listed (`--llm-limit=%d`)._\n\n", omitted, limit)
+	if n := len(kills) - len(shown); n > 0 {
+		fmt.Fprintf(b, "_%d more kill(s) like these are not listed (`--llm-limit=%d`)._\n\n", n, limit)
 	}
 }
 

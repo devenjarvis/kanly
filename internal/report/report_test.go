@@ -1489,8 +1489,16 @@ func TestConcurrentKills(t *testing.T) {
 	if err := report.WriteLLM(&llm, one, report.LLMSource{Limit: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(llm.String(), "`--kill-matrix`") || !strings.Contains(llm.String(), "**#1**") || strings.Contains(llm.String(), "**#4**") || !strings.Contains(llm.String(), "_1 more kill(s) like these are not listed (`--llm-limit=1`)._") {
+	if !strings.Contains(llm.String(), "_Each mutant stopped at its first failing test, so a test without goroutines may kill it too: run with `--kill-matrix` to see every killer._\n\n- **#1**") || !strings.Contains(llm.String(), "**#1**") || strings.Contains(llm.String(), "**#4**") || !strings.Contains(llm.String(), "_1 more kill(s) like these are not listed (`--llm-limit=1`)._") {
 		t.Errorf("fail-fast, limited llm section:\n%s", llm.String())
+	}
+
+	llm.Reset()
+	if err := report.WriteLLM(&llm, one, report.LLMSource{Limit: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(llm.String(), "**#4**") || strings.Contains(llm.String(), "more kill(s) like these") {
+		t.Errorf("a limit that fits every kill lists them all:\n%s", llm.String())
 	}
 
 	none := report.Build([]mutation.Result{mut(2, false, "TestPlain")}, nil)
