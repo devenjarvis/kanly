@@ -396,7 +396,7 @@ func WriteLLM(w io.Writer, r Report, src LLMSource) error {
 	writeLLMOmitted(&b, "error-message", omittedMessages, src.Limit)
 	writeLLMLikelyEquivalent(&b, r, equivalentGroups)
 	writeLLMOmitted(&b, "likely equivalent", omittedEquivalent, src.Limit)
-	writeLLMConcurrentKills(&b, r)
+	writeLLMConcurrentKills(&b, r, src.Limit)
 	if r.FailFast {
 		b.WriteString("_Test-level analysis skipped: each mutant stopped at its first failing test, so kill sets are incomplete. Run with `--kill-matrix` for it._\n\n")
 	} else {
@@ -812,14 +812,22 @@ func mutantRef(m mutation.Mutation) string {
 }
 
 // writeLLMConcurrentKills lists the kills that only tests starting
-// goroutines made, which may not repeat on every run.
-func writeLLMConcurrentKills(b *strings.Builder, r Report) {
+// goroutines made, which may not repeat on every run, at most limit of
+// them when limit is positive.
+func writeLLMConcurrentKills(b *strings.Builder, r Report, limit int) {
 	kills := concurrentKills(r)
 	if len(kills) == 0 {
 		return
 	}
 	b.WriteString("## Kills that may depend on timing\n\n")
-	b.WriteString("_Every test that killed these mutants starts goroutines or runs parallel subtests, so the kill may depend on how the goroutines were scheduled and may not happen on every run. Re-check them with `--verify-kills`. If a kill does not hold, make the test wait for the goroutine's result before asserting, instead of writing another test._\n\n")
+	b.WriteString("_Every test that killed these mutants starts goroutines or runs parallel subtests, so the kill may depend on how the goroutines were scheduled and may not happen on every run. To check one, run its killing test many times against the mutant, `kanly test <pkg> <fp> -run '^TestName$' -count=50`: every run should fail. If some pass, make the test wait for the goroutine's result before asserting, instead of writing another test._\n\n")
+	if r.FailFast {
+		b.WriteString("_Each mutant stopped at its first failing test, so a test without goroutines may kill it too: run with `--kill-matrix` to see every killer._\n\n")
+	}
+	omitted := 0
+	if limit > 0 && len(kills) > limit {
+		kills, omitted = kills[:limit], len(kills)-limit
+	}
 	for _, res := range kills {
 		m := res.Mutation
 		fmt.Fprintf(b, "- **#%d** %s:%d:%d `%s` `%s` → `%s`", m.ID, filepath.ToSlash(relPath(m.File)), m.Line, m.Column, m.OperatorName, m.Original, m.Mutant)
@@ -833,6 +841,9 @@ func writeLLMConcurrentKills(b *strings.Builder, r Report) {
 		fmt.Fprintf(b, " · killed by %s\n", strings.Join(backtickAll(names), ", "))
 	}
 	b.WriteString("\n")
+	if omitted > 0 {
+		fmt.Fprintf(b, "_%d more kill(s) like these are not listed (`--llm-limit=%d`)._\n\n", omitted, limit)
+	}
 }
 
 // mutantKey identifies a mutant in a report: IDs are unique per package only.
@@ -1189,13 +1200,18 @@ func WriteText(w io.Writer, r Report) error {
 	}
 
 	if kills := concurrentKills(r); len(kills) > 0 {
-		if _, err := fmt.Fprintln(w, "\nKilled only by tests that start goroutines or run parallel subtests; the kill may depend on timing (re-check with --verify-kills):"); err != nil {
+		if _, err := fmt.Fprintln(w, "\nKilled only by tests that start goroutines or run parallel subtests, so the kill may depend on timing. Check one with `kanly test <pkg> <fp> -run <Test> -count=50`:"); err != nil {
 			return err
 		}
 		for _, m := range kills {
 			if _, err := fmt.Fprintf(w, "  %s:%d:%d [%s] %s→%s (id %s) by %s\n",
 				relPath(m.Mutation.File), m.Mutation.Line, m.Mutation.Column,
 				m.Mutation.OperatorName, m.Mutation.Original, m.Mutation.Mutant, mutantRef(m.Mutation), strings.Join(m.KillingTests, ", ")); err != nil {
+				return err
+			}
+		}
+		if r.FailFast {
+			if _, err := fmt.Fprintln(w, "  Each mutant stopped at its first failing test; --kill-matrix shows whether a test without goroutines kills it too."); err != nil {
 				return err
 			}
 		}

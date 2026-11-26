@@ -5,16 +5,19 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"strings"
 
 	"github.com/devenjarvis/kanly/internal/mutation"
 )
 
-// concurrentTests returns the top-level functions in dir's _test.go files
-// whose bodies start goroutines: a go statement, a .Go(...) call
+// concurrentTests returns the test functions in dir's _test.go files whose
+// bodies start goroutines: a go statement, a .Go(...) call
 // (sync.WaitGroup.Go, errgroup) or a .Parallel() call inside a function
 // literal passed to .Run(...). A top-level t.Parallel() alone does not
 // count: it is common, and the test's own steps still run in order. Only
-// the test's own body is read, not the helpers it calls.
+// the test's own body is read, not the helpers it calls, and build
+// constraints are ignored: a name declared in several files counts if any
+// declaration starts goroutines.
 func concurrentTests(dir string) map[string]bool {
 	files, _ := filepath.Glob(filepath.Join(dir, "*_test.go"))
 	out := make(map[string]bool)
@@ -25,7 +28,7 @@ func concurrentTests(dir string) map[string]bool {
 		}
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
-			if ok && fd.Recv == nil && fd.Body != nil && startsGoroutines(fd.Body) {
+			if ok && fd.Recv == nil && fd.Body != nil && strings.HasPrefix(fd.Name.Name, "Test") && startsGoroutines(fd.Body) {
 				out[fd.Name.Name] = true
 			}
 		}

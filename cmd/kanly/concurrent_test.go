@@ -61,7 +61,7 @@ func helper(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := concurrentTests(dir)
-	want := map[string]bool{"TestGo": true, "TestWaitGroupGo": true, "TestParallelSubtests": true, "helper": true}
+	want := map[string]bool{"TestGo": true, "TestWaitGroupGo": true, "TestParallelSubtests": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("concurrentTests = %v, want %v", got, want)
 	}

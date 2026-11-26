@@ -1439,7 +1439,7 @@ func TestConcurrentKills(t *testing.T) {
 	if err := report.WriteText(&text, r); err != nil {
 		t.Fatal(err)
 	}
-	want := "\nKilled only by tests that start goroutines or run parallel subtests; the kill may depend on timing (re-check with --verify-kills):\n" +
+	want := "\nKilled only by tests that start goroutines or run parallel subtests, so the kill may depend on timing. Check one with `kanly test <pkg> <fp> -run <Test> -count=50`:\n" +
 		"  /src/p/p.go:1:3 [int_arith] +→- (id 1, fp 000000000001) by TestAsync\n" +
 		"  /src/p/p.go:3:3 [int_arith] +→- (id 3, fp 000000000003) by TestAsync, other/q.TestRace\n"
 	if !strings.Contains(text.String(), want) {
@@ -1461,6 +1461,36 @@ func TestConcurrentKills(t *testing.T) {
 	if !strings.Contains(body, "- **#1** /src/p/p.go:1:3 `int_arith` `+` → `-` · fp `000000000001` · killed by `TestAsync`\n") ||
 		!strings.Contains(body, "killed by `TestAsync`, `q.TestRace`\n") || strings.Contains(body, "**#2**") {
 		t.Errorf("concurrent kills section:\n%s", body)
+	}
+
+	if strings.Contains(body, "--kill-matrix") {
+		t.Errorf("with every killer known, the section should not ask for --kill-matrix:\n%s", body)
+	}
+
+	// Under fail-fast only the first killer is known, and the limit caps
+	// the list.
+	one := report.Build([]mutation.Result{mut(1, true, "TestAsync"), mut(4, true, "TestAsync")}, nil)
+	one.FailFast = true
+	text.Reset()
+	if err := report.WriteText(&text, report.Build([]mutation.Result{mut(1, true, "TestAsync")}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "(id 1, fp 000000000001) by TestAsync\n") {
+		t.Errorf("a single concurrent kill is not listed:\n%s", text.String())
+	}
+	text.Reset()
+	if err := report.WriteText(&text, one); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "Each mutant stopped at its first failing test; --kill-matrix shows whether a test without goroutines kills it too.\n") {
+		t.Errorf("fail-fast text lacks the --kill-matrix note:\n%s", text.String())
+	}
+	llm.Reset()
+	if err := report.WriteLLM(&llm, one, report.LLMSource{Limit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(llm.String(), "`--kill-matrix`") || !strings.Contains(llm.String(), "**#1**") || strings.Contains(llm.String(), "**#4**") || !strings.Contains(llm.String(), "_1 more kill(s) like these are not listed (`--llm-limit=1`)._") {
+		t.Errorf("fail-fast, limited llm section:\n%s", llm.String())
 	}
 
 	none := report.Build([]mutation.Result{mut(2, false, "TestPlain")}, nil)
