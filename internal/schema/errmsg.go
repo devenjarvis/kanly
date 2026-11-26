@@ -39,8 +39,6 @@ func isErrorConstructor(info *types.Info, call *ast.CallExpr) bool {
 		id = fun.Sel
 	case *ast.Ident:
 		id = fun
-	default:
-		return false
 	}
 	fn, ok := info.Uses[id].(*types.Func)
 	return ok && (fn.FullName() == "errors.New" || fn.FullName() == "fmt.Errorf")
@@ -48,7 +46,7 @@ func isErrorConstructor(info *types.Info, call *ast.CallExpr) bool {
 
 // wrapsError reports whether format holds a %w verb, with any flags,
 // width, precision or argument index between % and w. %% is a literal
-// percent sign.
+// percent sign, with or without flags.
 func wrapsError(format string) bool {
 	for i := 0; i < len(format); i++ {
 		if format[i] != '%' {
@@ -61,7 +59,7 @@ func wrapsError(format string) bool {
 		if j < len(format) && format[j] == 'w' {
 			return true
 		}
-		if j < len(format) && format[j] == '%' && j == i+1 {
+		if j < len(format) && format[j] == '%' {
 			j++
 		}
 		i = j - 1

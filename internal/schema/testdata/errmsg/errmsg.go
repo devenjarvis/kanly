@@ -34,5 +34,6 @@ func F(n int, err error) []error {
 		fmt.Errorf("flagged %+w", err),
 		fmt.Errorf("100%%w done"),
 		errors.New("con" + "cat"),
+		func(s string) error { return nil }("func literal"),
 	}
 }

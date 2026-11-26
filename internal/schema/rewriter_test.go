@@ -544,6 +544,7 @@ func TestRewriteMarksErrorMessages(t *testing.T) {
 		`"100%%w done"`:              true,  // %% is a percent sign, not a verb
 		`"con"`:                      false, // part of a larger expression
 		`"cat"`:                      false,
+		`"func literal"`:             false, // called function is not a name
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ErrorMessage by literal:\n got %v\nwant %v", got, want)

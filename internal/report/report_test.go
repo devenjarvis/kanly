@@ -1383,6 +1383,17 @@ func TestErrorMessageMutants(t *testing.T) {
 		t.Errorf("limit should drop listed error-message mutants but keep collapsed items:\n%s", limited)
 	}
 
+	// Only listed mutants, one not covered: no blank line for an empty
+	// collapsed list, and the status is spelled out.
+	listedOnly := []mutation.Result{mut(4, "m/loud", "Run", mutation.StatusKilled, true), mut(8, "m/loud", "Run", mutation.StatusNotCovered, true)}
+	var lb bytes.Buffer
+	if err := report.WriteLLM(&lb, report.Build(listedOnly, nil), report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lb.String(), "accept it._\n\n### m/loud — Run  (1)\n\n- **#8** /src/m/loud.go:8:5 `string_literal` `\"bad\"` → `\"\"` · fp `000000000008` · not covered\n") {
+		t.Errorf("listed-only error-message section:\n%s", lb.String())
+	}
+
 	var only bytes.Buffer
 	if err := report.WriteLLM(&only, report.Build(results[2:5], nil), report.LLMSource{}); err != nil {
 		t.Fatal(err)

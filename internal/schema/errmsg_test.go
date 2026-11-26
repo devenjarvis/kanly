@@ -14,6 +14,7 @@ func TestWrapsError(t *testing.T) {
 		{"%v", false},
 		{"%%w", false},
 		{"%%%w", true},
+		{"%5%w", false},
 		{"50%", false},
 		{"%", false},
 		{"", false},
