@@ -27,7 +27,7 @@ Coverage says which lines a test runs. Kanly says whether the tests would notice
 
 ## Rules
 
-- Test behaviour a caller can observe. Do not pin full error messages, log text, unexported fields or call order just to kill a mutant: a test that breaks on a harmless refactor costs more than a surviving mutant.
+- Test behaviour a caller can observe. Do not pin full error messages, log text, unexported fields or call order just to kill a mutant: a test that breaks on a harmless refactor costs more than a surviving mutant. The brief lists error-message mutants after the ones that change logic.
 - Never accept a mutant to get past a score threshold. The reason must say why this mutant cannot or should not be killed, specifically enough that a reviewer can check it. "Not worth testing" is not a reason.
 - Do not delete a test because it killed no mutants. Most such tests cover code Kanly has no operator for.
 - An uncovered mutant means no test in its package runs the line. Tests in other packages count only with `--cross-package`; run that before writing a test for code another package's tests already exercise.

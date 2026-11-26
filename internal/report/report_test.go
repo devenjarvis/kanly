@@ -297,7 +297,8 @@ func TestWriteJSONStableFieldNames(t *testing.T) {
 
 func makeLLMResults() []mutation.Result {
 	// A killed mutant, a survivor with one covering-but-not-killing test, a
-	// not-covered mutant and a likely equivalent survivor — exercises every
+	// not-covered mutant, a likely equivalent survivor and an error-message
+	// survivor — exercises every
 	// branch of the LLM renderer.
 	return []mutation.Result{
 		{
@@ -317,6 +318,11 @@ func makeLLMResults() []mutation.Result {
 		},
 		{
 			Mutation:      mutation.Mutation{ID: 4, Package: "example.com/pkg/bar", File: "bar.go", Line: 7, Column: 10, Function: "Parse", OperatorName: "int_literal", Original: "0", Mutant: "1", Fingerprint: "e4da3b7fbbce", LikelyEquivalent: "zero value returned beside a non-nil error"},
+			Status:        mutation.StatusSurvived,
+			CoveringTests: []string{"TestMul"},
+		},
+		{
+			Mutation:      mutation.Mutation{ID: 5, Package: "example.com/pkg/bar", File: "bar.go", Line: 7, Column: 21, Function: "Parse", OperatorName: "string_literal", Original: `"empty input"`, Mutant: `""`, Fingerprint: "1679091c5a88", ErrorMessage: true},
 			Status:        mutation.StatusSurvived,
 			CoveringTests: []string{"TestMul"},
 		},
@@ -1297,5 +1303,107 @@ func TestLikelyEquivalentMutants(t *testing.T) {
 	}
 	if strings.Contains(text.String(), "(id 1, fp 000000000001) —") {
 		t.Errorf("ordinary mutant labelled:\n%s", text.String())
+	}
+}
+
+func TestErrorMessageMutants(t *testing.T) {
+	mut := func(id int, pkg, fn string, status mutation.Status, message bool) mutation.Result {
+		return mutation.Result{
+			Mutation:      mutation.Mutation{ID: id, Package: pkg, Function: fn, File: "/src/" + pkg + ".go", Line: id, Column: 5, OperatorName: "string_literal", Original: `"bad"`, Mutant: `""`, Fingerprint: fmt.Sprintf("%012d", id), ErrorMessage: message},
+			Status:        status,
+			CoveringTests: []string{"TestX"},
+		}
+	}
+	results := []mutation.Result{
+		mut(1, "m/quiet", "Parse", mutation.StatusSurvived, false),
+		mut(2, "m/quiet", "Parse", mutation.StatusSurvived, true),
+		mut(3, "m/quiet", "Load", mutation.StatusNotCovered, true),
+		mut(4, "m/loud", "Run", mutation.StatusKilled, true),
+		mut(5, "m/loud", "Run", mutation.StatusSurvived, true),
+		mut(7, "m/also", "Init", mutation.StatusSurvived, true),
+		mut(6, "m/also", "Init", mutation.StatusSurvived, true),
+	}
+	results[0].CoveringTests = nil
+	r := report.Build(results, map[string][]string{"m/quiet": {"TestX"}})
+	if r.Summary.Total != 7 || r.Summary.Survived != 5 {
+		t.Errorf("error-message mutants must still count: %+v", r.Summary)
+	}
+	render := func(limit int) string {
+		t.Helper()
+		var buf bytes.Buffer
+		src := report.LLMSource{Limit: limit, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}
+		if err := report.WriteLLM(&buf, r, src); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+
+	all := render(0)
+	sec := strings.Index(all, "## Error-message mutants")
+	if sec < 0 {
+		t.Fatalf("no error-message section:\n%s", all)
+	}
+	if unc := strings.Index(all, "## Uncovered mutants"); unc < 0 || unc > sec {
+		t.Errorf("error-message section should follow the uncovered one:\n%s", all)
+	}
+	for _, id := range []string{"**#2**", "**#3**", "**#5**"} {
+		if strings.Contains(all[:sec], id) {
+			t.Errorf("%s is listed before the error-message section:\n%s", id, all)
+		}
+	}
+	body := all[sec:]
+	if next := strings.Index(body[1:], "\n## "); next >= 0 {
+		body = body[:next+1]
+	}
+	// No message in m/quiet was killed: one collapsed item.
+	collapsed := "- `m/also`: 2 error-message mutant(s) not killed, and no test in this package checks an error message (fp `000000000006`, `000000000007`).\n" +
+		"- `m/quiet`: 2 error-message mutant(s) not killed, and no test in this package checks an error message (fp `000000000002`, `000000000003`).\n\n" +
+		"### m/loud — Run  (1)\n\n"
+	if !strings.Contains(body, collapsed) {
+		t.Errorf("m/also and m/quiet should collapse into one sorted item each, before m/loud's list:\n%s", body)
+	}
+	if strings.Contains(body, "**#2**") || strings.Contains(body, "**#3**") {
+		t.Errorf("collapsed mutants are also listed:\n%s", body)
+	}
+	// m/loud has a killed message mutant, so its survivor is listed.
+	if !strings.Contains(body, "- **#5** /src/m/loud.go:5:5 `string_literal` `\"bad\"` → `\"\"` · fp `000000000005` · survived\n") {
+		t.Errorf("m/loud's survivor should be listed:\n%s", body)
+	}
+	if strings.Contains(body, "**#1**") || strings.Contains(body, "**#4**") {
+		t.Errorf("ordinary or killed mutants in the error-message section:\n%s", body)
+	}
+	if !strings.Contains(all, "--mutant=000000000001 m/quiet\n") || !strings.Contains(all, "--mutant=000000000005 m/loud\n") {
+		t.Errorf("re-run commands should name the ordinary and listed mutants only:\n%s", all)
+	}
+	if strings.Contains(all, "`m/quiet.TestX` — ran a live mutant") {
+		t.Errorf("an error-message survivor should not mark a test as running a live mutant:\n%s", all)
+	}
+
+	if limited := render(1); strings.Contains(limited, "**#5**") || !strings.Contains(limited, "more error-message mutant(s) are not listed") || !strings.Contains(limited, "- `m/quiet`: 2 error-message") {
+		t.Errorf("limit should drop listed error-message mutants but keep collapsed items:\n%s", limited)
+	}
+
+	var only bytes.Buffer
+	if err := report.WriteLLM(&only, report.Build(results[2:5], nil), report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(only.String(), "_None outside the sections below._") != 2 || strings.Contains(only.String(), "every covered mutant was killed") {
+		t.Errorf("with only error-message mutants left, the live and uncovered sections must not claim none survive:\n%s", only.String())
+	}
+
+	var plain bytes.Buffer
+	if err := report.WriteLLM(&plain, report.Build(results[:1], nil), report.LLMSource{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.String(), "Error-message mutants") {
+		t.Errorf("section rendered with no error-message mutants:\n%s", plain.String())
+	}
+
+	var text bytes.Buffer
+	if err := report.WriteText(&text, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "(id 2, fp 000000000002) — error message\n") || strings.Contains(text.String(), "(id 1, fp 000000000001) —") {
+		t.Errorf("text output labels:\n%s", text.String())
 	}
 }

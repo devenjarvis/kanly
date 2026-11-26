@@ -297,6 +297,7 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 		litSpans := collectFileScopeFuncLits(file)
 		caseSpans := collectCaseSpans(pkg.Fset, file)
 		besideErr := zeroBesideError(file, pkg.TypesInfo)
+		messages := errorMessageLits(file, pkg.TypesInfo)
 
 		for _, op := range ops {
 			for _, c := range op.Find(file, pkg.TypesInfo) {
@@ -353,6 +354,7 @@ func RewriteWith(pkg *source.Package, ops []mutation.Operator, opts Options) (*R
 					PackageInit:      funcName == "" && !inSpans(litSpans, c.Pos),
 					CoverLine:        caseStmtLine(caseSpans, c.Pos),
 					LikelyEquivalent: equivalent,
+					ErrorMessage:     messages[c.Node],
 				})
 				entries = append(entries, entry{node: c.Node, cand: c, id: mutID, op: op})
 			}
